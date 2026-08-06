@@ -25,9 +25,6 @@
 ;; Number of virtual desktops/tags (1-9)
 (set-tag-count 9)
 
-;; Font for the bar/menus (must be a Nerd Font to show status icons)
-(set-font "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf" 16)
-
 ;;;; ==================== STARTUP COMMANDS ====================
 
 ;; Commands to run when the compositor starts
@@ -42,10 +39,6 @@
 ;; Show date and time in status bar
 (set-show-date #t)
 (set-show-time #t)
-
-;; Dynamic status (wifi, bluetooth, sound icons + clock).
-;; Overrides date/time. The script is run once per second.
-(set-status-cmd "/home/gage/.local/bin/tbwm-status")
 
 ;; Custom status text (if set, replaces date/time)
 ;; Use this from scripts to show anything: battery, wifi, etc.

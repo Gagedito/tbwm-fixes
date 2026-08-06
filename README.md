@@ -6,9 +6,7 @@ compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 - **`tbwm-fixes.patch`** — parche con los arreglos de `tbwm.c`, `config.h`,
   `config.def.h`, `config.mk` e `install.sh`.
 - **`config.scm`** — configuración de ejemplo funcional (bindings, Flatpak,
-  audio, brillo, REPL, TTYs, barra de estado dinámica).
-- **`tbwm-status`** — script para la barra: iconos de WiFi, Bluetooth y sonido
-  + reloj (requiere una Nerd Font).
+  audio, brillo, REPL, TTYs).
 - **`tbwm-audio`** — script para arrancar PipeWire/PipeWire-pulse/WirePlumber
   desde `(on-startup ...)` (tbwm no procesa XDG autostart).
 
@@ -43,15 +41,6 @@ En vez de hardcodear un layout, el layout XKB se compila vía la macro
 - `install.sh` pregunta por el layout y exporta `TBWM_XKB_LAYOUT`.
 - `config.mk` agrega `-DTBWM_XKB_LAYOUT="<layout>"` a `CFLAGS`.
 - `config.h`/`config.def.h` usan `NULL` por defecto (layout del sistema).
-
-### 6. Barra de estado dinámica (`set-status-cmd`)
-- Nueva función Scheme `(set-status-cmd "comando")`: tbwm ejecuta el comando
-  cada segundo y usa su stdout como texto de la barra (estilo dwmblocks). Si el
-  comando no produce salida, conserva el estado anterior.
-- Fix de render UTF-8 en la barra: el texto de estado se decodificaba como
-  bytes sueltos, rompiendo los glifos multi-byte. Ahora usa `utf8_decode()`
-  (mismo mecanismo que los títulos) y el ancho se calcula por glifos, no por
-  bytes. Esto permite iconos Nerd Font.
 
 ## Cómo aplicarlo
 
@@ -100,29 +89,6 @@ Incluye:
 - Volumen/brillo (`XF86Audio*`, `XF86MonBrightness*`) con `wpctl` y
   `brightnessctl`.
 - REPL (`M-S-colon`) y cambio de TTY (`C-A-F1..F12`).
-- Barra de estado dinámica: `(set-status-cmd ...)` con iconos de WiFi,
-  Bluetooth y sonido + reloj (ver `tbwm-status`).
-
-## Barra de estado (tbwm-status)
-
-Para mostrar iconos en la barra:
-
-```scm
-;; Fuente con glifos de iconos (Nerd Font)
-(set-font "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf" 16)
-;; Comando que genera el estado; se ejecuta cada segundo
-(set-status-cmd "/home/tu_usuario/.local/bin/tbwm-status")
-```
-
-El script `tbwm-status` muestra:
-- WiFi (`nmcli`): icono conectado o sin conexión; vacío si la radio está apagada.
-- Bluetooth (`rfkill`): icono si el adaptador está encendido (sin paquete extra;
-  no muestra dispositivos conectados).
-- Sonido (`wpctl`): icono según volumen, silenciado si está muteado.
-- Reloj al final.
-
-Dependencias: Nerd Font para los iconos, `NetworkManager`/`nmcli`, `rfkill`
-(bluez) y `PipeWire`/`wpctl`. Mantén el script rápido (tbwm lo corre 1 vez/seg).
 
 ## Notas del entorno de prueba
 
