@@ -1,0 +1,541 @@
+diff --git a/config.def.h b/config.def.h
+index 0095e7d..8599043 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -57,6 +57,12 @@ static const struct xkb_rule_names xkb_rules = {
+ 	/* example:
+ 	.options = "ctrl:nocaps",
+ 	*/
++	/* Keyboard layout: override at build time with TBWM_XKB_LAYOUT,
++	 * e.g. `TBWM_XKB_LAYOUT=latam make` (the install script prompts). */
++#ifndef TBWM_XKB_LAYOUT
++#define TBWM_XKB_LAYOUT NULL
++#endif
++	.layout = TBWM_XKB_LAYOUT,
+ 	.options = NULL,
+ };
+ 
+diff --git a/config.h b/config.h
+index a52155a..cd62d1b 100644
+--- a/config.h
++++ b/config.h
+@@ -24,8 +24,15 @@ static const MonitorRule monrules[] = {
+ 	{ NULL,       0.55f, 1,      1,    &layouts[0], WL_OUTPUT_TRANSFORM_NORMAL,   -1,  -1 },
+ };
+ 
+-/* Default keyboard XKB rules - empty means system default */
++/* Default keyboard XKB rules - empty means system default.
++ * Override the keyboard layout at build/install time by setting
++ * TBWM_XKB_LAYOUT, e.g. `TBWM_XKB_LAYOUT=latam make` (the install
++ * script prompts for this). */
++#ifndef TBWM_XKB_LAYOUT
++#define TBWM_XKB_LAYOUT NULL
++#endif
+ static const struct xkb_rule_names xkb_rules = {
++	.layout = TBWM_XKB_LAYOUT,
+ 	.options = NULL,
+ };
+ 
+diff --git a/config.mk b/config.mk
+index 9ccea74..f1c4055 100644
+--- a/config.mk
++++ b/config.mk
+@@ -34,3 +34,10 @@ XLIBS = xcb xcb-icccm
+ # To avoid warnings about them, we do not use -std=c99 and instead of using the
+ # gmake default 'CC=c99', we use cc.
+ CC = cc
++
++# Optional keyboard layout override, selectable at install time:
++#   TBWM_XKB_LAYOUT=latam make
++# (Uses CFLAGS because the Makefile redefines TBWMCPPFLAGS after including us.)
++ifdef TBWM_XKB_LAYOUT
++CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
++endif
+diff --git a/install.sh b/install.sh
+index 8a401bc..c941f80 100755
+--- a/install.sh
++++ b/install.sh
+@@ -124,6 +124,20 @@ install_deps() {
+     success "Dependencies installed"
+ }
+ 
++# Ask for the keyboard layout to bake into the compositor
++setup_keyboard_layout() {
++    echo ""
++    echo "Choose a keyboard layout to compile in."
++    echo "  e.g. latam, us, es, de, fr, gb  (empty = system default)"
++    read -r -p "Keyboard layout: " kblayout
++    if [ -n "$kblayout" ]; then
++        export TBWM_XKB_LAYOUT="$kblayout"
++        info "Will build with keyboard layout: $kblayout"
++    else
++        info "Using system default keyboard layout"
++    fi
++}
++
+ # Check wlroots version
+ check_wlroots() {
+     info "Checking wlroots version..."
+@@ -319,6 +333,7 @@ main() {
+     
+     check_not_root
+     detect_distro
++    setup_keyboard_layout
+     
+     # Ask what to do
+     echo ""
+diff --git a/tbwm.c b/tbwm.c
+index a1e049d..d4c3c67 100644
+--- a/tbwm.c
++++ b/tbwm.c
+@@ -505,7 +505,11 @@ static int launcher_active = 0;
+ static char launcher_input[256] = {0};
+ static int launcher_input_len = 0;
+ static int launcher_selection = 0;
+-static char **app_cache = NULL;
++typedef struct {
++	char cmd[256];  /* command to run (full path for flatpak exports) */
++	char name[64];  /* friendly display name; falls back to cmd basename */
++} AppCacheEntry;
++static AppCacheEntry *app_cache = NULL;
+ static int app_cache_count = 0;
+ 
+ /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
+@@ -649,7 +653,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
+ static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
+ 
+ /* REPL state */
+-static int repl_visible = 1;             /* 1 = REPL background/text visible */
++static int repl_visible = 0;             /* 0 = REPL background/text hidden unless active */
+ static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
+ static char repl_input[1024] = {0};      /* current input line */
+ static int repl_input_len = 0;
+@@ -1682,9 +1686,6 @@ cleanup(void)
+ 
+ 	/* Clean up app cache (launcher autocomplete) */
+ 	if (app_cache) {
+-		for (i = 0; i < app_cache_count; i++) {
+-			free(app_cache[i]);
+-		}
+ 		free(app_cache);
+ 		app_cache = NULL;
+ 		app_cache_count = 0;
+@@ -3191,9 +3192,10 @@ void
+ handlesig(int signo)
+ {
+ 	if (signo == SIGCHLD) {
+-		/* Reap children (async-signal-safe) */
+-		while (waitpid(-1, NULL, WNOHANG) > 0);
+-		/* Wake main loop so it can handle reaping/logging */
++		/* Do NOT reap children here: reaping in the handler discards the PID,
++		 * so signal_fd_cb() can no longer match screenshot_pid and reset
++		 * screenshot_mode, leaving the compositor stuck in grab mode forever.
++		 * signal_fd_cb() performs the reaping and state reset in the main loop. */
+ 		if (signal_fd >= 0) {
+ 			uint64_t one = 1;
+ 			ssize_t s = write(signal_fd, &one, sizeof(one));
+@@ -3366,12 +3368,24 @@ inputdevice(struct wl_listener *listener, void *data)
+ 	wlr_seat_set_capabilities(seat, caps);
+ }
+ 
++static int
++launcher_entry_matches(const AppCacheEntry *e)
++{
++	if (launcher_input_len == 0)
++		return 1;
++	if (strncasecmp(e->cmd, launcher_input, launcher_input_len) == 0)
++		return 1;
++	if (e->name[0] && strncasecmp(e->name, launcher_input, launcher_input_len) == 0)
++		return 1;
++	return 0;
++}
++
+ static int
+ launcher_match_count(void)
+ {
+ 	int i, count = 0;
+ 	for (i = 0; i < app_cache_count; i++) {
+-		if (strncmp(app_cache[i], launcher_input, launcher_input_len) == 0)
++		if (launcher_entry_matches(&app_cache[i]))
+ 			count++;
+ 	}
+ 	return count;
+@@ -3382,9 +3396,9 @@ launcher_get_match(int index)
+ {
+ 	int i, count = 0;
+ 	for (i = 0; i < app_cache_count; i++) {
+-		if (strncmp(app_cache[i], launcher_input, launcher_input_len) == 0) {
++		if (launcher_entry_matches(&app_cache[i])) {
+ 			if (count == index)
+-				return app_cache[i];
++				return app_cache[i].cmd;
+ 			count++;
+ 		}
+ 	}
+@@ -6416,62 +6430,7 @@ static const char *default_config_parts[] = {
+ "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
+ "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
+ "\n"
+-";;; === Complete Scheme binding examples ===\n"
+-";; Control and window management\n"
+-"(bind-key \"M-Return\" (lambda () (spawn \"foot\")))\n"
+-"(bind-key \"M-d\" (lambda () (toggle-launcher)))\n"
+-"(bind-key \"M-x\" (lambda () (toggle-appmenu)))\n"
+-"(bind-key \"M-q\" (lambda () (kill-client)))\n"
+-"(bind-key \"M-S-e\" (lambda () (quit)))\n"
+-"\n"
+-";; Focus (vim & arrows)\n"
+-"(bind-key \"M-h\" (lambda () (focus-dir DIR-LEFT)))\n"
+-"(bind-key \"M-j\" (lambda () (focus-dir DIR-DOWN)))\n"
+-"(bind-key \"M-k\" (lambda () (focus-dir DIR-UP)))\n"
+-"(bind-key \"M-l\" (lambda () (focus-dir DIR-RIGHT)))\n"
+-"(bind-key \"M-Left\" (lambda () (focus-dir DIR-LEFT)))\n"
+-"(bind-key \"M-Down\" (lambda () (focus-dir DIR-DOWN)))\n"
+-"(bind-key \"M-Up\" (lambda () (focus-dir DIR-UP)))\n"
+-"(bind-key \"M-Right\" (lambda () (focus-dir DIR-RIGHT)))\n"
+-"\n"
+-";; Swap windows (vim & arrows)\n"
+-"(bind-key \"M-S-h\" (lambda () (swap-dir DIR-LEFT)))\n"
+-"(bind-key \"M-S-j\" (lambda () (swap-dir DIR-DOWN)))\n"
+-"(bind-key \"M-S-k\" (lambda () (swap-dir DIR-UP)))\n"
+-"(bind-key \"M-S-l\" (lambda () (swap-dir DIR-RIGHT)))\n"
+-"(bind-key \"M-S-Left\" (lambda () (swap-dir DIR-LEFT)))\n"
+-"(bind-key \"M-S-Down\" (lambda () (swap-dir DIR-DOWN)))\n"
+-"(bind-key \"M-S-Up\" (lambda () (swap-dir DIR-UP)))\n"
+-"(bind-key \"M-S-Right\" (lambda () (swap-dir DIR-RIGHT)))\n"
+-"\n"
+-";; Move/Resize with mouse or keyboard examples\n"
+-"(bind-mouse \"M-button1\" (lambda () (move-window)))\n"
+-"(bind-mouse \"M-button3\" (lambda () (resize-window)))\n"
+-"(bind-key \"M-S-m\" (lambda () (move-window))) ; example keybinding\n"
+-"(bind-key \"M-S-r\" (lambda () (resize-window))) ; example keybinding\n"
+-"\n"
+-";; Layouts & master area\n"
+-"(bind-key \"M-f\" (lambda () (set-layout \"float\")))\n"
+-"(bind-key \"M-S-\" (lambda () (cycle-layout))) ; use a key you like\n"
+-"(bind-key \"M-h\" (lambda () (inc-mfact -0.05))) ; shrink master (example)\n"
+-"(bind-key \"M-l\" (lambda () (inc-mfact 0.05))) ; grow master (example)\n"
+-"(bind-key \"M-0\" (lambda () (view-all))) ; view all\n"
+-"\n"
+-";; Tagging\n"
+-"(bind-key \"M-1\" (lambda () (view-tag 1)))\n"
+-"(bind-key \"M-S-exclam\" (lambda () (tag-window 1))) ; move to tag 1\n"
+-"\n"
+-";; REPL & reload\n"
+-"(bind-key \"M-S-colon\" (lambda () (toggle-repl)))\n"
+-"(bind-key \"M-S-c\" (lambda () (reload-config)))\n"
+-"(bind-key \"M-S-r\" (lambda () (refresh)))\n"
+-"(bind-key \"M-;\" (lambda () (set-repl-log-level 1))) ; example to set repl log level to INFO\n"
+-"\n"
+-";; Misc: toggle fullscreen/floating, kill, help\n"
+-"(bind-key \"M-f\" (lambda () (toggle-fullscreen)))\n"
+-"(bind-key \"M-S-space\" (lambda () (toggle-floating)))\n"
+-"(bind-key \"M-k\" (lambda () (kill-client)))\n"
+-"(bind-key \"M-h\" (lambda () (help))) ; show help in REPL\n"
++";;; Complete Scheme binding examples removed (duplicated bindings above broke focus keys)\n"
+ "\n"
+ ";; Advanced setters (examples - not necessarily key bound):\n"
+ ";; (set-border-width 2)\n"
+@@ -6664,69 +6623,151 @@ setup_foot_config(void)
+ static int
+ app_compare(const void *a, const void *b)
+ {
+-	return strcmp(*(const char **)a, *(const char **)b);
++	return strcmp(((const AppCacheEntry *)a)->cmd, ((const AppCacheEntry *)b)->cmd);
++}
++
++/* Basename of a command (after the last '/') */
++static const char *
++cmd_basename(const char *cmd)
++{
++	const char *s = strrchr(cmd, '/');
++	return s ? s + 1 : cmd;
++}
++
++/* Extract the first Name= from the [Desktop Entry] section of a .desktop file */
++static void
++desktop_name_from(const char *desktop_path, char *out, size_t out_sz)
++{
++	FILE *f;
++	char line[512];
++	int in_entry = 0;
++
++	out[0] = '\0';
++	f = fopen(desktop_path, "r");
++	if (!f)
++		return;
++	while (fgets(line, sizeof(line), f)) {
++		line[strcspn(line, "\n")] = 0;
++		if (strcmp(line, "[Desktop Entry]") == 0) {
++			in_entry = 1;
++			continue;
++		}
++		if (line[0] == '[') {
++			in_entry = 0;
++			continue;
++		}
++		if (!in_entry)
++			continue;
++		if (strncmp(line, "Name=", 5) == 0) {
++			strncpy(out, line + 5, out_sz - 1);
++			out[out_sz - 1] = '\0';
++			break;
++		}
++	}
++	fclose(f);
++}
++
++static void
++add_bin_dir_to_app_cache(const char *dir, int *capacity, const char *desktop_dir)
++{
++	DIR *d;
++	struct dirent *ent;
++	int i, dup;
++	AppCacheEntry *e;
++
++	d = opendir(dir);
++	if (!d)
++		return;
++
++	while ((ent = readdir(d))) {
++		if (ent->d_name[0] == '.')
++			continue;
++		/* Check for duplicates (by basename of the command) */
++		dup = 0;
++		for (i = 0; i < app_cache_count; i++) {
++			if (strcmp(ent->d_name, cmd_basename(app_cache[i].cmd)) == 0) {
++				dup = 1;
++				break;
++			}
++		}
++		if (dup)
++			continue;
++		if (app_cache_count >= *capacity) {
++			size_t new_capacity = *capacity * 2;
++			AppCacheEntry *tmp = realloc(app_cache, new_capacity * sizeof(AppCacheEntry));
++			if (!tmp) {
++				tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
++				/* stop adding further entries to avoid inconsistent state */
++				break;
++			}
++			app_cache = tmp;
++			*capacity = (int)new_capacity;
++		}
++
++		e = &app_cache[app_cache_count];
++		/* Use full path for explicit export dirs so the binary runs even if
++		 * that dir is not in PATH. */
++		if (desktop_dir) {
++			int n = snprintf(e->cmd, sizeof(e->cmd), "%s/", dir);
++			if (n > 0 && (size_t)n < sizeof(e->cmd))
++				snprintf(e->cmd + n, sizeof(e->cmd) - (size_t)n, "%s", ent->d_name);
++		} else {
++			snprintf(e->cmd, sizeof(e->cmd), "%s", ent->d_name);
++		}
++
++		/* Friendly name from the sibling .desktop file (flatpak exports) */
++		e->name[0] = '\0';
++		if (desktop_dir) {
++			char dp[512];
++			snprintf(dp, sizeof(dp), "%s/%s.desktop", desktop_dir, ent->d_name);
++			desktop_name_from(dp, e->name, sizeof(e->name));
++		}
++		if (!e->name[0])
++			snprintf(e->name, sizeof(e->name), "%.63s", ent->d_name);
++
++		app_cache_count++;
++	}
++	closedir(d);
+ }
+ 
+ void
+ buildappcache(void)
+ {
+ 	char *path, *path_copy, *dir;
+-	DIR *d;
+-	struct dirent *ent;
+ 	int capacity = 256;
+-	int i, j, dup;
+ 
+-	if (app_cache) {
+-		for (i = 0; i < app_cache_count; i++)
+-			free(app_cache[i]);
++	if (app_cache)
+ 		free(app_cache);
+-	}
+ 
+-	app_cache = ecalloc(capacity, sizeof(char *));
++	app_cache = ecalloc(capacity, sizeof(AppCacheEntry));
+ 	app_cache_count = 0;
+ 
+-	path = getenv("PATH");
+-	if (!path)
+-		return;
++	/* Scan flatpak export dirs first so their full-path commands and friendly
++	 * names win over the bare PATH entries for the same binaries. */
++	add_bin_dir_to_app_cache("/var/lib/flatpak/exports/bin", &capacity, "/var/lib/flatpak/exports/share/applications");
++	add_bin_dir_to_app_cache("/usr/share/flatpak/exports/bin", &capacity, "/usr/share/flatpak/exports/share/applications");
++	{
++		const char *home = getenv("HOME");
++		char ubin[256], udesk[256];
++		if (home) {
++			snprintf(ubin, sizeof(ubin), "%s/.local/share/flatpak/exports/bin", home);
++			snprintf(udesk, sizeof(udesk), "%s/.local/share/flatpak/exports/share/applications", home);
++			add_bin_dir_to_app_cache(ubin, &capacity, udesk);
++		}
++	}
+ 
+-	path_copy = strdup(path);
+-	dir = strtok(path_copy, ":");
+-	while (dir) {
+-		d = opendir(dir);
+-		if (d) {
+-			while ((ent = readdir(d))) {
+-				if (ent->d_name[0] == '.')
+-					continue;
+-				/* Check for duplicates */
+-				dup = 0;
+-				for (j = 0; j < app_cache_count; j++) {
+-					if (strcmp(app_cache[j], ent->d_name) == 0) {
+-						dup = 1;
+-						break;
+-					}
+-				}
+-				if (dup)
+-					continue;
+-				if (app_cache_count >= capacity) {
+-					size_t new_capacity = capacity * 2;
+-					char **tmp = realloc(app_cache, new_capacity * sizeof(char *));
+-					if (!tmp) {
+-						 tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
+-						/* stop adding further entries to avoid inconsistent state */
+-						break;
+-					}
+-					app_cache = tmp;
+-					capacity = new_capacity;
+-				}
+-				app_cache[app_cache_count++] = strdup(ent->d_name);
+-			}
+-			closedir(d);
++	path = getenv("PATH");
++	if (path) {
++		path_copy = strdup(path);
++		dir = strtok(path_copy, ":");
++		while (dir) {
++			add_bin_dir_to_app_cache(dir, &capacity, NULL);
++			dir = strtok(NULL, ":");
+ 		}
+-		dir = strtok(NULL, ":");
++		free(path_copy);
+ 	}
+-	free(path_copy);
+ 
+-	qsort(app_cache, app_cache_count, sizeof(char *), app_compare);
++	qsort(app_cache, app_cache_count, sizeof(AppCacheEntry), app_compare);
+ 	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
+ }
+ 
+@@ -6891,6 +6932,7 @@ void
+ togglerepl(const Arg *arg)
+ {
+ 	repl_input_active = !repl_input_active;
++	repl_visible = repl_input_active;
+ 	repl_input[0] = '\0';
+ 	repl_input_len = 0;
+ 	updatebars();
+@@ -7068,12 +7110,20 @@ load_applications(void)
+ 	/* Scan system applications */
+ 	scan_desktop_dir("/usr/share/applications");
+ 	scan_desktop_dir("/usr/local/share/applications");
++
++	/* Scan flatpak exports (system-wide) so flatpak apps appear in the app menu */
++	scan_desktop_dir("/var/lib/flatpak/exports/share/applications");
++	scan_desktop_dir("/usr/share/flatpak/exports/share/applications");
+ 	
+ 	/* Scan user applications */
+ 	home = getenv("HOME");
+ 	if (home) {
+ 		snprintf(local_apps, sizeof(local_apps), "%s/.local/share/applications", home);
+ 		scan_desktop_dir(local_apps);
++
++		/* Flatpak apps installed per-user */
++		snprintf(local_apps, sizeof(local_apps), "%s/.local/share/flatpak/exports/share/applications", home);
++		scan_desktop_dir(local_apps);
+ 	}
+ 	
+ 	/* Sort apps and categories */
+@@ -7412,9 +7462,11 @@ replkey(xkb_keysym_t sym)
+ {
+ 	if (sym == XKB_KEY_Escape) {
+ 		repl_input_active = 0;
++		repl_visible = 0;
+ 		repl_input[0] = '\0';
+ 		repl_input_len = 0;
+ 		updatebars();
++		updaterepl();
+ 		return 1;
+ 	}
+ 
+@@ -7643,37 +7695,37 @@ updatebar(Monitor *m)
+ 		if (launcher_input_len > 0) {
+ 			shown = 0;
+ 			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
+-				/* Prefix match */
+-				if (strncmp(app_cache[i], launcher_input, launcher_input_len) == 0) {
+-					len = strlen(app_cache[i]);
+-					fits = (x + (len + 3) * cell_width) <= width;
+-					if (!fits && shown > 0)
+-						break;
++				/* Prefix match on command or friendly name */
++				if (!launcher_entry_matches(&app_cache[i]))
++					continue;
++				len = strlen(app_cache[i].name);
++				fits = (x + (len + 3) * cell_width) <= width;
++				if (!fits && shown > 0)
++					break;
+ 
+-					/* Highlight selected suggestion */
+-					if (shown == launcher_selection) {
+-						bg = RGB_TO_ARGB(cfg_bar_text_color);
+-						fg = RGB_TO_ARGB(cfg_bar_color);
+-						/* Draw background */
+-						for (py = 0; py < cell_height; py++) {
+-							for (px = x; px < x + (len + 2) * cell_width && px < width; px++) {
+-								pixels[py * width + px] = bg;
+-							}
++				/* Highlight selected suggestion */
++				if (shown == launcher_selection) {
++					bg = RGB_TO_ARGB(cfg_bar_text_color);
++					fg = RGB_TO_ARGB(cfg_bar_color);
++					/* Draw background */
++					for (py = 0; py < cell_height; py++) {
++						for (px = x; px < x + (len + 2) * cell_width && px < width; px++) {
++							pixels[py * width + px] = bg;
+ 						}
+-					} else {
+-						fg = RGB_TO_ARGB(cfg_bar_text_color);
+ 					}
++				} else {
++					fg = RGB_TO_ARGB(cfg_bar_text_color);
++				}
+ 
+-					render_char_to_buffer(pixels, width, cell_height, x, 0, '[', fg);
++				render_char_to_buffer(pixels, width, cell_height, x, 0, '[', fg);
++				x += cell_width;
++				for (j = 0; app_cache[i].name[j] && x < width - cell_width * 2; j++) {
++					render_char_to_buffer(pixels, width, cell_height, x, 0, app_cache[i].name[j], fg);
+ 					x += cell_width;
+-					for (j = 0; app_cache[i][j] && x < width - cell_width * 2; j++) {
+-						render_char_to_buffer(pixels, width, cell_height, x, 0, app_cache[i][j], fg);
+-						x += cell_width;
+-					}
+-					render_char_to_buffer(pixels, width, cell_height, x, 0, ']', fg);
+-					x += cell_width * 2;
+-					shown++;
+ 				}
++				render_char_to_buffer(pixels, width, cell_height, x, 0, ']', fg);
++				x += cell_width * 2;
++				shown++;
+ 			}
+ 		}
+ 	} else {

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Start the PipeWire audio stack if it is not already running.
+# Used from TurboWM's (on-startup ...) because tbwm does not process
+# XDG autostart entries (only desktop environments like Plasma do).
+
+if ! pgrep -x pipewire >/dev/null 2>&1; then
+    /usr/bin/pipewire >/dev/null 2>&1 &
+fi
+
+sleep 0.5
+
+if ! pgrep -x pipewire-pulse >/dev/null 2>&1; then
+    /usr/bin/pipewire-pulse >/dev/null 2>&1 &
+fi
+
+if ! pgrep -x wireplumber >/dev/null 2>&1; then
+    /usr/bin/wireplumber >/dev/null 2>&1 &
+fi
