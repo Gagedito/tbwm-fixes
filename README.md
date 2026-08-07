@@ -92,9 +92,17 @@ fallaba al compilar wlroots desde source con `meson: command not found`.
 - El layout de teclado ya no se pide a ciegas: `install.sh` **detecta el layout
   activo** del sistema/DE (KDE `kxkbrc`, `/etc/default/keyboard`, config de Xorg,
   `localectl` en systemd, `gsettings` en GNOME, y `setxkbmap` solo en sesión X11
-  pura) y lo ofrece como valor por defecto (`Enter` lo acepta, `none`/`system
+  pura) y lo ofrece como valor por defecto (`Enter` lo acepta,   `none`/`system
   default` usa el default del sistema). Valida la entrada para que un valor con
   espacios no rompa el flag `-DTBWM_XKB_LAYOUT=\"...\"`.
+
+### 11. install.sh: instala las herramientas de captura (grim, slurp, wl-clipboard)
+La config por defecto de tbwm genera bindings de captura con `grim` + `slurp` +
+`wl-copy`, pero `install.sh` no instalaba esas herramientas: en una instalación
+limpia `Print`/`S-Print` fallaban con `grim: command not found` (y no se podía
+sacar ninguna captura). Ahora `install.sh` los instala en las dependencias de
+todas las distros (Arch/Artix, Debian, Fedora, openSUSE, Void) y los lista en el
+mensaje de "unknown distro".
 
 ## Menú de red (WiFi + Bluetooth)
 

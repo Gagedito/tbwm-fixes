@@ -74,10 +74,10 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..6a97f03 100755
+index 8a401bc..05fa5e1 100755
 --- a/install.sh
 +++ b/install.sh
-@@ -46,10 +46,16 @@ install_deps() {
+@@ -46,13 +46,19 @@ install_deps() {
      info "Installing dependencies..."
      
      case "$DISTRO" in
@@ -97,8 +97,57 @@ index 8a401bc..6a97f03 100755
 +                "$WLROOTS_PKG" wayland wayland-protocols libinput libxkbcommon \
                  pixman freetype2 pango cairo libxcb xcb-util-wm \
                  xorg-xwayland meson ninja gcc pkgconf make git \
-                 fontconfig ttf-font || true
-@@ -124,6 +130,95 @@ install_deps() {
+-                fontconfig ttf-font || true
++                fontconfig ttf-font grim slurp wl-clipboard || true
+             ;;
+         debian|ubuntu|pop|linuxmint|elementary)
+             # Debian-based - note: libwlroots-dev often not available or too old
+@@ -65,7 +71,7 @@ install_deps() {
+                 libdrm-dev libgbm-dev libseat-dev \
+                 libdisplay-info-dev libliftoff-dev hwdata \
+                 meson ninja-build gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard || true
+             ;;
+         fedora|rhel|centos|rocky|almalinux)
+             # Fedora/RHEL-based
+@@ -75,7 +81,7 @@ install_deps() {
+                 freetype-devel pango-devel cairo-devel \
+                 libxcb-devel xcb-util-wm-devel xorg-x11-server-Xwayland \
+                 meson ninja-build gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard || true
+             ;;
+         opensuse*|suse*)
+             # openSUSE
+@@ -84,7 +90,7 @@ install_deps() {
+                 libinput-devel libxkbcommon-devel libpixman-1-0-devel \
+                 freetype2-devel pango-devel cairo-devel \
+                 libxcb-devel xwayland meson ninja gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard || true
+             ;;
+         void)
+             # Void Linux
+@@ -93,7 +99,8 @@ install_deps() {
+                 libinput-devel libxkbcommon-devel pixman-devel \
+                 freetype-devel pango-devel cairo-devel \
+                 libxcb-devel xcb-util-wm-devel xorg-server-xwayland \
+-                meson ninja gcc pkg-config make git fontconfig || true
++                meson ninja gcc pkg-config make git fontconfig \
++                grim slurp wl-clipboard || true
+             ;;
+         gentoo)
+             warn "Gentoo detected. Please ensure you have the following USE flags enabled:"
+@@ -112,6 +119,7 @@ install_deps() {
+             echo "  - libinput, libxkbcommon"
+             echo "  - freetype2, pango, cairo, pixman"
+             echo "  - libxcb, xcb-util-wm"
++            echo "  - grim, slurp, wl-clipboard (for screenshots)"
+             echo "  - xwayland (optional, for X11 apps)"
+             echo ""
+             read -p "Continue anyway? [y/N] " -n 1 -r
+@@ -124,6 +132,95 @@ install_deps() {
      success "Dependencies installed"
  }
  
@@ -194,7 +243,7 @@ index 8a401bc..6a97f03 100755
  # Check wlroots version
  check_wlroots() {
      info "Checking wlroots version..."
-@@ -170,8 +265,8 @@ build_wlroots() {
+@@ -170,8 +267,8 @@ build_wlroots() {
      
      # Install meson build deps
      case "$DISTRO" in
@@ -205,7 +254,7 @@ index 8a401bc..6a97f03 100755
                  meson ninja hwdata libdisplay-info libliftoff seatd || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
-@@ -195,6 +290,9 @@ build_wlroots() {
+@@ -195,6 +292,9 @@ build_wlroots() {
      cd wlroots
      
      info "Configuring..."
@@ -215,7 +264,7 @@ index 8a401bc..6a97f03 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -319,6 +417,7 @@ main() {
+@@ -319,6 +419,7 @@ main() {
      
      check_not_root
      detect_distro
