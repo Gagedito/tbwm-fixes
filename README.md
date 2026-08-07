@@ -150,9 +150,15 @@ pantalla (p. ej. GPU Screen Recorder) pasa por el portal
 - **`tbwm.c`**: en `main()` arranca un bus de sesión automáticamente si no hay
   `DBUS_SESSION_BUS_ADDRESS` (típico al lanzar desde TTY): spawna
   `dbus-launch --sh-syntax`, exporta la dirección y el pid, y lo apaga en
-  `cleanup()`. Así **tbwm funciona tal cual**, sin launcher.
+  `cleanup()`. Así **tbwm funciona tal cual**, sin launcher. Además exporta
+  `XDG_CURRENT_DESKTOP=tbwm` (si no está definida): el frontend de
+  xdg-desktop-portal elige su backend comparando ese valor con el `UseIn=` de
+  cada `.portal`; sin él no se seleccionaba el backend `wlr` (el único que
+  implementa ScreenCast/captura en Wayland) y compartir pantalla (Discord,
+  Brave) fallaba en silencio.
 - `install.sh` instala `xdg-desktop-portal xdg-desktop-portal-gtk
-  xdg-desktop-portal-wlr`.
+  xdg-desktop-portal-wlr` y añade `tbwm` al `UseIn=` de `wlr.portal` para que
+  el frontend elija el backend wlr para ScreenCast.
 - (Opcional) Launcher `tbwm-session`: arranca la sesión con
   `dbus-run-session`/`dbus-launch` antes de tbwm. Ya no es necesario con el
   auto-start del propio tbwm, pero no estorba si se prefiere acotar el ciclo

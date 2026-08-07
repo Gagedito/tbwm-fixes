@@ -74,7 +74,7 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..e50fff7 100755
+index 8a401bc..965399e 100755
 --- a/install.sh
 +++ b/install.sh
 @@ -46,13 +46,23 @@ install_deps() {
@@ -303,12 +303,28 @@ index 8a401bc..e50fff7 100755
  Type=Application
  EOF
      success "Installed session file"
-@@ -307,6 +431,37 @@ exec /usr/local/bin/tbwm.bin "$@"
+@@ -307,6 +431,53 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
 +
 +    enable_net_services
++
++    # Make the XDG desktop portal frontend pick xdg-desktop-portal-wlr for
++    # screen capture (ScreenCast). The frontend matches XDG_CURRENT_DESKTOP
++    # (tbwm sets it to "tbwm") against each .portal file's UseIn= list, so
++    # "tbwm" must be in that list for the wlr backend to be chosen.
++    WLR_PORTAL="/usr/share/xdg-desktop-portal/portals/wlr.portal"
++    if [ -f "$WLR_PORTAL" ]; then
++        if ! grep -q 'UseIn=.*tbwm' "$WLR_PORTAL"; then
++            sudo sed -i 's/^UseIn=\(.*\)$/UseIn=tbwm;\1/' "$WLR_PORTAL"
++            success "Added tbwm to UseIn in wlr.portal"
++        else
++            info "tbwm already in UseIn of wlr.portal"
++        fi
++    else
++        warn "wlr.portal not found; screen capture (ScreenCast) may not work"
++    fi
 +}
 +
 +# Enable NetworkManager and Bluetooth services for the WiFi/Bluetooth menu
@@ -341,7 +357,7 @@ index 8a401bc..e50fff7 100755
  }
  
  # Main
-@@ -319,6 +474,7 @@ main() {
+@@ -319,6 +490,7 @@ main() {
      
      check_not_root
      detect_distro
@@ -349,7 +365,7 @@ index 8a401bc..e50fff7 100755
      
      # Ask what to do
      echo ""
-@@ -356,7 +512,8 @@ main() {
+@@ -356,7 +528,8 @@ main() {
      echo ""
      echo "To use TurboWM:"
      echo "  • Log out and select 'TurboWM' from your display manager"
@@ -453,7 +469,7 @@ index 0000000..3cefbec
 +    exec /usr/local/bin/tbwm "$@"
 +fi
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..0d605b6 100644
+index a1e049d..7c89d56 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -17,6 +17,7 @@
@@ -2629,10 +2645,16 @@ index a1e049d..0d605b6 100644
  				}
  			}
  		}
-@@ -9561,6 +10888,9 @@ main(int argc, char *argv[])
+@@ -9561,6 +10888,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  
++	/* The XDG desktop portal frontend picks its backend (screen capture,
++	 * etc.) by matching XDG_CURRENT_DESKTOP against each .portal file's
++	 * UseIn= list. Without it, no backend is chosen for screen casting. */
++	if (!getenv("XDG_CURRENT_DESKTOP"))
++		setenv("XDG_CURRENT_DESKTOP", "tbwm", 1);
++
 +	/* Flatpak apps and XDG desktop portals need a session D-Bus bus */
 +	start_session_dbus();
 +
