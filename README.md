@@ -8,10 +8,11 @@ compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 - **`config.scm`** — configuración de ejemplo funcional (bindings, Flatpak,
   audio, brillo, REPL, TTYs, menú de red).
 - **`tbwm-audio`** — script para arrancar PipeWire/PipeWire-pulse/WirePlumber
-  desde `(on-startup ...)` (tbwm no procesa XDG autostart). Si a los 2s solo
-  existe el sink "Dummy Output" (WirePlumber arrancó antes de que la tarjeta de
-  sonido/udev estuviera lista), lo reinicia una vez para detectar el hardware
-  real. Funciona con cualquier tarjeta de sonido.
+  desde `(on-startup ...)` (tbwm no procesa XDG autostart). Si el stack queda
+  solo con el sink "Dummy Output" (WirePlumber arrancó antes de que la tarjeta
+  de sonido/udev estuviera lista), reinicia WirePlumber hasta 6 veces con una
+  espera de 2s hasta detectar el hardware real. Funciona con cualquier tarjeta
+  de sonido.
 - **`tbwm-network`** — script para el menú de red (WiFi + Bluetooth): lista
   redes y dispositivos disponibles/conectados y genera los comandos para
   conectarse o desconectarse.
