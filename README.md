@@ -61,6 +61,20 @@ coincide exactamente con lo que dibuja el render.
 El parche agrega un menú combinado de WiFi y Bluetooth accesible desde el botón
 `[N]` en la barra o con `M-n`. Detalles en la sección "Menú de red" más abajo.
 
+### 8. Menú de red: el resaltado sigue al mouse
+Igual que el menú de apps, el menú de red actualiza la fila resaltada según la
+posición del mouse (`motionnotify`), con comprobación de límites y sin interferir
+con el modo contraseña.
+
+### 9. Captura de pantalla: selección con slurp
+En modo `spawn-grab`, `motionnotify` reenviaba el movimiento del puntero al seat
+sin enviar `wlr_seat_pointer_notify_enter` antes; wlroots solo entrega
+motion/button a la superficie con foco de puntero, así que la superficie de slurp
+nunca recibía los eventos y no se podía seleccionar región (solo se veía el
+overlay y Esc cancelaba). Ahora se recalcula la superficie bajo el cursor y se le
+da foco de puntero si cambió (Enter y luego Motion), de modo que `S-Print`
+(grim + slurp) funciona.
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
