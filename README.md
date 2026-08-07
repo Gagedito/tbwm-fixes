@@ -101,8 +101,9 @@ Copia el script a `~/.local/bin/tbwm-network` y hazlo ejecutable:
 chmod +x tbwm-network
 ```
 
-Depende de `nmcli` (NetworkManager) para WiFi y `bluetoothctl` (bluez) para
-Bluetooth. Emite una línea por elemento con el formato
+Depende de `nmcli` (paquete `networkmanager`) para WiFi y `bluetoothctl`
+(paquete `bluez-utils`, con el daemon `bluez`) para Bluetooth. Emite una línea
+por elemento con el formato
 `Categoría<TAB>Grupo<TAB>Nombre<TAB>comando[<TAB>needspass]`:
 - **Categoría**: `Wifi` o `Bluetooth`.
 - **Grupo**: `Connect` o `Connected`.
@@ -171,6 +172,10 @@ Incluye:
 
 - Artix Linux (runit), wlroots 0.19.3 del repo `world`.
 - Para captura de pantalla (M-S-s): `grim`, `slurp` y `wl-clipboard`.
+- Para WiFi (menú de red): `networkmanager` (provee `nmcli`), con el servicio
+  `NetworkManager` activo.
+- Para Bluetooth (menú de red): `bluez` (daemon) + `bluez-utils` (provee
+  `bluetoothctl`), con el servicio `bluetoothd` activo.
 - Para las teclas de brillo: `brightnessctl`.
 - Para audio (música, micrófono): PipeWire/PipeWire-pulse/WirePlumber
   (arrancados con `tbwm-audio`).
