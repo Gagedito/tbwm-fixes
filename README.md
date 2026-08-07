@@ -16,9 +16,10 @@ compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 - **`tbwm-network`** — script para el menú de red (WiFi + Bluetooth): lista
   redes y dispositivos disponibles/conectados y genera los comandos para
   conectarse o desconectarse.
-- **`tbwm-session`** — launcher de la sesión: arranca tbwm dentro de un bus de
-  sesión D-Bus (`dbus-run-session`, o `dbus-launch` como fallback) para que las
-  apps Flatpak y los XDG desktop portals puedan conectarse.
+- **`tbwm-session`** — launcher de sesión opcional: arranca tbwm dentro de un
+  bus de sesión D-Bus (`dbus-run-session`, o `dbus-launch` como fallback).
+  Ya no es imprescindible: el propio tbwm auto-arranca el bus si falta (fix
+  14), pero sirve si se quiere acotar el ciclo de vida del bus a la sesión.
 
 El código fuente completo con todos estos cambios está en el fork
 [Gagedito/tbwm](https://github.com/Gagedito/tbwm).
@@ -146,15 +147,19 @@ los XDG desktop portals no pueden activarse. Además, en Wayland la captura de
 pantalla (p. ej. GPU Screen Recorder) pasa por el portal
 `org.freedesktop.portal.ScreenCast`, que necesita el backend
 `xdg-desktop-portal-wlr` para implementarse sobre `wlr-screencopy`.
+- **`tbwm.c`**: en `main()` arranca un bus de sesión automáticamente si no hay
+  `DBUS_SESSION_BUS_ADDRESS` (típico al lanzar desde TTY): spawna
+  `dbus-launch --sh-syntax`, exporta la dirección y el pid, y lo apaga en
+  `cleanup()`. Así **tbwm funciona tal cual**, sin launcher.
 - `install.sh` instala `xdg-desktop-portal xdg-desktop-portal-gtk
   xdg-desktop-portal-wlr`.
-- Se agrega el launcher `tbwm-session` (se instala en `/usr/local/bin`):
-  arranca la sesión con `dbus-run-session` (o `dbus-launch` como fallback) y
-  hace `exec tbwm`, de modo que **todas** las apps heredan el bus.
-- El `.desktop` de sesión ahora usa `Exec=/usr/local/bin/tbwm-session`, así
-  los display managers también heredan el bus.
-- Para lanzar desde TTY: `tbwm-session` (en vez de `tbwm`). Nota: hay que
-  **relanzar la sesión**; apps ya corriendo no heredan el bus retroactivamente.
+- (Opcional) Launcher `tbwm-session`: arranca la sesión con
+  `dbus-run-session`/`dbus-launch` antes de tbwm. Ya no es necesario con el
+  auto-start del propio tbwm, pero no estorba si se prefiere acotar el ciclo
+  de vida del bus a la sesión. El `.desktop` de sesión usa
+  `Exec=/usr/local/bin/tbwm-session` si está instalado.
+- Nota: hay que **relanzar la sesión**; las apps ya corriendo no heredan el bus
+  retroactivamente.
 
 ## Menú de red (WiFi + Bluetooth)
 

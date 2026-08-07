@@ -453,10 +453,18 @@ index 0000000..3cefbec
 +    exec /usr/local/bin/tbwm "$@"
 +fi
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..4ed0bd1 100644
+index a1e049d..0d605b6 100644
 --- a/tbwm.c
 +++ b/tbwm.c
-@@ -440,6 +440,15 @@ static void updatebar(Monitor *m);
+@@ -17,6 +17,7 @@
+ #include <time.h>
+ #include <unistd.h>
+ #include <sys/eventfd.h>
++#include <poll.h>
+ #include <errno.h>
+ #include <stdarg.h>
+ #include <wayland-server-core.h>
+@@ -440,6 +441,15 @@ static void updatebar(Monitor *m);
  static void updatebars(void);
  static void updateappmenu(void);
  static int appmenu_item_count(void);
@@ -472,7 +480,7 @@ index a1e049d..4ed0bd1 100644
  static int timingtimer(void *data);
  static int bartimer(void *data);
  static int scrolltimer(void *data);
-@@ -505,7 +514,11 @@ static int launcher_active = 0;
+@@ -505,7 +515,11 @@ static int launcher_active = 0;
  static char launcher_input[256] = {0};
  static int launcher_input_len = 0;
  static int launcher_selection = 0;
@@ -485,7 +493,7 @@ index a1e049d..4ed0bd1 100644
  static int app_cache_count = 0;
  
  /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
-@@ -649,7 +662,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
+@@ -649,7 +663,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
  static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
  
  /* REPL state */
@@ -494,7 +502,7 @@ index a1e049d..4ed0bd1 100644
  static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
  static char repl_input[1024] = {0};      /* current input line */
  static int repl_input_len = 0;
-@@ -706,12 +719,60 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
+@@ -706,12 +720,60 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
  static uint32_t cfg_menu_color = 0xaaaaaa;         /* grey menu background */
  static uint32_t cfg_menu_text_color = 0x000000;    /* black menu text */
  static char cfg_menu_button[16] = "X";             /* app menu button label */
@@ -555,7 +563,15 @@ index a1e049d..4ed0bd1 100644
  /* App launcher data structures */
  #define MAX_APPS 512
  #define MAX_CATEGORIES 32
-@@ -1304,6 +1365,51 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -857,6 +919,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
+ };
+ 
+ static pid_t child_pid = -1;
++static pid_t session_dbus_pid = -1;
+ static int locked;
+ static void *exclusive_focus;
+ static struct wl_display *dpy;
+@@ -1304,6 +1367,51 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -607,7 +623,7 @@ index a1e049d..4ed0bd1 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1481,106 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1483,106 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -714,7 +730,87 @@ index a1e049d..4ed0bd1 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1633,6 +1839,18 @@ cleanup(void)
+@@ -1591,6 +1799,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+ 	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
+ }
+ 
++/* If tbwm is started directly from a TTY (no display manager, no login
++ * session), there is no session D-Bus bus. Flatpak apps and the XDG desktop
++ * portals (screen capture, settings, etc.) need one, so start it here and
++ * export DBUS_SESSION_BUS_ADDRESS to every child tbwm spawns. */
++static void
++start_session_dbus(void)
++{
++	char buf[512];
++	char *p, *end;
++	struct pollfd pfd;
++	pid_t pid;
++	size_t n = 0;
++	int piperw[2];
++
++	if (getenv("DBUS_SESSION_BUS_ADDRESS"))
++		return;
++
++	if (pipe(piperw) < 0)
++		return;
++
++	if ((pid = fork()) == 0) {
++		dup2(piperw[1], STDOUT_FILENO);
++		close(piperw[0]);
++		close(piperw[1]);
++		execl("/bin/sh", "/bin/sh", "-c", "dbus-launch --sh-syntax 2>/dev/null",
++		      (char *)NULL);
++		_exit(127);
++	}
++	if (pid < 0) {
++		close(piperw[0]);
++		close(piperw[1]);
++		return;
++	}
++
++	close(piperw[1]);
++	pfd.fd = piperw[0];
++	pfd.events = POLLIN;
++	while (n < sizeof(buf) - 1 && poll(&pfd, 1, 5000) > 0) {
++		ssize_t r = read(piperw[0], buf + n, sizeof(buf) - 1 - n);
++		if (r <= 0)
++			break;
++		n += (size_t)r;
++	}
++	close(piperw[0]);
++	waitpid(pid, NULL, 0);
++
++	if (n == 0)
++		return;
++	buf[n] = '\0';
++
++	if ((p = strstr(buf, "DBUS_SESSION_BUS_ADDRESS='"))) {
++		p += strlen("DBUS_SESSION_BUS_ADDRESS='");
++		if ((end = strchr(p, '\'')))
++			*end = '\0';
++		setenv("DBUS_SESSION_BUS_ADDRESS", p, 1);
++		tbwm_log(TBWM_LOG_INFO, "tbwm: started session D-Bus bus: %s\n", p);
++	}
++	if ((p = strstr(buf, "DBUS_SESSION_BUS_PID="))) {
++		session_dbus_pid = atoi(p + strlen("DBUS_SESSION_BUS_PID="));
++	}
++}
++
+ void
+ cleanup(void)
+ {
+@@ -1606,6 +1876,10 @@ cleanup(void)
+ 		kill(-child_pid, SIGTERM);
+ 		waitpid(child_pid, NULL, 0);
+ 	}
++	if (session_dbus_pid > 0) {
++		kill(session_dbus_pid, SIGTERM);
++		session_dbus_pid = -1;
++	}
+ 	wlr_xcursor_manager_destroy(cursor_mgr);
+ 
+ 	/* Clean up glyph cache bitmaps */
+@@ -1633,6 +1907,18 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -733,7 +829,7 @@ index a1e049d..4ed0bd1 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +1900,6 @@ cleanup(void)
+@@ -1682,9 +1968,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -743,7 +839,7 @@ index a1e049d..4ed0bd1 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -3191,9 +3406,10 @@ void
+@@ -3191,9 +3474,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -757,7 +853,7 @@ index a1e049d..4ed0bd1 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +3582,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +3650,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -783,7 +879,7 @@ index a1e049d..4ed0bd1 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +3610,9 @@ launcher_get_match(int index)
+@@ -3382,9 +3678,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -795,7 +891,7 @@ index a1e049d..4ed0bd1 100644
  			count++;
  		}
  	}
-@@ -3586,167 +3814,737 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,120 +3882,690 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -848,21 +944,9 @@ index a1e049d..4ed0bd1 100644
 -			launcher_input[--launcher_input_len] = '\0';
 -			launcher_selection = 0;
 -			updatebars();
--		}
--		return 1;
--	}
 +	net_entry_count = 0;
 +	net_category_count = 0;
- 
--	/* Navigation: Tab to cycle forward, Shift+Tab to go back */
--	if (sym == XKB_KEY_Tab) {
--		match_count = launcher_match_count();
--		if (match_count > 0) {
--			launcher_selection = (launcher_selection + 1) % match_count;
--			updatebars();
--		}
--		return 1;
--	}
++
 +	netmenu_out[netmenu_out_len] = '\0';
 +	while (n < MAX_NET_ENTRIES && *p) {
 +		char *line;
@@ -870,33 +954,15 @@ index a1e049d..4ed0bd1 100644
 +		char *cat, *group, *name, *exec;
 +		int needspass = 0;
 +		int ci;
- 
--	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
--		match_count = launcher_match_count();
--		if (match_count > 0) {
--			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
--			updatebars();
--		}
--		return 1;
--	}
++
 +		line = p;
 +		p = strchr(p, '\n');
 +		if (p)
 +			*p++ = '\0';
- 
--	/* Regular character input */
--	if (sym >= 0x20 && sym <= 0x7e &&
--	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
--		launcher_input[launcher_input_len++] = (char)sym;
--		launcher_input[launcher_input_len] = '\0';
--		launcher_selection = 0;
--		updatebars();
++
 +		if (!line[0])
 +			continue;
- 
--		/* Auto-run if only one match */
--		if (launcher_match_count() == 1) {
--			runlauncher();
++
 +		tab1 = strchr(line, '\t');
 +		if (tab1) {
 +			*tab1 = '\0';
@@ -954,54 +1020,24 @@ index a1e049d..4ed0bd1 100644
 +		}
 +		n++;
  	}
--
--	return 1; /* Consume all keys in launcher mode */
 +	net_entry_count = n;
- }
++}
  
--int
--keybinding(uint32_t mods, xkb_keysym_t sym)
+-	/* Navigation: Tab to cycle forward, Shift+Tab to go back */
+-	if (sym == XKB_KEY_Tab) {
+-		match_count = launcher_match_count();
+-		if (match_count > 0) {
+-			launcher_selection = (launcher_selection + 1) % match_count;
+-			updatebars();
 +/* Build the list of sub-topics (groups) for the currently selected category.
 + * Entries with an empty group are treated as direct entries of a single
 + * implicit group, so the group view is skipped. */
 +static void
 +netmenu_build_groups(void)
- {
--	/*
--	 * Here we handle compositor keybindings. This is when the compositor is
--	 * processing keys, rather than passing them on to the client for its own
--	 * processing.
--	 */
--	const Key *k;
--
--	/* Handle launcher mode first */
--	if (launcher_active)
--		return launcherkey(sym);
--
--	/* Handle REPL input mode */
--	if (repl_input_active)
--		return replkey(sym);
--
--	/* Handle app menu navigation - if appmenukey handles it, return 1;
--	 * otherwise fall through to check scheme bindings (e.g., M-x to toggle) */
--	if (appmenu_active && appmenukey(sym))
--		return 1;
++{
 +	int gi;
 +	int i;
- 
--	/*
--	 * Fallback: some keyboards or keymaps produce plain F1..F12 for Ctrl+Alt+Fx
--	 * instead of the XF86Switch_VT_* keysyms. Handle that scenario here so VT
--	 * switching works regardless of the specific keysym produced.
--	 */
--	if (CLEANMASK(mods) == (WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT)) {
--		/* Prefer XF86Switch_VT_1..12 if the keymap provides them */
--		if (sym >= XKB_KEY_XF86Switch_VT_1 && sym <= XKB_KEY_XF86Switch_VT_12) {
--			int n = sym - XKB_KEY_XF86Switch_VT_1 + 1;
--			Arg a = {.ui = (unsigned int)n};
--			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: XF86Switch_VT_%d detected, invoking chvt()\n", n);
--			chvt(&a);
--			return 1;
++
 +	net_group_count = 0;
 +	for (i = 0; i < net_entry_count; i++) {
 +		if (net_current_category < 0 ||
@@ -1012,26 +1048,21 @@ index a1e049d..4ed0bd1 100644
 +		for (gi = 0; gi < net_group_count; gi++) {
 +			if (strcmp(net_groups[gi], net_entries[i].group) == 0)
 +				break;
- 		}
--
--		/* Older / simpler keymaps may produce plain F1..F12 */
--		if (sym >= XKB_KEY_F1 && sym <= XKB_KEY_F12) {
--			int n = sym - XKB_KEY_F1 + 1;
--			Arg a = {.ui = (unsigned int)n};
--			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: F%d detected (no XF86 keysym), invoking chvt()\n", n);
--			chvt(&a);
--			return 1;
++		}
 +		if (gi >= net_group_count && net_group_count < MAX_NET_CATEGORIES) {
 +			strncpy(net_groups[net_group_count], net_entries[i].group, NET_CAT_LEN - 1);
 +			net_groups[net_group_count][NET_CAT_LEN - 1] = '\0';
 +			net_group_count++;
  		}
+-		return 1;
  	}
 +}
  
--	/* Check Scheme keybindings first */
--	if (check_scheme_bindings(CLEANMASK(mods), sym))
--		return 1;
+-	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
+-		match_count = launcher_match_count();
+-		if (match_count > 0) {
+-			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
+-			updatebars();
 +/* Stop an in-flight asynchronous load: remove the event source, close the
 + * pipe and kill/reap the child. */
 +static void
@@ -1051,29 +1082,7 @@ index a1e049d..4ed0bd1 100644
 +		netmenu_child_pid = -1;
 +	}
 +}
- 
--	/* Fallback: treat Win+Shift+Arrow as Swap (same as Win+Shift+h/j/k/l) if no Scheme binding exists for M-S-Arrow */
--	if ((mods & WLR_MODIFIER_SHIFT) && (mods & (WLR_MODIFIER_LOGO|WLR_MODIFIER_ALT))) {
--		if (sym == XKB_KEY_Left) {
--			file_debug_log("tbwm: fallback: M-S-Left -> swapdir\n");
--			Arg a = { .i = DirLeft };
--			swapdir(&a);
--			return 1;
--		} else if (sym == XKB_KEY_Right) {
--			file_debug_log("tbwm: fallback: M-S-Right -> swapdir\n");
--			Arg a = { .i = DirRight };
--			swapdir(&a);
--			return 1;
--		} else if (sym == XKB_KEY_Up) {
--			file_debug_log("tbwm: fallback: M-S-Up -> swapdir\n");
--			Arg a = { .i = DirUp };
--			swapdir(&a);
--			return 1;
--		} else if (sym == XKB_KEY_Down) {
--			file_debug_log("tbwm: fallback: M-S-Down -> swapdir\n");
--			Arg a = { .i = DirDown };
--			swapdir(&a);
--			return 1;
++
 +/* Read netmenu command output as it arrives; finalize when the child closes
 + * the pipe (EOF). Never blocks the event loop. */
 +static int
@@ -1095,23 +1104,28 @@ index a1e049d..4ed0bd1 100644
 +			done = 1;
 +			break;
  		}
+-		return 1;
  	}
 +	if (r == 0)
 +		done = 1;
  
--	for (k = keys; k < END(keys); k++) {
--		if (CLEANMASK(mods) == CLEANMASK(k->mod)
--				&& sym == k->keysym && k->func) {
--			tbwm_log(TBWM_LOG_INFO, "tbwm: keybinding matched mods=0x%x sym=0x%x func=%p\n", mods, sym, (void*)k->func);
--			k->func(&k->arg);
--			return 1;
+-	/* Regular character input */
+-	if (sym >= 0x20 && sym <= 0x7e &&
+-	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
+-		launcher_input[launcher_input_len++] = (char)sym;
+-		launcher_input[launcher_input_len] = '\0';
+-		launcher_selection = 0;
+-		updatebars();
 +	if (done) {
 +		char saved_cat[NET_CAT_LEN] = "";
 +		char saved_group[NET_CAT_LEN] = "";
 +		int keep = 0;
 +		int gi;
 +		int i;
-+
+ 
+-		/* Auto-run if only one match */
+-		if (launcher_match_count() == 1) {
+-			runlauncher();
 +		/* A reload invalidates any in-progress password entry */
 +		net_password_reset();
 +
@@ -1146,7 +1160,8 @@ index a1e049d..4ed0bd1 100644
 +					break;
 +				}
 +			}
-+		}
+ 		}
+-		return 1;
 +		netmenu_build_groups();
 +		if (keep && net_current_category >= 0) {
 +			net_current_group = -1;
@@ -1156,47 +1171,81 @@ index a1e049d..4ed0bd1 100644
 +					break;
 +				}
 +			}
- 		}
++		}
 +		if (netmenu_active)
 +			updatenetmenu();
  	}
--	return 0;
+-
+-	return 1; /* Consume all keys in launcher mode */
 +	return 1;
  }
  
--void
--keypress(struct wl_listener *listener, void *data)
+-int
+-keybinding(uint32_t mods, xkb_keysym_t sym)
 +/* Start an asynchronous load of the netmenu data. The command runs in a
 + * forked child; its stdout is read through a non-blocking pipe in the
 + * Wayland event loop, so this returns immediately. */
 +static void
 +netmenu_refresh(void)
  {
--	int i;
--	/* This event is raised when a key is pressed or released. */
--	KeyboardGroup *group = wl_container_of(listener, group, key);
--	struct wlr_keyboard_key_event *event = data;
+-	/*
+-	 * Here we handle compositor keybindings. This is when the compositor is
+-	 * processing keys, rather than passing them on to the client for its own
+-	 * processing.
+-	 */
+-	const Key *k;
 +	int p[2];
 +	int flags;
 +	pid_t pid;
  
--	/* Translate libinput keycode -> xkbcommon */
+-	/* Handle launcher mode first */
+-	if (launcher_active)
+-		return launcherkey(sym);
 +	netmenu_cancel_load();
 +	netmenu_out_len = 0;
 +	netmenu_out[0] = '\0';
-+
+ 
+-	/* Handle REPL input mode */
+-	if (repl_input_active)
+-		return replkey(sym);
 +	if (netmenu_cmd[0] == '\0')
 +		return;
-+
+ 
+-	/* Handle app menu navigation - if appmenukey handles it, return 1;
+-	 * otherwise fall through to check scheme bindings (e.g., M-x to toggle) */
+-	if (appmenu_active && appmenukey(sym))
+-		return 1;
 +	if (pipe(p) < 0) {
 +		tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: pipe() failed: %s\n", strerror(errno));
 +		return;
 +	}
-+
+ 
+-	/*
+-	 * Fallback: some keyboards or keymaps produce plain F1..F12 for Ctrl+Alt+Fx
+-	 * instead of the XF86Switch_VT_* keysyms. Handle that scenario here so VT
+-	 * switching works regardless of the specific keysym produced.
+-	 */
+-	if (CLEANMASK(mods) == (WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT)) {
+-		/* Prefer XF86Switch_VT_1..12 if the keymap provides them */
+-		if (sym >= XKB_KEY_XF86Switch_VT_1 && sym <= XKB_KEY_XF86Switch_VT_12) {
+-			int n = sym - XKB_KEY_XF86Switch_VT_1 + 1;
+-			Arg a = {.ui = (unsigned int)n};
+-			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: XF86Switch_VT_%d detected, invoking chvt()\n", n);
+-			chvt(&a);
+-			return 1;
+-		}
 +	flags = fcntl(p[0], F_GETFL, 0);
 +	if (flags >= 0)
 +		fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
-+
+ 
+-		/* Older / simpler keymaps may produce plain F1..F12 */
+-		if (sym >= XKB_KEY_F1 && sym <= XKB_KEY_F12) {
+-			int n = sym - XKB_KEY_F1 + 1;
+-			Arg a = {.ui = (unsigned int)n};
+-			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: F%d detected (no XF86 keysym), invoking chvt()\n", n);
+-			chvt(&a);
+-			return 1;
+-		}
 +	pid = fork();
 +	if (pid < 0) {
 +		tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: fork() failed: %s\n", strerror(errno));
@@ -1213,8 +1262,10 @@ index a1e049d..4ed0bd1 100644
 +		close(p[1]);
 +		execl("/bin/sh", "/bin/sh", "-c", netmenu_cmd, (char *)NULL);
 +		_exit(127);
-+	}
-+
+ 	}
+ 
+-	/* Check Scheme keybindings first */
+-	if (check_scheme_bindings(CLEANMASK(mods), sym))
 +	/* Parent */
 +	close(p[1]);
 +	netmenu_pipe_fd = p[0];
@@ -1616,57 +1667,10 @@ index a1e049d..4ed0bd1 100644
 +
 +	/* Check Scheme keybindings first */
 +	if (check_scheme_bindings(CLEANMASK(mods), sym))
-+		return 1;
-+
-+	/* Fallback: treat Win+Shift+Arrow as Swap (same as Win+Shift+h/j/k/l) if no Scheme binding exists for M-S-Arrow */
-+	if ((mods & WLR_MODIFIER_SHIFT) && (mods & (WLR_MODIFIER_LOGO|WLR_MODIFIER_ALT))) {
-+		if (sym == XKB_KEY_Left) {
-+			file_debug_log("tbwm: fallback: M-S-Left -> swapdir\n");
-+			Arg a = { .i = DirLeft };
-+			swapdir(&a);
-+			return 1;
-+		} else if (sym == XKB_KEY_Right) {
-+			file_debug_log("tbwm: fallback: M-S-Right -> swapdir\n");
-+			Arg a = { .i = DirRight };
-+			swapdir(&a);
-+			return 1;
-+		} else if (sym == XKB_KEY_Up) {
-+			file_debug_log("tbwm: fallback: M-S-Up -> swapdir\n");
-+			Arg a = { .i = DirUp };
-+			swapdir(&a);
-+			return 1;
-+		} else if (sym == XKB_KEY_Down) {
-+			file_debug_log("tbwm: fallback: M-S-Down -> swapdir\n");
-+			Arg a = { .i = DirDown };
-+			swapdir(&a);
-+			return 1;
-+		}
-+	}
-+
-+	for (k = keys; k < END(keys); k++) {
-+		if (CLEANMASK(mods) == CLEANMASK(k->mod)
-+				&& sym == k->keysym && k->func) {
-+			tbwm_log(TBWM_LOG_INFO, "tbwm: keybinding matched mods=0x%x sym=0x%x func=%p\n", mods, sym, (void*)k->func);
-+			k->func(&k->arg);
-+			return 1;
-+		}
-+	}
-+	return 0;
-+}
-+
-+void
-+keypress(struct wl_listener *listener, void *data)
-+{
-+	int i;
-+	/* This event is raised when a key is pressed or released. */
-+	KeyboardGroup *group = wl_container_of(listener, group, key);
-+	struct wlr_keyboard_key_event *event = data;
-+
-+	/* Translate libinput keycode -> xkbcommon */
- 	uint32_t keycode = event->keycode + 8;
- 	/* Get a list of keysyms based on the keymap for this keyboard */
- 	const xkb_keysym_t *syms;
-@@ -4043,6 +4841,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+ 		return 1;
+ 
+ 	/* Fallback: treat Win+Shift+Arrow as Swap (same as Win+Shift+h/j/k/l) if no Scheme binding exists for M-S-Arrow */
+@@ -4043,6 +4909,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  		/* If compositor entered screenshot-grab mode, forward motion only to the
  		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
  		if (screenshot_mode) {
@@ -1679,7 +1683,7 @@ index a1e049d..4ed0bd1 100644
  			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
  			if (cursor && cursor_mgr)
  				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
-@@ -4075,6 +4879,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+@@ -4075,6 +4947,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  				}
  			}
  		}
@@ -1709,7 +1713,7 @@ index a1e049d..4ed0bd1 100644
  	}
  
  	/* Update drag icon's position */
-@@ -5530,6 +6357,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
+@@ -5530,6 +6425,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
  	repl_add_line("(tag-window N)     - move window to tag N");
  	repl_add_line("(reload-config)    - reload config.scm");
  	repl_add_line("(bind-key K F)     - bind key to function");
@@ -1717,7 +1721,7 @@ index a1e049d..4ed0bd1 100644
  	repl_add_line("=== Appearance ===");
  	repl_add_line("(set-background-color C) - highlight/bg color");
  	repl_add_line("(set-border-line-color C)- box-drawing color");
-@@ -5846,6 +6674,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
+@@ -5846,6 +6742,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -1738,7 +1742,7 @@ index a1e049d..4ed0bd1 100644
  /* Scheme: (set-menu-button "text") - set the app menu button label */
  static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-@@ -5855,6 +6697,15 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
+@@ -5855,6 +6765,15 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -1754,7 +1758,7 @@ index a1e049d..4ed0bd1 100644
  /* ========== END COLOR CONFIG API ========== */
  
  /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
-@@ -6209,7 +7060,10 @@ setup_scheme(void)
+@@ -6209,7 +7128,10 @@ setup_scheme(void)
  	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB\") set app menu background color");
  	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB\") set app menu text color");
  	s7_define_function(sc, "set-menu-button", scm_set_menu_button, 1, 0, false, "(set-menu-button \"text\") set app menu button label in bar");
@@ -1765,7 +1769,7 @@ index a1e049d..4ed0bd1 100644
  	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
  	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
  	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
-@@ -6392,6 +7246,11 @@ static const char *default_config_parts[] = {
+@@ -6392,6 +7314,11 @@ static const char *default_config_parts[] = {
  "(bind-key \"Print\" (lambda () (spawn-grab \"sh -c 'grim - | wl-copy'\")))\n"
  "(bind-key \"S-Print\" (lambda () (spawn-grab \"sh -c 'grim -g \\\"$(slurp)\\\" - | wl-copy'\")))\n"
  "\n"
@@ -1777,7 +1781,7 @@ index a1e049d..4ed0bd1 100644
  ";; Volume control (requires wpctl/wireplumber)\n"
  "(bind-key \"XF86AudioRaiseVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\")))\n"
  "(bind-key \"XF86AudioLowerVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\")))\n"
-@@ -6416,62 +7275,7 @@ static const char *default_config_parts[] = {
+@@ -6416,62 +7343,7 @@ static const char *default_config_parts[] = {
  "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
  "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
  "\n"
@@ -1841,7 +1845,7 @@ index a1e049d..4ed0bd1 100644
  "\n"
  ";; Advanced setters (examples - not necessarily key bound):\n"
  ";; (set-border-width 2)\n"
-@@ -6664,69 +7468,151 @@ setup_foot_config(void)
+@@ -6664,69 +7536,151 @@ setup_foot_config(void)
  static int
  app_compare(const void *a, const void *b)
  {
@@ -2040,7 +2044,7 @@ index a1e049d..4ed0bd1 100644
  	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
  }
  
-@@ -6891,6 +7777,7 @@ void
+@@ -6891,6 +7845,7 @@ void
  togglerepl(const Arg *arg)
  {
  	repl_input_active = !repl_input_active;
@@ -2048,7 +2052,7 @@ index a1e049d..4ed0bd1 100644
  	repl_input[0] = '\0';
  	repl_input_len = 0;
  	updatebars();
-@@ -7068,12 +7955,20 @@ load_applications(void)
+@@ -7068,12 +8023,20 @@ load_applications(void)
  	/* Scan system applications */
  	scan_desktop_dir("/usr/share/applications");
  	scan_desktop_dir("/usr/local/share/applications");
@@ -2069,7 +2073,7 @@ index a1e049d..4ed0bd1 100644
  	}
  	
  	/* Sort apps and categories */
-@@ -7315,6 +8210,336 @@ updateappmenu(void)
+@@ -7315,6 +8278,336 @@ updateappmenu(void)
  	/* Don't drop - we're caching the buffer for reuse */
  }
  
@@ -2406,7 +2410,7 @@ index a1e049d..4ed0bd1 100644
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
  void
  reload_config_key(const Arg *arg)
-@@ -7412,9 +8637,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +8705,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -2418,7 +2422,7 @@ index a1e049d..4ed0bd1 100644
  		return 1;
  	}
  
-@@ -7643,37 +8870,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +8938,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -2481,7 +2485,7 @@ index a1e049d..4ed0bd1 100644
  			}
  		}
  	} else {
-@@ -7884,66 +9111,98 @@ render_tabs:
+@@ -7884,66 +9179,98 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -2625,3 +2629,13 @@ index a1e049d..4ed0bd1 100644
  				}
  			}
  		}
+@@ -9561,6 +10888,9 @@ main(int argc, char *argv[])
+ 	if (optind < argc)
+ 		goto usage;
+ 
++	/* Flatpak apps and XDG desktop portals need a session D-Bus bus */
++	start_session_dbus();
++
+ 	/* Wayland requires XDG_RUNTIME_DIR for creating its communications socket */
+ 	if (!getenv("XDG_RUNTIME_DIR"))
+ 		die("XDG_RUNTIME_DIR must be set");
