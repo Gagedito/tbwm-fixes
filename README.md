@@ -16,6 +16,9 @@ compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 - **`tbwm-network`** — script para el menú de red (WiFi + Bluetooth): lista
   redes y dispositivos disponibles/conectados y genera los comandos para
   conectarse o desconectarse.
+- **`tbwm-session`** — launcher de la sesión: arranca tbwm dentro de un bus de
+  sesión D-Bus (`dbus-run-session`, o `dbus-launch` como fallback) para que las
+  apps Flatpak y los XDG desktop portals puedan conectarse.
 
 El código fuente completo con todos estos cambios está en el fork
 [Gagedito/tbwm](https://github.com/Gagedito/tbwm).
@@ -124,6 +127,35 @@ menú no mostraba nada aunque hubiera herramientas).
   `~/.config/tbwm/config.scm` no existe; quien ya tenga una config debe añadir
   esas dos líneas o borrar el archivo para regenerarlo.
 
+### 13. Audio: sockets de PipeWire huérfanos tras un crash
+Si el WM crashea y los procesos de PipeWire se matan a la fuerza (p. ej. con
+`pkill -9` desde `artix-pipewire-launcher`), los sockets del stack de audio
+pueden quedar huérfanos: `wpctl status` falla con "Could not connect to
+PipeWire" aunque los daemons estén corriendo y las tarjetas ALSA existan. El
+script `tbwm-audio` detecta ese estado (falta el socket
+`$XDG_RUNTIME_DIR/pipewire-0` o `wpctl status` falla) y reinicia **todo** el
+stack (pipewire, pipewire-pulse y wireplumber), no solo WirePlumber; después
+mantiene el bucle de reintentos hasta encontrar el sink real (nada de "Dummy
+Output").
+
+### 14. Sesión sin bus D-Bus (Flatpak y portales de captura)
+Lanzar tbwm directamente desde una TTY deja a todas las apps spawnadas sin
+`DBUS_SESSION_BUS_ADDRESS`: Flatpak falla con
+`Can't find bus: ... «dbus-launch» (No existe el fichero o el directorio)` y
+los XDG desktop portals no pueden activarse. Además, en Wayland la captura de
+pantalla (p. ej. GPU Screen Recorder) pasa por el portal
+`org.freedesktop.portal.ScreenCast`, que necesita el backend
+`xdg-desktop-portal-wlr` para implementarse sobre `wlr-screencopy`.
+- `install.sh` instala `xdg-desktop-portal xdg-desktop-portal-gtk
+  xdg-desktop-portal-wlr`.
+- Se agrega el launcher `tbwm-session` (se instala en `/usr/local/bin`):
+  arranca la sesión con `dbus-run-session` (o `dbus-launch` como fallback) y
+  hace `exec tbwm`, de modo que **todas** las apps heredan el bus.
+- El `.desktop` de sesión ahora usa `Exec=/usr/local/bin/tbwm-session`, así
+  los display managers también heredan el bus.
+- Para lanzar desde TTY: `tbwm-session` (en vez de `tbwm`). Nota: hay que
+  **relanzar la sesión**; apps ya corriendo no heredan el bus retroactivamente.
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
@@ -190,7 +222,8 @@ git apply /ruta/a/tbwm-fixes.patch   # o: patch -p1 < /ruta/a/tbwm-fixes.patch
 
 Para el menú de red, copia también `tbwm-network` a `~/.local/bin/` (o a
 cualquier directorio en `PATH`) y hazlo ejecutable (ver sección
-"Menú de red").
+"Menú de red"). Para que las apps Flatpak y los portales de captura funcionen,
+lanza la sesión con `tbwm-session` (ver fix 14) en vez de `tbwm`.
 
 ## Cómo compilar
 

@@ -74,10 +74,10 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..1ae84db 100755
+index 8a401bc..e50fff7 100755
 --- a/install.sh
 +++ b/install.sh
-@@ -46,13 +46,22 @@ install_deps() {
+@@ -46,13 +46,23 @@ install_deps() {
      info "Installing dependencies..."
      
      case "$DISTRO" in
@@ -101,11 +101,12 @@ index 8a401bc..1ae84db 100755
                  pixman freetype2 pango cairo libxcb xcb-util-wm \
                  xorg-xwayland meson ninja gcc pkgconf make git \
 -                fontconfig ttf-font || true
-+                fontconfig ttf-font grim slurp wl-clipboard $NET_DEPS || true
++                fontconfig ttf-font grim slurp wl-clipboard $NET_DEPS \
++                xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
              # Debian-based - note: libwlroots-dev often not available or too old
-@@ -65,7 +74,7 @@ install_deps() {
+@@ -65,7 +75,7 @@ install_deps() {
                  libdrm-dev libgbm-dev libseat-dev \
                  libdisplay-info-dev libliftoff-dev hwdata \
                  meson ninja-build gcc pkg-config make git \
@@ -114,7 +115,7 @@ index 8a401bc..1ae84db 100755
              ;;
          fedora|rhel|centos|rocky|almalinux)
              # Fedora/RHEL-based
-@@ -75,7 +84,7 @@ install_deps() {
+@@ -75,7 +85,7 @@ install_deps() {
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-x11-server-Xwayland \
                  meson ninja-build gcc pkg-config make git \
@@ -123,7 +124,7 @@ index 8a401bc..1ae84db 100755
              ;;
          opensuse*|suse*)
              # openSUSE
-@@ -84,7 +93,7 @@ install_deps() {
+@@ -84,7 +94,7 @@ install_deps() {
                  libinput-devel libxkbcommon-devel libpixman-1-0-devel \
                  freetype2-devel pango-devel cairo-devel \
                  libxcb-devel xwayland meson ninja gcc pkg-config make git \
@@ -132,7 +133,7 @@ index 8a401bc..1ae84db 100755
              ;;
          void)
              # Void Linux
-@@ -93,7 +102,8 @@ install_deps() {
+@@ -93,7 +103,8 @@ install_deps() {
                  libinput-devel libxkbcommon-devel pixman-devel \
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-server-xwayland \
@@ -142,7 +143,7 @@ index 8a401bc..1ae84db 100755
              ;;
          gentoo)
              warn "Gentoo detected. Please ensure you have the following USE flags enabled:"
-@@ -112,6 +122,8 @@ install_deps() {
+@@ -112,6 +123,8 @@ install_deps() {
              echo "  - libinput, libxkbcommon"
              echo "  - freetype2, pango, cairo, pixman"
              echo "  - libxcb, xcb-util-wm"
@@ -151,7 +152,7 @@ index 8a401bc..1ae84db 100755
              echo "  - xwayland (optional, for X11 apps)"
              echo ""
              read -p "Continue anyway? [y/N] " -n 1 -r
-@@ -124,6 +136,95 @@ install_deps() {
+@@ -124,6 +137,95 @@ install_deps() {
      success "Dependencies installed"
  }
  
@@ -247,7 +248,7 @@ index 8a401bc..1ae84db 100755
  # Check wlroots version
  check_wlroots() {
      info "Checking wlroots version..."
-@@ -170,8 +271,8 @@ build_wlroots() {
+@@ -170,8 +272,8 @@ build_wlroots() {
      
      # Install meson build deps
      case "$DISTRO" in
@@ -258,7 +259,7 @@ index 8a401bc..1ae84db 100755
                  meson ninja hwdata libdisplay-info libliftoff seatd || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
-@@ -195,6 +296,9 @@ build_wlroots() {
+@@ -195,6 +297,9 @@ build_wlroots() {
      cd wlroots
      
      info "Configuring..."
@@ -268,7 +269,7 @@ index 8a401bc..1ae84db 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -272,6 +376,15 @@ install_tbwm() {
+@@ -272,13 +377,32 @@ install_tbwm() {
      sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
      success "Installed fonts (from fonts/ directory)"
      
@@ -281,10 +282,28 @@ index 8a401bc..1ae84db 100755
 +        warn "tbwm-network not found; the network menu (WiFi/Bluetooth) will be empty"
 +    fi
 +    
++    # tbwm-session launcher (starts a session D-Bus bus so Flatpak apps and
++    # the XDG desktop portals can connect)
++    if [ -f "$SCRIPT_DIR/tbwm-session" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-session" /usr/local/bin/tbwm-session
++        sudo chmod 755 /usr/local/bin/tbwm-session
++        success "Installed /usr/local/bin/tbwm-session"
++    else
++        warn "tbwm-session not found; apps may have no session D-Bus bus (Flatpak/portals may fail)"
++    fi
++    
      # Session file for display managers
      sudo mkdir -p /usr/share/wayland-sessions
      sudo tee /usr/share/wayland-sessions/tbwm.desktop > /dev/null << 'EOF'
-@@ -307,6 +420,37 @@ exec /usr/local/bin/tbwm.bin "$@"
+ [Desktop Entry]
+ Name=TurboWM
+ Comment=A Wayland compositor with s7 Scheme configuration
+-Exec=/usr/local/bin/tbwm
++Exec=/usr/local/bin/tbwm-session
+ Type=Application
+ EOF
+     success "Installed session file"
+@@ -307,6 +431,37 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
@@ -322,13 +341,23 @@ index 8a401bc..1ae84db 100755
  }
  
  # Main
-@@ -319,6 +463,7 @@ main() {
+@@ -319,6 +474,7 @@ main() {
      
      check_not_root
      detect_distro
 +    setup_keyboard_layout
      
      # Ask what to do
+     echo ""
+@@ -356,7 +512,8 @@ main() {
+     echo ""
+     echo "To use TurboWM:"
+     echo "  • Log out and select 'TurboWM' from your display manager"
+-    echo "  • Or run: tbwm (from a TTY)"
++    echo "  • Or run: tbwm-session (from a TTY) - starts a session D-Bus bus"
++    echo "    (use 'tbwm' directly only if you know you don't need one)"
+     echo ""
+     echo "Config file: ~/.config/tbwm/config.scm"
      echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
@@ -397,6 +426,31 @@ index 0000000..f57c5df
 +    done
 +else
 +    printf 'Bluetooth\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
++fi
+diff --git a/tbwm-session b/tbwm-session
+new file mode 100755
+index 0000000..3cefbec
+--- /dev/null
++++ b/tbwm-session
+@@ -0,0 +1,19 @@
++#!/bin/sh
++# Launch TurboWM inside a session D-Bus bus.
++# Running tbwm directly from a TTY leaves every spawned app without a
++# DBUS_SESSION_BUS_ADDRESS, so Flatpak apps (e.g. GPU Screen Recorder)
++# and the XDG desktop portals cannot connect. Use this launcher instead
++# of tbwm when starting the compositor.
++
++set -e
++
++if command -v dbus-run-session >/dev/null 2>&1; then
++    exec dbus-run-session -- /usr/local/bin/tbwm "$@"
++elif command -v dbus-launch >/dev/null 2>&1; then
++    eval "$(dbus-launch --sh-syntax)"
++    export DBUS_SESSION_BUS_ADDRESS
++    exec /usr/local/bin/tbwm "$@"
++else
++    echo "tbwm-session: dbus-run-session/dbus-launch not found; starting without a session bus" >&2
++    exec /usr/local/bin/tbwm "$@"
 +fi
 diff --git a/tbwm.c b/tbwm.c
 index a1e049d..4ed0bd1 100644

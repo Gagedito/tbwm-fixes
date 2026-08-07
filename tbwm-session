@@ -1,0 +1,19 @@
+#!/bin/sh
+# Launch TurboWM inside a session D-Bus bus.
+# Running tbwm directly from a TTY leaves every spawned app without a
+# DBUS_SESSION_BUS_ADDRESS, so Flatpak apps (e.g. GPU Screen Recorder)
+# and the XDG desktop portals cannot connect. Use this launcher instead
+# of tbwm when starting the compositor.
+
+set -e
+
+if command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- /usr/local/bin/tbwm "$@"
+elif command -v dbus-launch >/dev/null 2>&1; then
+    eval "$(dbus-launch --sh-syntax)"
+    export DBUS_SESSION_BUS_ADDRESS
+    exec /usr/local/bin/tbwm "$@"
+else
+    echo "tbwm-session: dbus-run-session/dbus-launch not found; starting without a session bus" >&2
+    exec /usr/local/bin/tbwm "$@"
+fi
