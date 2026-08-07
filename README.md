@@ -89,6 +89,12 @@ fallaba al compilar wlroots desde source con `meson: command not found`.
   instalar: una DB desactualizada hace que pacman pida versiones que ya no están
   en los mirrors (404 en todos, p. ej. `python-tqdm`, dependencia de `meson`) y
   aborte toda la transacción sin instalar nada.
+- El layout de teclado ya no se pide a ciegas: `install.sh` **detecta el layout
+  activo** del sistema/DE (KDE `kxkbrc`, `/etc/default/keyboard`, config de Xorg,
+  `localectl` en systemd, `gsettings` en GNOME, y `setxkbmap` solo en sesión X11
+  pura) y lo ofrece como valor por defecto (`Enter` lo acepta, `none`/`system
+  default` usa el default del sistema). Valida la entrada para que un valor con
+  espacios no rompa el flag `-DTBWM_XKB_LAYOUT=\"...\"`.
 
 ## Menú de red (WiFi + Bluetooth)
 
