@@ -74,10 +74,10 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..05fa5e1 100755
+index 8a401bc..1ae84db 100755
 --- a/install.sh
 +++ b/install.sh
-@@ -46,13 +46,19 @@ install_deps() {
+@@ -46,13 +46,22 @@ install_deps() {
      info "Installing dependencies..."
      
      case "$DISTRO" in
@@ -90,64 +90,68 @@ index 8a401bc..05fa5e1 100755
 +            # on Arch the regular wlroots package is already 0.19+.
 +            if [ "$DISTRO" = "artix" ]; then
 +                WLROOTS_PKG="wlroots0.19"
++                # runit service packages for the WiFi/Bluetooth menu
++                NET_DEPS="networkmanager networkmanager-runit bluez bluez-utils bluez-runit dbus-runit"
 +            else
 +                WLROOTS_PKG="wlroots"
++                NET_DEPS="networkmanager bluez bluez-utils"
 +            fi
 +            sudo pacman -Sy --needed --noconfirm \
 +                "$WLROOTS_PKG" wayland wayland-protocols libinput libxkbcommon \
                  pixman freetype2 pango cairo libxcb xcb-util-wm \
                  xorg-xwayland meson ninja gcc pkgconf make git \
 -                fontconfig ttf-font || true
-+                fontconfig ttf-font grim slurp wl-clipboard || true
++                fontconfig ttf-font grim slurp wl-clipboard $NET_DEPS || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
              # Debian-based - note: libwlroots-dev often not available or too old
-@@ -65,7 +71,7 @@ install_deps() {
+@@ -65,7 +74,7 @@ install_deps() {
                  libdrm-dev libgbm-dev libseat-dev \
                  libdisplay-info-dev libliftoff-dev hwdata \
                  meson ninja-build gcc pkg-config make git \
 -                fontconfig || true
-+                fontconfig grim slurp wl-clipboard || true
++                fontconfig grim slurp wl-clipboard networkmanager bluez || true
              ;;
          fedora|rhel|centos|rocky|almalinux)
              # Fedora/RHEL-based
-@@ -75,7 +81,7 @@ install_deps() {
+@@ -75,7 +84,7 @@ install_deps() {
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-x11-server-Xwayland \
                  meson ninja-build gcc pkg-config make git \
 -                fontconfig || true
-+                fontconfig grim slurp wl-clipboard || true
++                fontconfig grim slurp wl-clipboard NetworkManager bluez || true
              ;;
          opensuse*|suse*)
              # openSUSE
-@@ -84,7 +90,7 @@ install_deps() {
+@@ -84,7 +93,7 @@ install_deps() {
                  libinput-devel libxkbcommon-devel libpixman-1-0-devel \
                  freetype2-devel pango-devel cairo-devel \
                  libxcb-devel xwayland meson ninja gcc pkg-config make git \
 -                fontconfig || true
-+                fontconfig grim slurp wl-clipboard || true
++                fontconfig grim slurp wl-clipboard NetworkManager bluez || true
              ;;
          void)
              # Void Linux
-@@ -93,7 +99,8 @@ install_deps() {
+@@ -93,7 +102,8 @@ install_deps() {
                  libinput-devel libxkbcommon-devel pixman-devel \
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-server-xwayland \
 -                meson ninja gcc pkg-config make git fontconfig || true
 +                meson ninja gcc pkg-config make git fontconfig \
-+                grim slurp wl-clipboard || true
++                grim slurp wl-clipboard NetworkManager bluez || true
              ;;
          gentoo)
              warn "Gentoo detected. Please ensure you have the following USE flags enabled:"
-@@ -112,6 +119,7 @@ install_deps() {
+@@ -112,6 +122,8 @@ install_deps() {
              echo "  - libinput, libxkbcommon"
              echo "  - freetype2, pango, cairo, pixman"
              echo "  - libxcb, xcb-util-wm"
 +            echo "  - grim, slurp, wl-clipboard (for screenshots)"
++            echo "  - networkmanager (nmcli) and bluez/bluez-utils (bluetoothctl) for the network menu"
              echo "  - xwayland (optional, for X11 apps)"
              echo ""
              read -p "Continue anyway? [y/N] " -n 1 -r
-@@ -124,6 +132,95 @@ install_deps() {
+@@ -124,6 +136,95 @@ install_deps() {
      success "Dependencies installed"
  }
  
@@ -243,7 +247,7 @@ index 8a401bc..05fa5e1 100755
  # Check wlroots version
  check_wlroots() {
      info "Checking wlroots version..."
-@@ -170,8 +267,8 @@ build_wlroots() {
+@@ -170,8 +271,8 @@ build_wlroots() {
      
      # Install meson build deps
      case "$DISTRO" in
@@ -254,7 +258,7 @@ index 8a401bc..05fa5e1 100755
                  meson ninja hwdata libdisplay-info libliftoff seatd || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
-@@ -195,6 +292,9 @@ build_wlroots() {
+@@ -195,6 +296,9 @@ build_wlroots() {
      cd wlroots
      
      info "Configuring..."
@@ -264,7 +268,61 @@ index 8a401bc..05fa5e1 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -319,6 +419,7 @@ main() {
+@@ -272,6 +376,15 @@ install_tbwm() {
+     sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
+     success "Installed fonts (from fonts/ directory)"
+     
++    # tbwm-network helper for the WiFi/Bluetooth menu
++    if [ -f "$SCRIPT_DIR/tbwm-network" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-network" /usr/local/bin/tbwm-network
++        sudo chmod 755 /usr/local/bin/tbwm-network
++        success "Installed /usr/local/bin/tbwm-network"
++    else
++        warn "tbwm-network not found; the network menu (WiFi/Bluetooth) will be empty"
++    fi
++    
+     # Session file for display managers
+     sudo mkdir -p /usr/share/wayland-sessions
+     sudo tee /usr/share/wayland-sessions/tbwm.desktop > /dev/null << 'EOF'
+@@ -307,6 +420,37 @@ exec /usr/local/bin/tbwm.bin "$@"
+ EOF
+         sudo chmod 755 /usr/local/bin/tbwm
+     fi
++
++    enable_net_services
++}
++
++# Enable NetworkManager and Bluetooth services for the WiFi/Bluetooth menu
++enable_net_services() {
++    info "Enabling NetworkManager and Bluetooth services..."
++    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
++        sudo systemctl enable --now NetworkManager bluetooth 2>/dev/null || \
++            warn "Could not enable NetworkManager/bluetooth (systemd)"
++    elif [ -d /etc/runit/runsvdir/current ]; then
++        # runit (Artix, Void): link service dirs into runsvdir
++        for svc in NetworkManager bluetoothd; do
++            if [ -d "/etc/runit/sv/$svc" ]; then
++                sudo ln -sf "/etc/runit/sv/$svc" "/etc/runit/runsvdir/current/"
++                info "runit service '$svc' enabled"
++            else
++                warn "runit service dir /etc/runit/sv/$svc not found (is the -runit package installed?)"
++            fi
++        done
++    elif command -v rc-update >/dev/null 2>&1; then
++        # openrc (Gentoo, Artix-openrc)
++        sudo rc-update add NetworkManager default 2>/dev/null || \
++            warn "could not add NetworkManager to openrc default"
++        sudo rc-update add bluetoothd default 2>/dev/null || \
++            warn "could not add bluetoothd to openrc default"
++        sudo rc-service NetworkManager start 2>/dev/null || true
++        sudo rc-service bluetoothd start 2>/dev/null || true
++    else
++        warn "Unknown init system: enable NetworkManager and Bluetooth manually"
++    fi
+ }
+ 
+ # Main
+@@ -319,6 +463,7 @@ main() {
      
      check_not_root
      detect_distro
@@ -272,8 +330,76 @@ index 8a401bc..05fa5e1 100755
      
      # Ask what to do
      echo ""
+diff --git a/tbwm-network b/tbwm-network
+new file mode 100755
+index 0000000..f57c5df
+--- /dev/null
++++ b/tbwm-network
+@@ -0,0 +1,62 @@
++#!/bin/sh
++# List WiFi networks and Bluetooth devices for tbwm's network menu.
++# Output: Category<TAB>Group<TAB>Name<TAB>shell-command[<TAB>needspass], one per line.
++# WiFi: only open networks or ones with a saved profile; needspass=1 means the
++#   network is protected without a saved profile, so tbwm prompts for a password.
++# Bluetooth: powered on + brief scan; connect/disconnect by MAC.
++
++# --- WiFi (category: Wifi) ---
++if ! command -v nmcli >/dev/null 2>&1; then
++    printf 'Wifi\tInfo\t[WiFi] instala networkmanager (nmcli)\tsh -c '\''echo instala: sudo pacman -S networkmanager'\''\n'
++else
++    saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
++
++    nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
++        [ -n "$ssid" ] || continue
++        need=0
++        case "$inuse" in
++            '*') group="Connected"; prefix="[WiFi*]";;
++            *)   group="Connect"; prefix="[WiFi]"
++                 if [ -n "$sec" ] && ! printf '%s\n' "$saved" | grep -qxF " $ssid"; then
++                     need=1
++                 fi
++                 ;;
++        esac
++        if printf '%s\n' "$seen" | grep -qxF "$ssid"; then
++            continue
++        fi
++        seen="$seen
++$ssid"
++        ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
++        printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
++    done
++fi
++
++# --- Bluetooth (category: Bluetooth) ---
++if command -v bluetoothctl >/dev/null 2>&1; then
++    bluetoothctl power on >/dev/null 2>&1
++    timeout 3 bluetoothctl scan on >/dev/null 2>&1 &
++    scan_pid=$!
++    sleep 2
++    kill "$scan_pid" 2>/dev/null
++    wait "$scan_pid" 2>/dev/null
++
++    connected="$(bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p')"
++    bluetoothctl devices 2>/dev/null | while read -r _ mac name; do
++        [ -n "$mac" ] || continue
++        name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
++        [ -n "$name" ] || name="(sin nombre)"
++        if printf '%s\n' "$connected" | grep -qF "$mac"; then
++            action="bluetoothctl disconnect $mac"
++            group="Connected"
++            prefix="[BT*]"
++        else
++            action="bluetoothctl connect $mac"
++            group="Connect"
++            prefix="[BT]"
++        fi
++        printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
++    done
++else
++    printf 'Bluetooth\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
++fi
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..352a199 100644
+index a1e049d..4ed0bd1 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -440,6 +440,15 @@ static void updatebar(Monitor *m);
@@ -1585,7 +1711,19 @@ index a1e049d..352a199 100644
  	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
  	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
  	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
-@@ -6416,62 +7270,7 @@ static const char *default_config_parts[] = {
+@@ -6392,6 +7246,11 @@ static const char *default_config_parts[] = {
+ "(bind-key \"Print\" (lambda () (spawn-grab \"sh -c 'grim - | wl-copy'\")))\n"
+ "(bind-key \"S-Print\" (lambda () (spawn-grab \"sh -c 'grim -g \\\"$(slurp)\\\" - | wl-copy'\")))\n"
+ "\n"
++";; Network menu (WiFi + Bluetooth) - requires networkmanager, bluez and the\n"
++";; tbwm-network helper (installed by install.sh)\n"
++"(set-net-menu-cmd \"tbwm-network\")\n"
++"(bind-key \"M-n\" (lambda () (toggle-net-menu)))\n"
++"\n"
+ ";; Volume control (requires wpctl/wireplumber)\n"
+ "(bind-key \"XF86AudioRaiseVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\")))\n"
+ "(bind-key \"XF86AudioLowerVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\")))\n"
+@@ -6416,62 +7275,7 @@ static const char *default_config_parts[] = {
  "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
  "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
  "\n"
@@ -1649,7 +1787,7 @@ index a1e049d..352a199 100644
  "\n"
  ";; Advanced setters (examples - not necessarily key bound):\n"
  ";; (set-border-width 2)\n"
-@@ -6664,69 +7463,151 @@ setup_foot_config(void)
+@@ -6664,69 +7468,151 @@ setup_foot_config(void)
  static int
  app_compare(const void *a, const void *b)
  {
@@ -1848,7 +1986,7 @@ index a1e049d..352a199 100644
  	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
  }
  
-@@ -6891,6 +7772,7 @@ void
+@@ -6891,6 +7777,7 @@ void
  togglerepl(const Arg *arg)
  {
  	repl_input_active = !repl_input_active;
@@ -1856,7 +1994,7 @@ index a1e049d..352a199 100644
  	repl_input[0] = '\0';
  	repl_input_len = 0;
  	updatebars();
-@@ -7068,12 +7950,20 @@ load_applications(void)
+@@ -7068,12 +7955,20 @@ load_applications(void)
  	/* Scan system applications */
  	scan_desktop_dir("/usr/share/applications");
  	scan_desktop_dir("/usr/local/share/applications");
@@ -1877,7 +2015,7 @@ index a1e049d..352a199 100644
  	}
  	
  	/* Sort apps and categories */
-@@ -7315,6 +8205,336 @@ updateappmenu(void)
+@@ -7315,6 +8210,336 @@ updateappmenu(void)
  	/* Don't drop - we're caching the buffer for reuse */
  }
  
@@ -2214,7 +2352,7 @@ index a1e049d..352a199 100644
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
  void
  reload_config_key(const Arg *arg)
-@@ -7412,9 +8632,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +8637,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -2226,7 +2364,7 @@ index a1e049d..352a199 100644
  		return 1;
  	}
  
-@@ -7643,37 +8865,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +8870,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -2289,7 +2427,7 @@ index a1e049d..352a199 100644
  			}
  		}
  	} else {
-@@ -7884,66 +9106,98 @@ render_tabs:
+@@ -7884,66 +9111,98 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  

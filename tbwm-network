@@ -6,27 +6,31 @@
 # Bluetooth: powered on + brief scan; connect/disconnect by MAC.
 
 # --- WiFi (category: Wifi) ---
-saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
+if ! command -v nmcli >/dev/null 2>&1; then
+    printf 'Wifi\tInfo\t[WiFi] instala networkmanager (nmcli)\tsh -c '\''echo instala: sudo pacman -S networkmanager'\''\n'
+else
+    saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
 
-nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
-    [ -n "$ssid" ] || continue
-    need=0
-    case "$inuse" in
-        '*') group="Connected"; prefix="[WiFi*]";;
-        *)   group="Connect"; prefix="[WiFi]"
-             if [ -n "$sec" ] && ! printf '%s\n' "$saved" | grep -qxF " $ssid"; then
-                 need=1
-             fi
-             ;;
-    esac
-    if printf '%s\n' "$seen" | grep -qxF "$ssid"; then
-        continue
-    fi
-    seen="$seen
+    nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
+        [ -n "$ssid" ] || continue
+        need=0
+        case "$inuse" in
+            '*') group="Connected"; prefix="[WiFi*]";;
+            *)   group="Connect"; prefix="[WiFi]"
+                 if [ -n "$sec" ] && ! printf '%s\n' "$saved" | grep -qxF " $ssid"; then
+                     need=1
+                 fi
+                 ;;
+        esac
+        if printf '%s\n' "$seen" | grep -qxF "$ssid"; then
+            continue
+        fi
+        seen="$seen
 $ssid"
-    ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
-    printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
-done
+        ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
+        printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
+    done
+fi
 
 # --- Bluetooth (category: Bluetooth) ---
 if command -v bluetoothctl >/dev/null 2>&1; then
@@ -53,4 +57,6 @@ if command -v bluetoothctl >/dev/null 2>&1; then
         fi
         printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
     done
+else
+    printf 'Bluetooth\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 fi

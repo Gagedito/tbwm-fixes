@@ -104,6 +104,25 @@ sacar ninguna captura). Ahora `install.sh` los instala en las dependencias de
 todas las distros (Arch/Artix, Debian, Fedora, openSUSE, Void) y los lista en el
 mensaje de "unknown distro".
 
+### 12. Menú de red funcional de serie (deps + script + config)
+El menú de red (WiFi + Bluetooth) no funcionaba en instalaciones limpias por tres
+motivos: no se instalaban `networkmanager` (nmcli) ni `bluez`/`bluez-utils`
+(bluetoothctl), el helper `tbwm-network` no se instalaba, y la config por defecto
+no incluía `(set-net-menu-cmd ...)` (así que `netmenu_cmd` quedaba vacío y el
+menú no mostraba nada aunque hubiera herramientas).
+- `install.sh` instala `networkmanager bluez bluez-utils` (con sus paquetes
+  `-runit` en Artix: `networkmanager-runit`, `bluez-runit`, `dbus-runit`),
+  copia `tbwm-network` a `/usr/local/bin/tbwm-network` y activa
+  `NetworkManager`/`bluetoothd` según el init detectado (systemd con
+  `enable --now`, runit con symlinks en `runsvdir/current`, openrc con
+  `rc-update`).
+- `tbwm-network` ahora avisa en el menú cuando falta `nmcli` o `bluetoothctl`
+  (entrada "Info" con el paquete a instalar) en vez de mostrar un menú vacío.
+- La config por defecto incluye `(set-net-menu-cmd "tbwm-network")` y el binding
+  `M-n` → `(toggle-net-menu)`. Nota: la config por defecto solo se crea si
+  `~/.config/tbwm/config.scm` no existe; quien ya tenga una config debe añadir
+  esas dos líneas o borrar el archivo para regenerarlo.
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
@@ -145,7 +164,10 @@ chmod +x tbwm-network
 ```
 
 Depende de `nmcli` (paquete `networkmanager`) para WiFi y `bluetoothctl`
-(paquete `bluez-utils`, con el daemon `bluez`) para Bluetooth. Emite una línea
+(paquete `bluez-utils`, con el daemon `bluez`) para Bluetooth. `install.sh` los
+instala y activa los servicios automáticamente; en una instalación manual
+asegúrate de que los daemons `NetworkManager` y `bluetoothd` estén corriendo.
+Emite una línea
 por elemento con el formato
 `Categoría<TAB>Grupo<TAB>Nombre<TAB>comando[<TAB>needspass]`:
 - **Categoría**: `Wifi` o `Bluetooth`.
