@@ -3,16 +3,35 @@
 # Used from TurboWM's (on-startup ...) because tbwm does not process
 # XDG autostart entries (only desktop environments like Plasma do).
 
-if ! pgrep -x pipewire >/dev/null 2>&1; then
+start_stack() {
     /usr/bin/pipewire >/dev/null 2>&1 &
-fi
-
-sleep 0.5
-
-if ! pgrep -x pipewire-pulse >/dev/null 2>&1; then
+    sleep 0.5
     /usr/bin/pipewire-pulse >/dev/null 2>&1 &
+    /usr/bin/wireplumber >/dev/null 2>&1 &
+}
+
+# Returns 0 if there is a real (non-Dummy) audio sink
+has_real_sink() {
+    sinks="$(wpctl status 2>/dev/null | sed -n '/Sinks:/,/Sources:/p')"
+    [ -n "$sinks" ] || return 1
+    printf '%s\n' "$sinks" | grep -qv "Dummy Output"
+}
+
+if ! pgrep -x pipewire >/dev/null 2>&1; then
+    start_stack
+else
+    # pipewire is already running: make sure the rest of the stack is up
+    pgrep -x pipewire-pulse >/dev/null 2>&1 || /usr/bin/pipewire-pulse >/dev/null 2>&1 &
+    pgrep -x wireplumber >/dev/null 2>&1 || /usr/bin/wireplumber >/dev/null 2>&1 &
 fi
 
-if ! pgrep -x wireplumber >/dev/null 2>&1; then
+# Give WirePlumber time to enumerate the hardware. If it ends up with only the
+# Dummy sink (e.g. it started before the sound card / udev was ready), restart
+# it once so the real card is detected.
+sleep 2
+if ! has_real_sink && pgrep -x wireplumber >/dev/null 2>&1; then
+    pkill -x wireplumber
+    sleep 0.5
     /usr/bin/wireplumber >/dev/null 2>&1 &
+    sleep 2
 fi
