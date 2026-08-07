@@ -74,7 +74,7 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..d13da21 100755
+index 8a401bc..ab52bd8 100755
 --- a/install.sh
 +++ b/install.sh
 @@ -46,10 +46,16 @@ install_deps() {
@@ -83,6 +83,8 @@ index 8a401bc..d13da21 100755
      case "$DISTRO" in
 -        arch|endeavouros|manjaro|garuda|cachyos)
 -            # Arch-based
+-            sudo pacman -S --needed --noconfirm \
+-                wlroots wayland wayland-protocols libinput libxkbcommon \
 +        arch|endeavouros|manjaro|garuda|cachyos|artix)
 +            # Arch-based. Artix ships wlroots 0.19 as the wlroots0.19 package;
 +            # on Arch the regular wlroots package is already 0.19+.
@@ -91,8 +93,7 @@ index 8a401bc..d13da21 100755
 +            else
 +                WLROOTS_PKG="wlroots"
 +            fi
-             sudo pacman -S --needed --noconfirm \
--                wlroots wayland wayland-protocols libinput libxkbcommon \
++            sudo pacman -Sy --needed --noconfirm \
 +                "$WLROOTS_PKG" wayland wayland-protocols libinput libxkbcommon \
                  pixman freetype2 pango cairo libxcb xcb-util-wm \
                  xorg-xwayland meson ninja gcc pkgconf make git \
@@ -118,15 +119,17 @@ index 8a401bc..d13da21 100755
  # Check wlroots version
  check_wlroots() {
      info "Checking wlroots version..."
-@@ -170,7 +190,7 @@ build_wlroots() {
+@@ -170,8 +190,8 @@ build_wlroots() {
      
      # Install meson build deps
      case "$DISTRO" in
 -        arch|endeavouros|manjaro|garuda|cachyos)
+-            sudo pacman -S --needed --noconfirm \
 +        arch|endeavouros|manjaro|garuda|cachyos|artix)
-             sudo pacman -S --needed --noconfirm \
++            sudo pacman -Sy --needed --noconfirm \
                  meson ninja hwdata libdisplay-info libliftoff seatd || true
              ;;
+         debian|ubuntu|pop|linuxmint|elementary)
 @@ -195,6 +215,9 @@ build_wlroots() {
      cd wlroots
      

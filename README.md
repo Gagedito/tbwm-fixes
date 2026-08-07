@@ -85,6 +85,10 @@ fallaba al compilar wlroots desde source con `meson: command not found`.
   compilación de wlroots desde source.
 - Antes de `meson setup` se verifica que `meson`/`ninja` existan y se aborta con
   un mensaje claro en vez de "command not found".
+- Los `pacman` de arch-based usan `-Sy` para refrescar la base de datos antes de
+  instalar: una DB desactualizada hace que pacman pida versiones que ya no están
+  en los mirrors (404 en todos, p. ej. `python-tqdm`, dependencia de `meson`) y
+  aborte toda la transacción sin instalar nada.
 
 ## Menú de red (WiFi + Bluetooth)
 
