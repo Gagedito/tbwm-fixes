@@ -75,6 +75,17 @@ overlay y Esc cancelaba). Ahora se recalcula la superficie bajo el cursor y se l
 da foco de puntero si cambió (Enter y luego Motion), de modo que `S-Print`
 (grim + slurp) funciona.
 
+### 10. install.sh: soporte para Artix y paquete wlroots0.19
+Artix reporta `ID=artix` en `/etc/os-release`, así que `install.sh` caía en la
+rama "unknown distro": no instalaba dependencias (incluido meson/ninja) y luego
+fallaba al compilar wlroots desde source con `meson: command not found`.
+- Se agrega `artix` a los casos arch-based de `install_deps` y `build_wlroots`.
+- En Artix se instala el paquete `wlroots0.19` (en Arch el `wlroots` normal ya es
+  0.19+), con lo que `pkg-config wlroots-0.19` se encuentra y se **salta** la
+  compilación de wlroots desde source.
+- Antes de `meson setup` se verifica que `meson`/`ninja` existan y se aborta con
+  un mensaje claro en vez de "command not found".
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
