@@ -27,11 +27,12 @@ fi
 
 # Give WirePlumber time to enumerate the hardware. If it ends up with only the
 # Dummy sink (e.g. it started before the sound card / udev was ready), restart
-# it once so the real card is detected.
-sleep 2
-if ! has_real_sink && pgrep -x wireplumber >/dev/null 2>&1; then
-    pkill -x wireplumber
+# it a few times (with a grace period in between) until the real card shows up.
+attempts=0
+while [ "$attempts" -lt 6 ] && ! has_real_sink; do
+    attempts=$((attempts + 1))
+    pkill -x wireplumber 2>/dev/null
     sleep 0.5
     /usr/bin/wireplumber >/dev/null 2>&1 &
     sleep 2
-fi
+done
