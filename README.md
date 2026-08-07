@@ -6,12 +6,18 @@ compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 - **`tbwm-fixes.patch`** — parche con los arreglos de `tbwm.c`, `config.h`,
   `config.def.h`, `config.mk` e `install.sh`.
 - **`config.scm`** — configuración de ejemplo funcional (bindings, Flatpak,
-  audio, brillo, REPL, TTYs).
+  audio, brillo, REPL, TTYs, menú de red).
 - **`tbwm-audio`** — script para arrancar PipeWire/PipeWire-pulse/WirePlumber
   desde `(on-startup ...)` (tbwm no procesa XDG autostart). Si a los 2s solo
   existe el sink "Dummy Output" (WirePlumber arrancó antes de que la tarjeta de
   sonido/udev estuviera lista), lo reinicia una vez para detectar el hardware
   real. Funciona con cualquier tarjeta de sonido.
+- **`tbwm-network`** — script para el menú de red (WiFi + Bluetooth): lista
+  redes y dispositivos disponibles/conectados y genera los comandos para
+  conectarse o desconectarse.
+
+El código fuente completo con todos estos cambios está en el fork
+[Gagedito/tbwm](https://github.com/Gagedito/tbwm).
 
 ## Qué arregla el parche
 
@@ -45,6 +51,68 @@ En vez de hardcodear un layout, el layout XKB se compila vía la macro
 - `config.mk` agrega `-DTBWM_XKB_LAYOUT="<layout>"` a `CFLAGS`.
 - `config.h`/`config.def.h` usan `NULL` por defecto (layout del sistema).
 
+### 6. Reloj cortado en el borde derecho de la barra
+La estimación del ancho del área derecha de la barra (botón `[N]` + fecha/hora)
+subestimaba el espacio que consumen los separadores, por lo que la hora
+(AM/PM) quedaba cortada por el borde de la pantalla. La estimación ahora
+coincide exactamente con lo que dibuja el render.
+
+### 7. Menú de red (WiFi + Bluetooth)
+El parche agrega un menú combinado de WiFi y Bluetooth accesible desde el botón
+`[N]` en la barra o con `M-n`. Detalles en la sección "Menú de red" más abajo.
+
+## Menú de red (WiFi + Bluetooth)
+
+Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
+botón `[N]` de la barra (justo a la izquierda de la fecha/hora).
+
+### Qué hace
+- Categorías **Wifi** y **Bluetooth**, cada una con sub-temas **Connect** y
+  **Connected**:
+  - **Connected**: redes/dispositivos ya conectados. Elegir uno lo desconecta
+    (Bluetooth) o reconecta (WiFi).
+  - **Connect**: el resto de redes/dispositivos disponibles para conectarse.
+- Navegación con flechas o vim (`j`/`k`), `Enter` para entrar/elegir,
+  `Esc`/`←`/`Backspace` para volver un nivel (y cerrar en el nivel superior),
+  y clics de ratón.
+- Los datos se cargan de forma **asíncrona** (proceso hijo + pipe en el event
+  loop de Wayland), así que abrir el menú nunca congela el compositor; mientras
+  carga se muestra `Loading...`.
+- Para una red WiFi **protegida sin perfil guardado**, el menú pide la
+  **contraseña en el mismo menú** (enmascarada con `*`): se escribe y `Enter`
+  conecta; `Esc`/`←` cancela y vuelve a la lista.
+
+### Configuración
+```scm
+;; Script que lista redes y dispositivos (ver más abajo)
+(set-net-menu-cmd "/home/gage/.local/bin/tbwm-network")
+
+;; Abrir el menú
+(bind-key "M-n" (lambda () (toggle-net-menu)))
+
+;; Opcional: texto del botón en la barra
+(set-net-menu-button "N")
+```
+
+### Script `tbwm-network`
+Copia el script a `~/.local/bin/tbwm-network` y hazlo ejecutable:
+
+```sh
+chmod +x tbwm-network
+```
+
+Depende de `nmcli` (NetworkManager) para WiFi y `bluetoothctl` (bluez) para
+Bluetooth. Emite una línea por elemento con el formato
+`Categoría<TAB>Grupo<TAB>Nombre<TAB>comando[<TAB>needspass]`:
+- **Categoría**: `Wifi` o `Bluetooth`.
+- **Grupo**: `Connect` o `Connected`.
+- **Nombre**: etiqueta mostrada en el menú (p. ej. `[WiFi] SSID (75%)`).
+- **comando**: shell command que se ejecuta al elegir el elemento
+  (`nmcli dev wifi connect 'SSID'`, `bluetoothctl connect MAC`,
+  `bluetoothctl disconnect MAC`).
+- **needspass** (opcional): `1` si es una red WiFi protegida sin perfil
+  guardado; en ese caso tbwm pide la contraseña antes de ejecutar.
+
 ## Cómo aplicarlo
 
 ```sh
@@ -52,6 +120,10 @@ git clone https://github.com/WheeledCord/tbwm
 cd tbwm
 git apply /ruta/a/tbwm-fixes.patch   # o: patch -p1 < /ruta/a/tbwm-fixes.patch
 ```
+
+Para el menú de red, copia también `tbwm-network` a `~/.local/bin/` (o a
+cualquier directorio en `PATH`) y hazlo ejecutable (ver sección
+"Menú de red").
 
 ## Cómo compilar
 
@@ -86,6 +158,8 @@ Copia `config.scm` a `~/.config/tbwm/config.scm` y ajusta la ruta del
 
 Incluye:
 - Terminal (`M-Return` → foot), launcher (`M-d`), menú de apps (`M-x`).
+- Menú de red WiFi/Bluetooth (`M-n` → `toggle-net-menu`, con el script
+  `tbwm-network`).
 - Navegación de foco/swap con vim keys y flechas.
 - 9 tags con mover ventana (`M-S-1..9` en US, `M-S-exclam..parenleft`).
 - Captura de pantalla con `grim` + `slurp` (copia al portapapeles).

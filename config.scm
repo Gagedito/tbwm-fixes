@@ -84,6 +84,10 @@
 ;; App menu
 (bind-key "M-x" (lambda () (toggle-appmenu)))
 
+;; Network menu (WiFi + Bluetooth) - see tbwm-network script
+(set-net-menu-cmd "/home/gage/.local/bin/tbwm-network")
+(bind-key "M-n" (lambda () (toggle-net-menu)))
+
 ;; Close window
 (bind-key "M-q" (lambda () (kill-client)))
 

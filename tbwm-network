@@ -1,0 +1,56 @@
+#!/bin/sh
+# List WiFi networks and Bluetooth devices for tbwm's network menu.
+# Output: Category<TAB>Group<TAB>Name<TAB>shell-command[<TAB>needspass], one per line.
+# WiFi: only open networks or ones with a saved profile; needspass=1 means the
+#   network is protected without a saved profile, so tbwm prompts for a password.
+# Bluetooth: powered on + brief scan; connect/disconnect by MAC.
+
+# --- WiFi (category: Wifi) ---
+saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
+
+nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
+    [ -n "$ssid" ] || continue
+    need=0
+    case "$inuse" in
+        '*') group="Connected"; prefix="[WiFi*]";;
+        *)   group="Connect"; prefix="[WiFi]"
+             if [ -n "$sec" ] && ! printf '%s\n' "$saved" | grep -qxF " $ssid"; then
+                 need=1
+             fi
+             ;;
+    esac
+    if printf '%s\n' "$seen" | grep -qxF "$ssid"; then
+        continue
+    fi
+    seen="$seen
+$ssid"
+    ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
+    printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
+done
+
+# --- Bluetooth (category: Bluetooth) ---
+if command -v bluetoothctl >/dev/null 2>&1; then
+    bluetoothctl power on >/dev/null 2>&1
+    timeout 3 bluetoothctl scan on >/dev/null 2>&1 &
+    scan_pid=$!
+    sleep 2
+    kill "$scan_pid" 2>/dev/null
+    wait "$scan_pid" 2>/dev/null
+
+    connected="$(bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p')"
+    bluetoothctl devices 2>/dev/null | while read -r _ mac name; do
+        [ -n "$mac" ] || continue
+        name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+        [ -n "$name" ] || name="(sin nombre)"
+        if printf '%s\n' "$connected" | grep -qF "$mac"; then
+            action="bluetoothctl disconnect $mac"
+            group="Connected"
+            prefix="[BT*]"
+        else
+            action="bluetoothctl connect $mac"
+            group="Connect"
+            prefix="[BT]"
+        fi
+        printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
+    done
+fi
