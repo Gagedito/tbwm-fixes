@@ -1,14 +1,44 @@
 #!/bin/sh
 # List WiFi networks and Bluetooth devices for tbwm's network menu.
 # Output: Category<TAB>Group<TAB>Name<TAB>shell-command[<TAB>needspass], one per line.
-# WiFi: only open networks or ones with a saved profile; needspass=1 means the
-#   network is protected without a saved profile, so tbwm prompts for a password.
+# WiFi: detects the active network manager (connman or NetworkManager) so the
+#   menu works on both; needspass=1 means the network is protected, so tbwm
+#   prompts for a password.
 # Bluetooth: powered on + brief scan; connect/disconnect by MAC.
 
 # --- WiFi (category: Wifi) ---
-if ! command -v nmcli >/dev/null 2>&1; then
-    printf 'Wifi\tInfo\t[WiFi] instala networkmanager (nmcli)\tsh -c '\''echo instala: sudo pacman -S networkmanager'\''\n'
-else
+if pgrep -x connmand >/dev/null 2>&1; then
+    connmanctl enable wifi >/dev/null 2>&1
+    connmanctl scan wifi >/dev/null 2>&1
+
+    connmanctl services 2>/dev/null | while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        id=$(printf '%s' "$line" | awk '{print $NF}')
+        [ -n "$id" ] || continue
+        rest=$(printf '%s' "$line" | sed "s/[[:space:]]*${id}[[:space:]]*$//")
+        case "$id" in
+            wifi_*_psk|wifi_*_wep) need=1;;
+            *) need=0;;
+        esac
+        case "$rest" in
+            *"*"*) group="Connected"; prefix="[WiFi*]"
+                   name=$(printf '%s' "$rest" | awk '{$1=""; sub(/^ +/,""); print}');;
+            *)     group="Connect"; prefix="[WiFi]"
+                   name=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//');;
+        esac
+        [ -n "$name" ] || continue
+
+        nameq=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
+        if [ "$need" = "1" ]; then
+            # tbwm appends " password '<escaped>'" to this command, so in the
+            # inner sh: $1=<id> and $3=<password>.
+            exec="sh -c 'connmanctl config \"\$1\" --passphrase \"\$3\" --save && connmanctl connect \"\$1\"' _ $id"
+        else
+            exec="connmanctl connect $id"
+        fi
+        printf 'Wifi\t%s\t%s %s\t%s\t%s\n' "$group" "$prefix" "$name" "$exec" "$need"
+    done
+elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
     saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
 
     nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
@@ -30,6 +60,8 @@ $ssid"
         ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
         printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
     done
+else
+    printf 'Wifi\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
 fi
 
 # --- Bluetooth (category: Bluetooth) ---

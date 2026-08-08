@@ -167,6 +167,35 @@ pantalla (p. ej. GPU Screen Recorder) pasa por el portal
 - Nota: hay que **relanzar la sesión**; las apps ya corriendo no heredan el bus
   retroactivamente.
 
+### 15. Menú de red con connman y NetworkManager (elegir gestor activo)
+`tbwm-network` solo hablaba con `nmcli`, así que en un sistema que usa **connman**
+el menú no mostraba nada. Peor: `install.sh` (fix 12) activaba el servicio
+NetworkManager en **todos** los sistemas, de modo que en una máquina connman
+quedaban instalados/activados los dos gestores a la vez, y al no poder operar la
+interfaz el sistema se quedaba sin internet (la "incompatibilidad" era eso: dos
+gestores de red instalados a la vez, aunque el servicio NetworkManager no llegara
+a estar activo).
+- `tbwm-network` ahora **detecta el gestor activo** y usa el apropiado:
+  - `connmand` corriendo → lista y conecta con `connmanctl` (`enable wifi`,
+    `scan wifi`, `services`), marcando las redes `wifi_*_psk`/`wifi_*_wep` como
+    `needspass=1`. Para conectar con contraseña usa
+    `connmanctl config <id> --passphrase ... --save && connmanctl connect <id>`
+    (tbwm añade ` password '<...>'` al comando, y el helper lo recibe en `$3`).
+  - NetworkManager corriendo (`nmcli ... RUNNING = running`) → rama `nmcli`
+    original.
+  - Ninguno → entrada "Info" indicando cuál activar (en vez de menú vacío).
+- `install.sh`:
+  - `detect_net_backend()` elige connman si `connmand` corre (o `connmanctl`
+    existe) y NetworkManager si no.
+  - En Artix instala `connman connman-runit` en vez de `networkmanager
+    networkmanager-runit` cuando el backend es connman.
+  - `enable_net_services()` **activa solo un gestor y desactiva el otro**
+    (systemd `disable --now`, runit `rm`+`sv down` del symlink contrario, openrc
+    `rc-update del`), además de `bluetoothd`, para que no vuelvan a pelear.
+- Para quien ya tenga el sistema roto: desactivar uno de los dos gestores y
+  reconectar las redes guardadas (cada gestor guarda su propia lista, así que al
+  cambiar de gestor hay que reconectar las redes una vez).
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el

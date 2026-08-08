@@ -74,10 +74,10 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..965399e 100755
+index 8a401bc..fb37425 100755
 --- a/install.sh
 +++ b/install.sh
-@@ -46,13 +46,23 @@ install_deps() {
+@@ -46,13 +46,29 @@ install_deps() {
      info "Installing dependencies..."
      
      case "$DISTRO" in
@@ -90,8 +90,14 @@ index 8a401bc..965399e 100755
 +            # on Arch the regular wlroots package is already 0.19+.
 +            if [ "$DISTRO" = "artix" ]; then
 +                WLROOTS_PKG="wlroots0.19"
-+                # runit service packages for the WiFi/Bluetooth menu
-+                NET_DEPS="networkmanager networkmanager-runit bluez bluez-utils bluez-runit dbus-runit"
++                # runit service packages for the WiFi/Bluetooth menu. If connman
++                # is already installed, keep using it instead of NetworkManager
++                # (installing both leaves the network menu without a backend).
++                if [ "$NET_BACKEND" = "connman" ]; then
++                    NET_DEPS="connman connman-runit bluez bluez-utils bluez-runit dbus-runit"
++                else
++                    NET_DEPS="networkmanager networkmanager-runit bluez bluez-utils bluez-runit dbus-runit"
++                fi
 +            else
 +                WLROOTS_PKG="wlroots"
 +                NET_DEPS="networkmanager bluez bluez-utils"
@@ -106,7 +112,7 @@ index 8a401bc..965399e 100755
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
              # Debian-based - note: libwlroots-dev often not available or too old
-@@ -65,7 +75,7 @@ install_deps() {
+@@ -65,7 +81,7 @@ install_deps() {
                  libdrm-dev libgbm-dev libseat-dev \
                  libdisplay-info-dev libliftoff-dev hwdata \
                  meson ninja-build gcc pkg-config make git \
@@ -115,7 +121,7 @@ index 8a401bc..965399e 100755
              ;;
          fedora|rhel|centos|rocky|almalinux)
              # Fedora/RHEL-based
-@@ -75,7 +85,7 @@ install_deps() {
+@@ -75,7 +91,7 @@ install_deps() {
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-x11-server-Xwayland \
                  meson ninja-build gcc pkg-config make git \
@@ -124,7 +130,7 @@ index 8a401bc..965399e 100755
              ;;
          opensuse*|suse*)
              # openSUSE
-@@ -84,7 +94,7 @@ install_deps() {
+@@ -84,7 +100,7 @@ install_deps() {
                  libinput-devel libxkbcommon-devel libpixman-1-0-devel \
                  freetype2-devel pango-devel cairo-devel \
                  libxcb-devel xwayland meson ninja gcc pkg-config make git \
@@ -133,7 +139,7 @@ index 8a401bc..965399e 100755
              ;;
          void)
              # Void Linux
-@@ -93,7 +103,8 @@ install_deps() {
+@@ -93,7 +109,8 @@ install_deps() {
                  libinput-devel libxkbcommon-devel pixman-devel \
                  freetype-devel pango-devel cairo-devel \
                  libxcb-devel xcb-util-wm-devel xorg-server-xwayland \
@@ -143,7 +149,7 @@ index 8a401bc..965399e 100755
              ;;
          gentoo)
              warn "Gentoo detected. Please ensure you have the following USE flags enabled:"
-@@ -112,6 +123,8 @@ install_deps() {
+@@ -112,6 +129,8 @@ install_deps() {
              echo "  - libinput, libxkbcommon"
              echo "  - freetype2, pango, cairo, pixman"
              echo "  - libxcb, xcb-util-wm"
@@ -152,7 +158,7 @@ index 8a401bc..965399e 100755
              echo "  - xwayland (optional, for X11 apps)"
              echo ""
              read -p "Continue anyway? [y/N] " -n 1 -r
-@@ -124,6 +137,95 @@ install_deps() {
+@@ -124,6 +143,95 @@ install_deps() {
      success "Dependencies installed"
  }
  
@@ -248,7 +254,7 @@ index 8a401bc..965399e 100755
  # Check wlroots version
  check_wlroots() {
      info "Checking wlroots version..."
-@@ -170,8 +272,8 @@ build_wlroots() {
+@@ -170,8 +278,8 @@ build_wlroots() {
      
      # Install meson build deps
      case "$DISTRO" in
@@ -259,7 +265,7 @@ index 8a401bc..965399e 100755
                  meson ninja hwdata libdisplay-info libliftoff seatd || true
              ;;
          debian|ubuntu|pop|linuxmint|elementary)
-@@ -195,6 +297,9 @@ build_wlroots() {
+@@ -195,6 +303,9 @@ build_wlroots() {
      cd wlroots
      
      info "Configuring..."
@@ -269,7 +275,7 @@ index 8a401bc..965399e 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -272,13 +377,32 @@ install_tbwm() {
+@@ -272,13 +383,32 @@ install_tbwm() {
      sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
      success "Installed fonts (from fonts/ directory)"
      
@@ -303,7 +309,7 @@ index 8a401bc..965399e 100755
  Type=Application
  EOF
      success "Installed session file"
-@@ -307,6 +431,53 @@ exec /usr/local/bin/tbwm.bin "$@"
+@@ -307,6 +437,94 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
@@ -327,17 +333,54 @@ index 8a401bc..965399e 100755
 +    fi
 +}
 +
-+# Enable NetworkManager and Bluetooth services for the WiFi/Bluetooth menu
++# Pick which network manager is in use (connman and NetworkManager conflict if
++# both are enabled at the same time, so we always enable exactly one of them).
++detect_net_backend() {
++    NET_BACKEND="networkmanager"
++    if pgrep -x connmand >/dev/null 2>&1; then
++        NET_BACKEND="connman"
++    elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
++        NET_BACKEND="networkmanager"
++    elif command -v connmanctl >/dev/null 2>&1; then
++        NET_BACKEND="connman"
++    fi
++    info "Network backend: $NET_BACKEND"
++}
++
++# Enable the active network manager and Bluetooth services for the menu
 +enable_net_services() {
-+    info "Enabling NetworkManager and Bluetooth services..."
++    detect_net_backend
++    if [ "$NET_BACKEND" = "connman" ]; then
++        NET_SERVICE="connmand"
++        info "Enabling connman ($NET_SERVICE) and Bluetooth services..."
++    else
++        NET_SERVICE="NetworkManager"
++        info "Enabling NetworkManager and Bluetooth services..."
++    fi
++
 +    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-+        sudo systemctl enable --now NetworkManager bluetooth 2>/dev/null || \
-+            warn "Could not enable NetworkManager/bluetooth (systemd)"
++        # ensure only one network manager is enabled/started
++        if [ "$NET_SERVICE" = "connmand" ]; then
++            sudo systemctl disable --now NetworkManager 2>/dev/null || true
++        else
++            sudo systemctl disable --now connmand 2>/dev/null || true
++        fi
++        sudo systemctl enable --now "$NET_SERVICE" bluetooth 2>/dev/null || \
++            warn "Could not enable $NET_SERVICE/bluetooth (systemd)"
 +    elif [ -d /etc/runit/runsvdir/current ]; then
 +        # runit (Artix, Void): link service dirs into runsvdir
-+        for svc in NetworkManager bluetoothd; do
++        OTHER="connmand"
++        [ "$NET_SERVICE" = "connmand" ] && OTHER="NetworkManager"
++        # remove the other manager so they never fight over the interface
++        if [ -d "/etc/runit/sv/$OTHER" ]; then
++            sudo rm -f "/etc/runit/runsvdir/current/$OTHER"
++            sudo sv down "$OTHER" 2>/dev/null || true
++            info "runit service '$OTHER' disabled"
++        fi
++        for svc in "$NET_SERVICE" bluetoothd; do
 +            if [ -d "/etc/runit/sv/$svc" ]; then
 +                sudo ln -sf "/etc/runit/sv/$svc" "/etc/runit/runsvdir/current/"
++                sudo sv up "$svc" 2>/dev/null || true
 +                info "runit service '$svc' enabled"
 +            else
 +                warn "runit service dir /etc/runit/sv/$svc not found (is the -runit package installed?)"
@@ -345,27 +388,32 @@ index 8a401bc..965399e 100755
 +        done
 +    elif command -v rc-update >/dev/null 2>&1; then
 +        # openrc (Gentoo, Artix-openrc)
-+        sudo rc-update add NetworkManager default 2>/dev/null || \
-+            warn "could not add NetworkManager to openrc default"
++        OTHER="connmand"
++        [ "$NET_SERVICE" = "connmand" ] && OTHER="NetworkManager"
++        sudo rc-update del "$OTHER" default 2>/dev/null || true
++        sudo rc-service "$OTHER" stop 2>/dev/null || true
++        sudo rc-update add "$NET_SERVICE" default 2>/dev/null || \
++            warn "could not add $NET_SERVICE to openrc default"
 +        sudo rc-update add bluetoothd default 2>/dev/null || \
 +            warn "could not add bluetoothd to openrc default"
-+        sudo rc-service NetworkManager start 2>/dev/null || true
++        sudo rc-service "$NET_SERVICE" start 2>/dev/null || true
 +        sudo rc-service bluetoothd start 2>/dev/null || true
 +    else
-+        warn "Unknown init system: enable NetworkManager and Bluetooth manually"
++        warn "Unknown init system: enable $NET_SERVICE and Bluetooth manually"
 +    fi
  }
  
  # Main
-@@ -319,6 +490,7 @@ main() {
+@@ -319,6 +537,8 @@ main() {
      
      check_not_root
      detect_distro
++    detect_net_backend
 +    setup_keyboard_layout
      
      # Ask what to do
      echo ""
-@@ -356,7 +528,8 @@ main() {
+@@ -356,7 +576,8 @@ main() {
      echo ""
      echo "To use TurboWM:"
      echo "  • Log out and select 'TurboWM' from your display manager"
@@ -377,21 +425,51 @@ index 8a401bc..965399e 100755
      echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..f57c5df
+index 0000000..14439f5
 --- /dev/null
 +++ b/tbwm-network
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,94 @@
 +#!/bin/sh
 +# List WiFi networks and Bluetooth devices for tbwm's network menu.
 +# Output: Category<TAB>Group<TAB>Name<TAB>shell-command[<TAB>needspass], one per line.
-+# WiFi: only open networks or ones with a saved profile; needspass=1 means the
-+#   network is protected without a saved profile, so tbwm prompts for a password.
++# WiFi: detects the active network manager (connman or NetworkManager) so the
++#   menu works on both; needspass=1 means the network is protected, so tbwm
++#   prompts for a password.
 +# Bluetooth: powered on + brief scan; connect/disconnect by MAC.
 +
 +# --- WiFi (category: Wifi) ---
-+if ! command -v nmcli >/dev/null 2>&1; then
-+    printf 'Wifi\tInfo\t[WiFi] instala networkmanager (nmcli)\tsh -c '\''echo instala: sudo pacman -S networkmanager'\''\n'
-+else
++if pgrep -x connmand >/dev/null 2>&1; then
++    connmanctl enable wifi >/dev/null 2>&1
++    connmanctl scan wifi >/dev/null 2>&1
++
++    connmanctl services 2>/dev/null | while IFS= read -r line; do
++        [ -n "$line" ] || continue
++        id=$(printf '%s' "$line" | awk '{print $NF}')
++        [ -n "$id" ] || continue
++        rest=$(printf '%s' "$line" | sed "s/[[:space:]]*${id}[[:space:]]*$//")
++        case "$id" in
++            wifi_*_psk|wifi_*_wep) need=1;;
++            *) need=0;;
++        esac
++        case "$rest" in
++            *"*"*) group="Connected"; prefix="[WiFi*]"
++                   name=$(printf '%s' "$rest" | awk '{$1=""; sub(/^ +/,""); print}');;
++            *)     group="Connect"; prefix="[WiFi]"
++                   name=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//');;
++        esac
++        [ -n "$name" ] || continue
++
++        nameq=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
++        if [ "$need" = "1" ]; then
++            # tbwm appends " password '<escaped>'" to this command, so in the
++            # inner sh: $1=<id> and $3=<password>.
++            exec="sh -c 'connmanctl config \"\$1\" --passphrase \"\$3\" --save && connmanctl connect \"\$1\"' _ $id"
++        else
++            exec="connmanctl connect $id"
++        fi
++        printf 'Wifi\t%s\t%s %s\t%s\t%s\n' "$group" "$prefix" "$name" "$exec" "$need"
++    done
++elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
 +    saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
 +
 +    nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
@@ -413,6 +491,8 @@ index 0000000..f57c5df
 +        ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
 +        printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
 +    done
++else
++    printf 'Wifi\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
 +fi
 +
 +# --- Bluetooth (category: Bluetooth) ---
