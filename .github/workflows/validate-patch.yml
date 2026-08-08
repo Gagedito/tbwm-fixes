@@ -1,0 +1,71 @@
+name: validate-patch
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  apply-and-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential pkg-config meson ninja-build git ca-certificates \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libxkbcommon-dev xkb-data libinput-dev libpixman-1-dev \
+            libfreetype-dev libxcb1-dev libxcb-icccm4-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev libgles2-mesa-dev \
+            libseat-dev libffi-dev libxml2-dev hwdata \
+            libdisplay-info-dev libliftoff-dev
+
+      - name: Build Wayland >= 1.23.1 from source (Ubuntu ships 1.22.0)
+        run: |
+          git clone --depth 1 --branch 1.23.1 \
+            https://gitlab.freedesktop.org/wayland/wayland.git /tmp/wayland
+          cd /tmp/wayland
+          meson setup build --prefix=/usr -Ddocumentation=false
+          ninja -C build
+          sudo ninja -C build install
+
+      - name: Build pixman >= 0.43 from source (Ubuntu ships 0.42.2)
+        run: |
+          git clone --depth 1 --branch pixman-0.44.0 \
+            https://gitlab.freedesktop.org/pixman/pixman.git /tmp/pixman
+          cd /tmp/pixman
+          meson setup build --prefix=/usr -Dtests=disabled -Dlibpng=disabled
+          ninja -C build
+          sudo ninja -C build install
+
+      - name: Build wlroots 0.19 (not packaged on Ubuntu)
+        run: |
+          git clone --depth 1 --branch 0.19.0 \
+            https://gitlab.freedesktop.org/wlroots/wlroots.git /tmp/wlroots
+          cd /tmp/wlroots
+          meson setup build --prefix=/usr/local -Dexamples=false -Dxwayland=disabled
+          ninja -C build
+          sudo ninja -C build install
+          sudo ldconfig
+          export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+          pkg-config --exists wlroots-0.19 && echo "wlroots-0.19 OK"
+
+      - name: Clone upstream and apply patch
+        run: |
+          git clone https://github.com/WheeledCord/tbwm.git /tmp/upstream
+          cd /tmp/upstream
+          git apply --check /home/runner/work/tbwm-fixes/tbwm-fixes/tbwm-fixes.patch
+          git apply /home/runner/work/tbwm-fixes/tbwm-fixes/tbwm-fixes.patch
+
+      - name: Build tbwm (patched upstream)
+        run: |
+          export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+          cd /tmp/upstream
+          TBWM_XKB_LAYOUT=latam make -j2 XWAYLAND=
+          test -x tbwm && echo "patched tbwm built OK"
