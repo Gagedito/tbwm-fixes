@@ -232,6 +232,16 @@ Enter o hacer clic sobre una red/dispositivo en vez de ejecutar directamente:
 - Las redes que aparecen guardadas y en el escaneo a la vez se emiten **una sola
   vez** (sin duplicados en el menú).
 
+### 18. Menú de red: sub-apartados por tipo (Conectado / Guardadas / Buscar)
+Los grupos de `tbwm-network` se reordenan en sub-apartados para que la red
+conectada aparezca siempre primero y la lista no sea un batiburrillo:
+- **Wifi**: `Conectado` (acciones `Desconectar` + `Olvidar`) → `Guardadas`
+  (`Conectar` + `Olvidar`) → `Buscar red` (`Conectar`, con %) de las visibles
+  no guardadas.
+- **Bluetooth**: `Conectado` → `Emparejados` → `Buscar dispositivos` (nuevos
+  sin emparejar). Cada dispositivo lleva sus MAC correctos en los comandos
+  (`bluetoothctl disconnect/remove <MAC>`, `connect <MAC>`, ...).
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el

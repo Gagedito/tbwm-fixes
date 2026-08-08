@@ -425,15 +425,15 @@ index 8a401bc..fb37425 100755
      echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..9e8e196
+index 0000000..5255840
 --- /dev/null
 +++ b/tbwm-network
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,140 @@
 +#!/bin/sh
 +# List WiFi networks and Bluetooth devices for tbwm's network menu.
-+# Output: Category<TAB>Group=TARGET<TAB>Action<TAB>command[<TAB>needspass], one per line.
-+# The menu shows every network/device as its own sub-topic (group); selecting one
-+# shows its actions (Conectar / Desconectar / Olvidar, depending on state).
++# Output: Category<TAB>Sub-apartado<TAB>Action<TAB>command[<TAB>needspass], one per line.
++# The menu shows sub-apartados in the order they appear here, and within each one
++# every network/device has its actions (Conectar / Desconectar / Olvidar).
 +# WiFi: detects the active network manager (connman or NetworkManager).
 +# Bluetooth: powered on + brief scan; connect/disconnect/forget by MAC.
 +
@@ -465,18 +465,19 @@ index 0000000..9e8e196
 +        [ -n "$name" ] || continue
 +
 +        nameq=$(q "$name")
-+        printf 'Wifi\t%s' "$nameq"
 +        if [ "$conn" = "1" ]; then
-+            printf '\tDesconectar %s\tconnmanctl disconnect %s\n' "$nameq" "$id"
++            printf 'Wifi\tConectado\tDesconectar %s\tconnmanctl disconnect %s\n' "$nameq" "$id"
++            printf 'Wifi\tConectado\tOlvidar %s\tconnmanctl remove %s\n' "$nameq" "$id"
 +        else
++            printf 'Wifi\tGuardadas\tConectar a %s\t' "$nameq"
 +            if [ "$need" = "1" ]; then
 +                exec_ps="sh -c 'connmanctl config \"\$1\" --passphrase \"\$3\" --save && connmanctl connect \"\$1\"' _ $id"
-+                printf '\tConectar a %s\t%s\t1\n' "$nameq" "$exec_ps"
++                printf '%s\t1\n' "$exec_ps"
 +            else
-+                printf '\tConectar a %s\tconnmanctl connect %s\n' "$nameq" "$id"
++                printf 'connmanctl connect %s\n' "$id"
 +            fi
++            printf 'Wifi\tGuardadas\tOlvidar %s\tconnmanctl remove %s\n' "$nameq" "$id"
 +        fi
-+        printf 'Wifi\t%s\tOlvidar %s\tconnmanctl remove %s\n' "$nameq" "$nameq" "$id"
 +    done
 +elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
 +    savedw=""
@@ -490,17 +491,27 @@ index 0000000..9e8e196
 +EOF
 +    active="$(nmcli -t -f NAME connection show --active 2>/dev/null)"
 +
++    # 1) Connected first
 +    printf '%s\n' "$savedw" | while IFS= read -r prof; do
 +        [ -n "$prof" ] || continue
-+        pq=$(q "$prof")
 +        if printf '%s\n' "$active" | grep -qxF "$prof"; then
-+            printf 'Wifi\t%s\tDesconectar %s\tnmcli connection down '\''%s'\''\n' "$pq" "$pq" "$pq"
-+        else
-+            printf 'Wifi\t%s\tConectar a %s\tnmcli connection up '\''%s'\''\n' "$pq" "$pq" "$pq"
++            pq=$(q "$prof")
++            printf 'Wifi\tConectado\tDesconectar %s\tnmcli connection down '\''%s'\''\n' "$pq" "$pq"
++            printf 'Wifi\tConectado\tOlvidar %s\tnmcli connection delete '\''%s'\''\n' "$pq" "$pq"
 +        fi
-+        printf 'Wifi\t%s\tOlvidar %s\tnmcli connection delete '\''%s'\''\n' "$pq" "$pq" "$pq"
 +    done
 +
++    # 2) Saved (not connected)
++    printf '%s\n' "$savedw" | while IFS= read -r prof; do
++        [ -n "$prof" ] || continue
++        if ! printf '%s\n' "$active" | grep -qxF "$prof"; then
++            pq=$(q "$prof")
++            printf 'Wifi\tGuardadas\tConectar a %s\tnmcli connection up '\''%s'\''\n' "$pq" "$pq"
++            printf 'Wifi\tGuardadas\tOlvidar %s\tnmcli connection delete '\''%s'\''\n' "$pq" "$pq"
++        fi
++    done
++
++    # 3) Search: available, not saved
 +    seen="$savedw"
 +    nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
 +        [ -n "$ssid" ] || continue
@@ -512,7 +523,7 @@ index 0000000..9e8e196
 +        ssq=$(q "$ssid")
 +        need=0
 +        [ -n "$sec" ] && need=1
-+        printf 'Wifi\t%s\tConectar a %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$ssq" "$ssq" "$sig" "$ssq" "$need"
++        printf 'Wifi\tBuscar red\tConectar a %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$ssq" "$sig" "$ssq" "$need"
 +    done
 +else
 +    printf 'Wifi\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
@@ -543,13 +554,13 @@ index 0000000..9e8e196
 +$mac"
 +            nq=$(q "$name")
 +            if printf '%s\n' "$connected" | grep -qF "$mac"; then
-+                printf 'Bluetooth\t%s\tDesconectar %s\tbluetoothctl disconnect %s\n' "$nq" "$nq" "$mac"
-+                printf 'Bluetooth\t%s\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$nq" "$mac"
++                printf 'Bluetooth\tConectado\tDesconectar %s\tbluetoothctl disconnect %s\n' "$nq" "$mac"
++                printf 'Bluetooth\tConectado\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$mac"
 +            elif printf '%s\n' "$paired" | grep -qF "$mac"; then
-+                printf 'Bluetooth\t%s\tConectar a %s\tbluetoothctl connect %s\n' "$nq" "$nq" "$mac"
-+                printf 'Bluetooth\t%s\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$nq" "$mac"
++                printf 'Bluetooth\tEmparejados\tConectar a %s\tbluetoothctl connect %s\n' "$nq" "$mac"
++                printf 'Bluetooth\tEmparejados\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$mac"
 +            else
-+                printf 'Bluetooth\t%s\tConectar a %s\tbluetoothctl pair %s; bluetoothctl trust %s; bluetoothctl connect %s\n' "$nq" "$nq" "$mac" "$mac" "$mac"
++                printf 'Bluetooth\tBuscar dispositivos\tConectar a %s\tbluetoothctl pair %s; bluetoothctl trust %s; bluetoothctl connect %s\n' "$nq" "$mac" "$mac" "$mac"
 +            fi
 +        done
 +    else
