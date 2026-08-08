@@ -61,8 +61,14 @@ blt_send(const char *line)
 static void
 blt_dbg(const char *fmt, ...)
 {
-	FILE *f = fopen("/tmp/tbwm-bt.log", "a");
+	FILE *f = NULL;
 	va_list ap;
+
+	/* Only log when TBWM_DEBUG=1 is set (avoids growing /tmp/tbwm-bt.log on
+	 * every normal session). Used for post-mortem of the pairing session. */
+	if (!getenv("TBWM_DEBUG"))
+		return;
+	f = fopen("/tmp/tbwm-bt.log", "a");
 	if (!f)
 		return;
 	va_start(ap, fmt);

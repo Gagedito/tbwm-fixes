@@ -320,7 +320,7 @@ botón `[N]` de la barra (justo a la izquierda de la fecha/hora).
 ### Configuración
 ```scm
 ;; Script que lista redes y dispositivos (ver más abajo)
-(set-net-menu-cmd "/home/gage/.local/bin/tbwm-network")
+(set-net-menu-cmd "~/.local/bin/tbwm-network")
 
 ;; Abrir el menú
 (bind-key "M-n" (lambda () (toggle-net-menu)))
@@ -342,15 +342,23 @@ instala y activa los servicios automáticamente; en una instalación manual
 asegúrate de que los daemons `NetworkManager` y `bluetoothd` estén corriendo.
 Emite una línea
 por elemento con el formato
-`Categoría<TAB>Grupo<TAB>Nombre<TAB>comando[<TAB>needspass]`:
+`Categoría<TAB>Grupo<TAB>Subgrupo<TAB>Acción<TAB>comando[<TAB>flag]`:
 - **Categoría**: `Wifi` o `Bluetooth`.
-- **Grupo**: `Connect` o `Connected`.
-- **Nombre**: etiqueta mostrada en el menú (p. ej. `[WiFi] SSID (75%)`).
+- **Grupo**: apartado fijo dentro de la categoría. Para **Wifi**:
+  `Conectado`, `Guardadas` y `Buscar red`. Para **Bluetooth**: `Conectado`,
+  `Emparejados` y `Buscar dispositivos`.
+- **Subgrupo**: la red o dispositivo concreto (o vacío en el marcador `Info`).
+- **Acción**: `Conectar`, `Desconectar`, `Olvidar` o `Info` (marcador de grupo
+  vacío, ejecuta `sh -c true`).
 - **comando**: shell command que se ejecuta al elegir el elemento
   (`nmcli dev wifi connect 'SSID'`, `bluetoothctl connect MAC`,
   `bluetoothctl disconnect MAC`).
-- **needspass** (opcional): `1` si es una red WiFi protegida sin perfil
-  guardado; en ese caso tbwm pide la contraseña antes de ejecutar.
+- **flag** (opcional, 6ª columna):
+  - `1`: red WiFi protegida sin perfil guardado; tbwm pide la contraseña antes
+    de ejecutar.
+  - `BTPAIR`: dispositivo Bluetooth descubierto, todavía sin emparejar; al
+    elegirlo tbwm abre el **diálogo de emparejado** (confirma el PIN/passkey en
+    pantalla; ver fix 20).
 
 ## Cómo aplicarlo
 
