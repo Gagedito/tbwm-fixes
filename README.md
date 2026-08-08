@@ -241,6 +241,9 @@ conectada aparezca siempre primero y la lista no sea un batiburrillo:
 - **Bluetooth**: `Conectado` → `Emparejados` → `Buscar dispositivos` (nuevos
   sin emparejar). Cada dispositivo lleva sus MAC correctos en los comandos
   (`bluetoothctl disconnect/remove <MAC>`, `connect <MAC>`, ...).
+- Todos los sub-apartados **aparecen siempre**; los que quedan sin contenido
+  muestran un placeholder `[sin ...]`, así ningún sub-apartado desaparece del
+  menú aunque no haya dispositivos en ese estado.
 
 ## Menú de red (WiFi + Bluetooth)
 
