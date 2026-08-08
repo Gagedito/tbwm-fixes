@@ -215,17 +215,33 @@ vacía la sección Bluetooth no aparecía:
   `sudo sv up bluetoothd`; en Artix/runit), y que el adaptador no esté bloqueado
   (`rfkill list bluetooth`, `sudo rfkill unblock bluetooth`).
 
+### 17. Menú de red: cada red/dispositivo con acciones (Conectar/Desconectar/Olvidar)
+`tbwm-network` ahora emite cada red WiFi y cada dispositivo Bluetooth como su
+**propio sub-tema** (grupo) del menú, con sus acciones como entradas. Al pulsar
+Enter o hacer clic sobre una red/dispositivo en vez de ejecutar directamente:
+- **Guardada o visible**: acciones `Conectar a <nombre>` y `Olvidar <nombre>`.
+- **Conectada**: acciones `Desconectar <nombre>` y `Olvidar <nombre>`.
+- Wifi (NetworkManager): guardadas vía `nmcli connection up/down/delete`; las
+  disponibles no guardadas solo `Conectar` (pide contraseña con el diálogo del
+  menú si hay seguridad).
+- Wifi (connman): `connmanctl connect/disconnect/remove`; las protegidas sin
+  guardar piden contraseña (`connmanctl config <id> --passphrase ... --save`).
+- Bluetooth: conectado → `bluetoothctl disconnect`/`remove`; emparejado →
+  `bluetoothctl connect`/`remove`; visible sin emparejar → `pair`+`trust`+
+  `connect`.
+- Las redes que aparecen guardadas y en el escaneo a la vez se emiten **una sola
+  vez** (sin duplicados en el menú).
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
 botón `[N]` de la barra (justo a la izquierda de la fecha/hora).
 
 ### Qué hace
-- Categorías **Wifi** y **Bluetooth**, cada una con sub-temas **Connect** y
-  **Connected**:
-  - **Connected**: redes/dispositivos ya conectados. Elegir uno lo desconecta
-    (Bluetooth) o reconecta (WiFi).
-  - **Connect**: el resto de redes/dispositivos disponibles para conectarse.
+- Categorías **Wifi** y **Bluetooth**, cada una mostrando **una entrada por
+  red/dispositivo**:
+  - Seleccionando una red/dispositivo se ven sus acciones: **Conectar a ...**,
+    **Desconectar ...** (si está conectada) y **Olvidar ...**.
 - Navegación con flechas o vim (`j`/`k`), `Enter` para entrar/elegir,
   `Esc`/`←`/`Backspace` para volver un nivel (y cerrar en el nivel superior),
   y clics de ratón.

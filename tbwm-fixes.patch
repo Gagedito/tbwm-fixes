@@ -425,17 +425,22 @@ index 8a401bc..fb37425 100755
      echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..bcab997
+index 0000000..9e8e196
 --- /dev/null
 +++ b/tbwm-network
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,129 @@
 +#!/bin/sh
 +# List WiFi networks and Bluetooth devices for tbwm's network menu.
-+# Output: Category<TAB>Group<TAB>Name<TAB>shell-command[<TAB>needspass], one per line.
-+# WiFi: detects the active network manager (connman or NetworkManager) so the
-+#   menu works on both; needspass=1 means the network is protected, so tbwm
-+#   prompts for a password.
-+# Bluetooth: powered on + brief scan; connect/disconnect by MAC.
++# Output: Category<TAB>Group=TARGET<TAB>Action<TAB>command[<TAB>needspass], one per line.
++# The menu shows every network/device as its own sub-topic (group); selecting one
++# shows its actions (Conectar / Desconectar / Olvidar, depending on state).
++# WiFi: detects the active network manager (connman or NetworkManager).
++# Bluetooth: powered on + brief scan; connect/disconnect/forget by MAC.
++
++# Quote a string for use inside single quotes in a shell command.
++q() {
++    printf '%s' "$1" | sed "s/'/'\\\\''/g"
++}
 +
 +# --- WiFi (category: Wifi) ---
 +if pgrep -x connmand >/dev/null 2>&1; then
@@ -452,44 +457,62 @@ index 0000000..bcab997
 +            *) need=0;;
 +        esac
 +        case "$rest" in
-+            *"*"*) group="Connected"; prefix="[WiFi*]"
++            *"*"*) conn=1
 +                   name=$(printf '%s' "$rest" | awk '{$1=""; sub(/^ +/,""); print}');;
-+            *)     group="Connect"; prefix="[WiFi]"
++            *)     conn=0
 +                   name=$(printf '%s' "$rest" | sed 's/^[[:space:]]*//');;
 +        esac
 +        [ -n "$name" ] || continue
 +
-+        nameq=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
-+        if [ "$need" = "1" ]; then
-+            # tbwm appends " password '<escaped>'" to this command, so in the
-+            # inner sh: $1=<id> and $3=<password>.
-+            exec="sh -c 'connmanctl config \"\$1\" --passphrase \"\$3\" --save && connmanctl connect \"\$1\"' _ $id"
++        nameq=$(q "$name")
++        printf 'Wifi\t%s' "$nameq"
++        if [ "$conn" = "1" ]; then
++            printf '\tDesconectar %s\tconnmanctl disconnect %s\n' "$nameq" "$id"
 +        else
-+            exec="connmanctl connect $id"
++            if [ "$need" = "1" ]; then
++                exec_ps="sh -c 'connmanctl config \"\$1\" --passphrase \"\$3\" --save && connmanctl connect \"\$1\"' _ $id"
++                printf '\tConectar a %s\t%s\t1\n' "$nameq" "$exec_ps"
++            else
++                printf '\tConectar a %s\tconnmanctl connect %s\n' "$nameq" "$id"
++            fi
 +        fi
-+        printf 'Wifi\t%s\t%s %s\t%s\t%s\n' "$group" "$prefix" "$name" "$exec" "$need"
++        printf 'Wifi\t%s\tOlvidar %s\tconnmanctl remove %s\n' "$nameq" "$nameq" "$id"
 +    done
 +elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
-+    saved="$(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^/ /')"
++    savedw=""
++    while IFS=: read -r prof type; do
++        [ "$type" = "802-11-wireless" ] || continue
++        [ -n "$prof" ] || continue
++        savedw="$savedw
++$prof"
++    done <<EOF
++$(nmcli -t -f NAME,TYPE connection show 2>/dev/null)
++EOF
++    active="$(nmcli -t -f NAME connection show --active 2>/dev/null)"
 +
++    printf '%s\n' "$savedw" | while IFS= read -r prof; do
++        [ -n "$prof" ] || continue
++        pq=$(q "$prof")
++        if printf '%s\n' "$active" | grep -qxF "$prof"; then
++            printf 'Wifi\t%s\tDesconectar %s\tnmcli connection down '\''%s'\''\n' "$pq" "$pq" "$pq"
++        else
++            printf 'Wifi\t%s\tConectar a %s\tnmcli connection up '\''%s'\''\n' "$pq" "$pq" "$pq"
++        fi
++        printf 'Wifi\t%s\tOlvidar %s\tnmcli connection delete '\''%s'\''\n' "$pq" "$pq" "$pq"
++    done
++
++    seen="$savedw"
 +    nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r | while IFS=: read -r inuse ssid sig sec; do
 +        [ -n "$ssid" ] || continue
-+        need=0
-+        case "$inuse" in
-+            '*') group="Connected"; prefix="[WiFi*]";;
-+            *)   group="Connect"; prefix="[WiFi]"
-+                 if [ -n "$sec" ] && ! printf '%s\n' "$saved" | grep -qxF " $ssid"; then
-+                     need=1
-+                 fi
-+                 ;;
-+        esac
 +        if printf '%s\n' "$seen" | grep -qxF "$ssid"; then
 +            continue
 +        fi
 +        seen="$seen
 +$ssid"
-+        ssq=$(printf '%s' "$ssid" | sed "s/'/'\\\\''/g")
-+        printf 'Wifi\t%s\t%s %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$group" "$prefix" "$ssid" "$sig" "$ssq" "$need"
++        ssq=$(q "$ssid")
++        need=0
++        [ -n "$sec" ] && need=1
++        printf 'Wifi\t%s\tConectar a %s (%s%%)\tnmcli dev wifi connect '\''%s'\''\t%s\n' "$ssq" "$ssq" "$sig" "$ssq" "$need"
 +    done
 +else
 +    printf 'Wifi\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
@@ -498,42 +521,44 @@ index 0000000..bcab997
 +# --- Bluetooth (category: Bluetooth) ---
 +if command -v bluetoothctl >/dev/null 2>&1; then
 +    bluetoothctl power on >/dev/null 2>&1
-+    # A longer scan so nearby devices get cached by bluetoothd (a 2s scan
-+    # usually leaves the cache empty and the menu hides the whole category).
 +    timeout 10 bluetoothctl scan on >/dev/null 2>&1 &
 +    scan_pid=$!
 +    sleep 8
 +    kill "$scan_pid" 2>/dev/null
 +    wait "$scan_pid" 2>/dev/null
 +
-+    connected="$(bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p')"
++    paired="$(bluetoothctl devices Paired 2>/dev/null)"
++    connected="$(bluetoothctl devices Connected 2>/dev/null)"
 +    devices="$(bluetoothctl devices 2>/dev/null)"
++    seen=""
 +    if [ -n "$devices" ]; then
 +        printf '%s\n' "$devices" | while read -r _ mac name; do
 +            [ -n "$mac" ] || continue
 +            name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
 +            [ -n "$name" ] || name="(sin nombre)"
-+            if printf '%s\n' "$connected" | grep -qF "$mac"; then
-+                action="bluetoothctl disconnect $mac"
-+                group="Connected"
-+                prefix="[BT*]"
-+            else
-+                # ';' instead of '&&': if the device is already paired, 'pair'
-+                # fails and must not stop the connect.
-+                action="bluetoothctl pair $mac; bluetoothctl trust $mac; bluetoothctl connect $mac"
-+                group="Connect"
-+                prefix="[BT]"
++            if printf '%s\n' "$seen" | grep -qF "$mac"; then
++                continue
 +            fi
-+            printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
++            seen="$seen
++$mac"
++            nq=$(q "$name")
++            if printf '%s\n' "$connected" | grep -qF "$mac"; then
++                printf 'Bluetooth\t%s\tDesconectar %s\tbluetoothctl disconnect %s\n' "$nq" "$nq" "$mac"
++                printf 'Bluetooth\t%s\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$nq" "$mac"
++            elif printf '%s\n' "$paired" | grep -qF "$mac"; then
++                printf 'Bluetooth\t%s\tConectar a %s\tbluetoothctl connect %s\n' "$nq" "$nq" "$mac"
++                printf 'Bluetooth\t%s\tOlvidar %s\tbluetoothctl remove %s\n' "$nq" "$nq" "$mac"
++            else
++                printf 'Bluetooth\t%s\tConectar a %s\tbluetoothctl pair %s; bluetoothctl trust %s; bluetoothctl connect %s\n' "$nq" "$nq" "$mac" "$mac" "$mac"
++            fi
 +        done
 +    else
-+        # Always emit a fallback entry so the Bluetooth category never
-+        # disappears from the menu.
 +        printf 'Bluetooth\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
 +    fi
 +else
 +    printf 'Bluetooth\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 +fi
+\ No newline at end of file
 diff --git a/tbwm-session b/tbwm-session
 new file mode 100755
 index 0000000..3cefbec
