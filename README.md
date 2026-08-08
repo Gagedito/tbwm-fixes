@@ -245,6 +245,26 @@ conectada aparezca siempre primero y la lista no sea un batiburrillo:
   muestran un placeholder `[sin ...]`, así ningún sub-apartado desaparece del
   menú aunque no haya dispositivos en ese estado.
 
+### 19. Menú de red con 4 niveles (guardadas con sub-tema por red)
+El menú de red ahora soporta **jerarquía de 4 niveles** en `tbwm.c`:
+
+`Categoría → Sub-apartado → Red/Dispositivo → Acción`
+
+- `tbwm-network` emite `Category<TAB>Group<TAB>Subgroup<TAB>Name<TAB>exec` (5
+  columnas; el parser de `tbwm.c` también acepta el formato viejo de 4).
+- Ejemplo: `Wifi → Guardadas → AndroidAP_2708 → Conectar` / `Olvidar`, y
+  `Wifi → Conectado → Wifi-Claro (83%) → Desconectar` / `Olvidar`.
+- La red conectada se muestra con nombre + % de señal en el sub-tema: entrar en
+  ella revela `Desconectar` / `Olvidar`.
+- Bluetooth igual: `Conectado` / `Emparejados` / `Buscar dispositivos`, cada
+  dispositivo como sub-tema con sus acciones.
+- Requiere recompilar `tbwm` (`make` + instalar binario); Navgación igual
+  (Enter/←, `< Back`, Esc).
+- Para que los **sub-apartados** (p. ej. `Conectado`, `Guardadas`, `Buscar red`)
+  se dibujen, `updatenetmenu()` debe tener la rama `net_current_group < 0` que
+  pinta la lista de sub-temas antes del nivel de entidades; sin ella el menú
+  quedaba vacío (leía `net_groups[-1]`).
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el
