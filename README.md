@@ -196,6 +196,25 @@ a estar activo).
   reconectar las redes guardadas (cada gestor guarda su propia lista, así que al
   cambiar de gestor hay que reconectar las redes una vez).
 
+### 16. Bluetooth: la categoría desaparecía del menú
+El bloque Bluetooth de `tbwm-network` solo imprimía `bluetoothctl devices`
+(dispositivos ya cacheados por `bluetoothd`), y el escaneo duraba 2s. Como el
+menú de tbwm solo muestra categorías con al menos una entrada, si la caché estaba
+vacía la sección Bluetooth no aparecía:
+- El escaneo ahora dura ~8s (`timeout 10 bluetoothctl scan on` + `sleep 8`) para
+  que los dispositivos cercanos se descubran y queden cacheados.
+- Si aun así no hay dispositivos, se emite siempre una entrada `Info` "[BT] Sin
+  dispositivos cerca (reintenta)" para que la categoría **nunca** desaparezca.
+- Conectar un dispositivo no emparejado ahora hace
+  `bluetoothctl pair <MAC>; bluetoothctl trust <MAC>; bluetoothctl connect <MAC>`
+  (con `;` y no `&&`: si ya estaba emparejado, `pair` falla y no debe cortar el
+  `connect`).
+- Nota: si la categoría sigue sin aparecer, verificar que `bluez`/`bluez-utils`/
+  `bluez-runit` estén instalados y que el servicio esté activo
+  (`sudo ln -sf /etc/runit/sv/bluetoothd /run/runit/service/bluetoothd` y
+  `sudo sv up bluetoothd`; en Artix/runit), y que el adaptador no esté bloqueado
+  (`rfkill list bluetooth`, `sudo rfkill unblock bluetooth`).
+
 ## Menú de red (WiFi + Bluetooth)
 
 Menú combinado de WiFi y Bluetooth. Se abre con `M-n` o haciendo clic en el

@@ -67,28 +67,39 @@ fi
 # --- Bluetooth (category: Bluetooth) ---
 if command -v bluetoothctl >/dev/null 2>&1; then
     bluetoothctl power on >/dev/null 2>&1
-    timeout 3 bluetoothctl scan on >/dev/null 2>&1 &
+    # A longer scan so nearby devices get cached by bluetoothd (a 2s scan
+    # usually leaves the cache empty and the menu hides the whole category).
+    timeout 10 bluetoothctl scan on >/dev/null 2>&1 &
     scan_pid=$!
-    sleep 2
+    sleep 8
     kill "$scan_pid" 2>/dev/null
     wait "$scan_pid" 2>/dev/null
 
     connected="$(bluetoothctl devices Connected 2>/dev/null | sed -n 's/^Device //p')"
-    bluetoothctl devices 2>/dev/null | while read -r _ mac name; do
-        [ -n "$mac" ] || continue
-        name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
-        [ -n "$name" ] || name="(sin nombre)"
-        if printf '%s\n' "$connected" | grep -qF "$mac"; then
-            action="bluetoothctl disconnect $mac"
-            group="Connected"
-            prefix="[BT*]"
-        else
-            action="bluetoothctl connect $mac"
-            group="Connect"
-            prefix="[BT]"
-        fi
-        printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
-    done
+    devices="$(bluetoothctl devices 2>/dev/null)"
+    if [ -n "$devices" ]; then
+        printf '%s\n' "$devices" | while read -r _ mac name; do
+            [ -n "$mac" ] || continue
+            name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+            [ -n "$name" ] || name="(sin nombre)"
+            if printf '%s\n' "$connected" | grep -qF "$mac"; then
+                action="bluetoothctl disconnect $mac"
+                group="Connected"
+                prefix="[BT*]"
+            else
+                # ';' instead of '&&': if the device is already paired, 'pair'
+                # fails and must not stop the connect.
+                action="bluetoothctl pair $mac; bluetoothctl trust $mac; bluetoothctl connect $mac"
+                group="Connect"
+                prefix="[BT]"
+            fi
+            printf 'Bluetooth\t%s\t%s %s\t%s\n' "$group" "$prefix" "$name" "$action"
+        done
+    else
+        # Always emit a fallback entry so the Bluetooth category never
+        # disappears from the menu.
+        printf 'Bluetooth\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
+    fi
 else
     printf 'Bluetooth\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 fi
