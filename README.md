@@ -415,6 +415,23 @@ Incluye:
   `brightnessctl`.
 - REPL (`M-S-colon`) y cambio de TTY (`C-A-F1..F12`).
 
+## Fondo de pantalla
+
+tbwm implementa el protocolo layer-shell, así que acepta cualquier cliente de
+fondo de Wayland como [swaybg](https://github.com/swaywm/swaybg), que se dibuja
+en la capa *Background* sin tocar el código del compositor.
+
+1. Instálalo: `sudo pacman -S swaybg` (o `apt install swaybg`, etc.).
+2. Añade una línea al `config.scm`:
+
+```scm
+(on-startup "swaybg -i ~/Imágenes/fondo.png -m fill")
+```
+
+Modos de ajuste (`-m`): `fill`, `contain`, `center`, `tile`, `stretch`. Con
+varios monitores usa `--output` para asignar una imagen por pantalla. Como tbwm
+no procesa autostart de XDG, la línea de `on-startup` es el lugar correcto.
+
 ## Notas del entorno de prueba
 
 - Artix Linux (runit), wlroots 0.19.3 del repo `world`.
@@ -426,3 +443,4 @@ Incluye:
 - Para las teclas de brillo: `brightnessctl`.
 - Para audio (música, micrófono): PipeWire/PipeWire-pulse/WirePlumber
   (arrancados con `tbwm-audio`).
+- Para el fondo de pantalla: `swaybg` (ver sección "Fondo de pantalla").
