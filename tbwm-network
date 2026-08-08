@@ -81,6 +81,17 @@ $ssid=$sig"
 $(nmcli -t -f IN-USE,SSID,SIGNAL dev wifi list 2>/dev/null)
 EOF
 
+    # Trigger a fresh scan and wait for results (without it nmcli returns the
+    # stale cache and "Buscar red" only shows a handful of networks).
+    nmcli dev wifi rescan >/dev/null 2>&1
+    nscan=0
+    while [ "$nscan" -lt 20 ]; do
+        n=$(nmcli -t -f SSID dev wifi list 2>/dev/null | grep -c .)
+        [ "$n" -ge 3 ] && break
+        sleep 1
+        nscan=$((nscan + 1))
+    done
+
     # 1) Connected
     has_conn=0
     while IFS= read -r prof; do
@@ -144,9 +155,10 @@ fi
 # --- Bluetooth (category: Bluetooth) ---
 if command -v bluetoothctl >/dev/null 2>&1; then
     bluetoothctl power on >/dev/null 2>&1
-    timeout 10 bluetoothctl scan on >/dev/null 2>&1 &
+    btout="$(mktemp)"
+    timeout 12 bluetoothctl scan on > "$btout" 2>&1 &
     scan_pid=$!
-    sleep 8
+    sleep 10
     kill "$scan_pid" 2>/dev/null
     wait "$scan_pid" 2>/dev/null
 
@@ -154,14 +166,53 @@ if command -v bluetoothctl >/dev/null 2>&1; then
     connected="$(bluetoothctl devices Connected 2>/dev/null)"
     devices="$(mktemp)"
     bluetoothctl devices 2>/dev/null > "$devices"
+
+    # Merge newly discovered devices (from the scan output) into the list so
+    # "Buscar dispositivos" shows devices found during this scan, not only the
+    # ones the daemon already remembered. Lines look like: "Device AA:BB:..: NAME".
+    # Only lines starting with "Device <valid MAC>" are kept; RSSI/[CHG] noise
+    # (which has no clean name) is ignored.
+    if [ -s "$btout" ]; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            set -- $line
+            [ "$1" = "Device" ] || continue
+            [ $# -ge 3 ] || continue
+            mac=$2
+            case "$mac" in
+                [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
+                *) continue;;
+            esac
+            name=$(printf '%s' "$line" | sed "s/^Device $mac //")
+            case "$name" in
+                *RSSI:*|*\[CHG\]*|Device*) continue;;
+            esac
+            [ -n "$name" ] || continue
+            if ! grep -q " $mac " "$devices"; then
+                printf 'Device %s %s\n' "$mac" "$name" >> "$devices"
+            fi
+        done < "$btout"
+    fi
+
     if [ -s "$devices" ]; then
         seen=""
         has_connected=0
         has_paired=0
         has_discovered=0
-        while read -r _ mac name; do
-            [ -n "$mac" ] || continue
-            name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            set -- $line
+            [ "$1" = "Device" ] || continue
+            [ $# -ge 3 ] || continue
+            mac=$2
+            case "$mac" in
+                [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
+                *) continue;;
+            esac
+            name=$(printf '%s' "$line" | sed "s/^Device $mac //" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+            case "$name" in
+                *RSSI:*|*\[CHG\]*|Device*) name="";;
+            esac
             [ -n "$name" ] || name="(sin nombre)"
             if printf '%s\n' "$seen" | grep -qF "$mac"; then
                 continue
@@ -179,7 +230,7 @@ $mac"
                 printf 'Bluetooth\tEmparejados\t%s\tOlvidar\tbluetoothctl remove %s\n' "$nq" "$mac"
             else
                 has_discovered=1
-                printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\tbluetoothctl pair %s; bluetoothctl trust %s; bluetoothctl connect %s\n' "$nq" "$mac" "$mac" "$mac"
+                printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
             fi
         done < "$devices"
         [ "$has_connected" = 1 ] || printf 'Bluetooth\tConectado\t\tInfo\t[sin conectados]\tsh -c true\n'
@@ -188,7 +239,7 @@ $mac"
     else
         printf 'Bluetooth\t\t\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
     fi
-    rm -f "$devices"
+rm -f "$devices" "$btout"
 else
     printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 fi
