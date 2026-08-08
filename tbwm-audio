@@ -3,11 +3,27 @@
 # Used from TurboWM's (on-startup ...) because tbwm does not process
 # XDG autostart entries (only desktop environments like Plasma do).
 
+XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
 start_stack() {
     /usr/bin/pipewire >/dev/null 2>&1 &
     sleep 0.5
     /usr/bin/pipewire-pulse >/dev/null 2>&1 &
     /usr/bin/wireplumber >/dev/null 2>&1 &
+}
+
+# Kill the whole stack so a stale/broken pipewire cannot hold dead sockets
+restart_stack() {
+    pkill -x wireplumber 2>/dev/null
+    pkill -x pipewire-pulse 2>/dev/null
+    pkill -x pipewire 2>/dev/null
+    i=0
+    while [ "$i" -lt 20 ] && pgrep -x pipewire >/dev/null 2>&1; do
+        sleep 0.2
+        i=$((i + 1))
+    done
+    sleep 0.5
+    start_stack
 }
 
 # Returns 0 if there is a real (non-Dummy) audio sink
@@ -19,15 +35,19 @@ has_real_sink() {
 
 if ! pgrep -x pipewire >/dev/null 2>&1; then
     start_stack
-else
-    # pipewire is already running: make sure the rest of the stack is up
+elif [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; then
+    # pipewire is alive and its socket exists: make sure the rest is up
     pgrep -x pipewire-pulse >/dev/null 2>&1 || /usr/bin/pipewire-pulse >/dev/null 2>&1 &
     pgrep -x wireplumber >/dev/null 2>&1 || /usr/bin/wireplumber >/dev/null 2>&1 &
+else
+    # pipewire runs but its socket is gone (stale after a runtime-dir reset):
+    # the whole stack is broken, restart it completely
+    restart_stack
 fi
 
 # Give WirePlumber time to enumerate the hardware. If it ends up with only the
 # Dummy sink (e.g. it started before the sound card / udev was ready), restart
-# it a few times (with a grace period in between) until the real card shows up.
+# it a few times (power down in between) until the real card shows up.
 attempts=0
 while [ "$attempts" -lt 6 ] && ! has_real_sink; do
     attempts=$((attempts + 1))
