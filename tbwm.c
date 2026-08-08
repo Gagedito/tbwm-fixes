@@ -20,6 +20,7 @@
 #include <poll.h>
 #include <errno.h>
 #include <stdarg.h>
+#include "bluetooth.h"
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/libinput.h>
@@ -775,33 +776,10 @@ static void net_password_reset(void);
 static void netmenu_run(NetEntry *e);
 static void netmenu_connect_with_password(void);
 
-/* Bluetooth pairing in-menu: tbwm drives `bluetoothctl --agent KeyboardDisplay`
- * (stdin/stdout through pipes) so it can show the passkey and let the user
- * confirm or reject it before trusting/connecting the device. */
-static int bt_pair_active = 0;              /* 1 while a pairing dialog is open */
-static int bt_pair_dialog = 0;              /* 1 = draw/key the pairing dialog (session alive) */
-static pid_t bt_pair_pid = -1;
-static int bt_pair_in_fd = -1;              /* write side: to bluetoothctl's stdin */
-static int bt_pair_out_fd = -1;             /* read side: bluetoothctl's stdout */
-static struct wl_event_source *bt_pair_source = NULL;
-static struct wl_event_source *bt_pair_watch_timer = NULL; /* passive listener keepalive */
-static char bt_pair_mac[NET_CAT_LEN] = "";  /* device MAC being paired */
-static char bt_pair_name[NET_NAME_LEN] = ""; /* device name shown in the dialog */
-static char bt_pair_log[2048];              /* recent bluetoothctl output */
-static int bt_pair_log_len = 0;
-static char bt_pair_pin[64] = "";           /* passkey captured from bluetoothctl */
-static int bt_pair_prompt = 0;              /* 1 = waiting for yes/no (passkey shown) */
-static int bt_pair_done = 0;                /* 1 = pairing finished (ok or fail) */
-static int bt_pair_ok = 0;                  /* 1 = pairing succeeded */
-static int bt_pair_connected = 0;           /* 1 = "connect" sent after pairing */
-static int bt_pair_saw_pair = 0;            /* 1 = "Pairing successful" seen (real pairing done) */
-static int bt_pair_incoming = 0;            /* 1 = pairing request came from the phone (watch) */
-static void bt_pair_start(const char *mac, const char *name);
-static void bt_pair_stop(void);
-static void bt_pair_send(const char *line);
-static void bt_pair_finish(int ok);
-static void bt_pair_watch(void);
-static int bt_pair_watchdog(void *data);
+/* Bluetooth pairing lives in bluetooth.c (blt_* API in bluetooth.h): the
+ * pairing dialog, the bluetoothcd session (pipes + fd watcher) and the
+ * passkey watchdog are owned by that module. tbwm.c only draws the dialog
+ * and routes net menu keys through blt_key(); it never touches module state. */
 
 /* Asynchronous netmenu data loader: the command runs in a forked child and
  * its stdout is read through a non-blocking pipe in the Wayland event loop,
@@ -1953,6 +1931,9 @@ cleanup(void)
 		kill(session_dbus_pid, SIGTERM);
 		session_dbus_pid = -1;
 	}
+	/* Kill any leftover bluetoothctl pairing session (e.g. the menu was
+	 * closed/exited while the pairing dialog was still open). */
+	blt_stop();
 	wlr_xcursor_manager_destroy(cursor_mgr);
 
 	/* Clean up glyph cache bitmaps */
@@ -4363,7 +4344,7 @@ togglenetmenu(const Arg *arg)
 	} else {
 		netmenu_cancel_load();
 		net_password_reset();
-		bt_pair_stop();
+		blt_stop();
 	}
 	updatenetmenu();
 	updatebars();
@@ -4377,410 +4358,6 @@ net_password_reset(void)
 	net_password[0] = '\0';
 }
 
-/* Send a line to bluetoothctl's stdin (the pairing session). */
-static void
-bt_pair_send(const char *line)
-{
-	if (bt_pair_in_fd >= 0) {
-		if (write(bt_pair_in_fd, line, strlen(line)) < 0) {
-			/* ignore EPIPE (child already gone) */
-		}
-	}
-}
-
-/* Debug helper: append a line to /tmp/tbwm-bt.log for post-mortem of the
- * pairing session (bluetoothctl is stateful, so we log what it prints and
- * what we decide). */
-static void
-bt_dbg(const char *fmt, ...)
-{
-	FILE *f = fopen("/tmp/tbwm-bt.log", "a");
-	va_list ap;
-	if (!f)
-		return;
-	va_start(ap, fmt);
-	vfprintf(f, fmt, ap);
-	va_end(ap);
-	fputc('\n', f);
-	fclose(f);
-}
-
-/* Mark the pairing as finished, clean up the session, and keep the dialog
- * open showing the result until the user presses a key. */
-static void
-bt_pair_finish(int ok)
-{
-	if (bt_pair_done)
-		return;
-	bt_pair_done = 1;
-	bt_pair_ok = ok;
-	bt_dbg("bt_pair_finish: %s", ok ? "ok" : "fail");
-	if (bt_pair_source) {
-		wl_event_source_remove(bt_pair_source);
-		bt_pair_source = NULL;
-	}
-	if (bt_pair_out_fd >= 0) {
-		close(bt_pair_out_fd);
-		bt_pair_out_fd = -1;
-	}
-	if (bt_pair_pid > 0) {
-		waitpid(bt_pair_pid, NULL, WNOHANG);
-		bt_pair_pid = -1;
-	}
-	updatenetmenu();
-}
-
-/* Parse bluetoothctl output for a passkey and a yes/no prompt. The child
- * runs `bluetoothctl` interactively: we must only read its stdout here and,
- * when we need to answer a passkey prompt, write "yes\n"/"no\n" to the pipe
- * from the key handler. We never pre-enqueue a command that would be eaten
- * as an answer by a prompt still pending. */
-static void
-bt_pair_parse_output(const char *buf, int len)
-{
-	int i;
-
-	for (i = 0; i < len; i++) {
-		bt_dbg("%02x%c", (unsigned char)buf[i] >= 0x20 ? '.' : '+', buf[i]);
-	}
-	/* Append to the rolling log */
-	for (i = 0; i < len && bt_pair_log_len < (int)sizeof(bt_pair_log) - 1; i++) {
-		bt_pair_log[bt_pair_log_len++] = buf[i];
-	}
-	bt_pair_log[bt_pair_log_len] = '\0';
-
-	/* Keep only the tail (last ~1KB) so memory stays bounded */
-	if (bt_pair_log_len > 1024) {
-		memmove(bt_pair_log, bt_pair_log + bt_pair_log_len - 1024, 1024);
-		bt_pair_log_len = 1024;
-		bt_pair_log[1024] = '\0';
-	}
-
-	/* Show the passkey when bluetoothctl asks for confirmation.
-	 * bluetoothctl 5.?? prints, e.g.:
-	 *   [agent] Confirm passkey 123456 (yes/no)
-	 *   Requesting confirmation
-	 *   [agtiem] No input no output (auto accept) ...
-	 * In interactive pairing of a phone the agent prompts with
-	 * "(yes/no)" . We also match the older "Confirm passkey" text. */
-	if (!bt_pair_prompt && !bt_pair_done &&
-	    (strstr(bt_pair_log, "(yes/no") != NULL ||
-	     strstr(bt_pair_log, "(yes,no") != NULL ||
-	     strstr(bt_pair_log, "Confirm passkey") != NULL)) {
-		bt_pair_prompt = 1;
-		bt_dbg("promptbs: confirmed");
-		/* If this is an incoming pairing (no target set), try to name the
-		 * device from the associated "[NEW] Device <MAC> <name>" line that
-		 * bluetoothctl emits when the request arrives, then show the TODO. */
-		if (bt_pair_mac[0] == '\0' && !bt_pair_dialog) {
-			const char *nd = strstr(bt_pair_log, "[NEW] Device ");
-			if (nd) {
-				const char *sp = strchr(nd + 13, ' ');
-				if (sp) {
-					char mac[NET_CAT_LEN];
-					int j;
-					for (j = 0; j < NET_CAT_LEN - 1 && (nd[13 + j] != ' ') && nd[13 + j]; j++)
-						mac[j] = nd[13 + j];
-					mac[j] = '\0';
-					strncpy(bt_pair_mac, mac, NET_CAT_LEN - 1);
-					bt_pair_mac[NET_CAT_LEN - 1] = '\0';
-					j = 0;
-					while (sp[j + 1] && j < NET_NAME_LEN - 1 &&
-					       sp[j + 1] != ' ' && sp[j + 1] != '\n') {
-						bt_pair_name[j] = sp[j + 1];
-						j++;
-					}
-					bt_pair_name[j] = '\0';
-					bt_dbg("incoming from %s (%s)", bt_pair_mac, bt_pair_name);
-				}
-			}
-			if (bt_pair_name[0] == '\0')
-				strncpy(bt_pair_name, "Dispositivo nuevo", NET_NAME_LEN - 1);
-			bt_pair_incoming = 1;
-			bt_pair_dialog = 1;
-		}
-		updatenetmenu();
-	}
-
-	/* Extract the passkey itself: "passkey <digits>", "PIN code:" or digits on a line */
-	{
-		const char *pk = strstr(bt_pair_log, "passkey ");
-		if (pk) {
-			pk += 8;
-			if (pk[0] >= '0' && pk[0] <= '9') {
-				int j = 0;
-				while (pk[j] >= '0' && pk[j] <= '9' && j < (int)sizeof(bt_pair_pin) - 1)
-					j++;
-				memcpy(bt_pair_pin, pk, j);
-				bt_pair_pin[j] = '\0';
-				bt_dbg("passkey captured: %s", bt_pair_pin);
-			}
-		}
-		if (!bt_pair_pin[0]) {
-			const char *pin = strstr(bt_pair_log, "PIN ");
-			if (pin) {
-				pin += 4;
-				if (pin[0] >= '0' && pin[0] <= '9') {
-					int j = 0;
-					while (pin[j] >= '0' && pin[j] <= '9' && j < (int)sizeof(bt_pair_pin) - 1)
-						bt_pair_pin[j] = pin[j], j++;
-					bt_pair_pin[j] = '\0';
-					bt_dbg("passkey (PIN) captured: %s", bt_pair_pin);
-				}
-			}
-		}
-	}
-
-	/* Detect completion. "Connected: yes" alone is NOT proof of pairing:
-	 * bluetoothctl prints it as soon as the ACL link comes up, which can
-	 * happen while pairing is still in progress (and the phone shows the
-	 * passkey). We only trust "Pairing successful"/"Pairing complete" as
-	 * the real finish marker, then send "connect" and finally accept
-	 * "Connected: yes" once pairing has truly finished. */
-	if (!bt_pair_done) {
-		if (!bt_pair_saw_pair &&
-		    (strstr(bt_pair_log, "Pairing successful") != NULL ||
-		     strstr(bt_pair_log, "Pairing complete") != NULL)) {
-			bt_pair_saw_pair = 1;
-			bt_dbg("pairing confirmed");
-		}
-		if (bt_pair_saw_pair && !bt_pair_connected) {
-			char con[NET_EXEC_LEN + 32];
-			bt_pair_connected = 1;
-			snprintf(con, sizeof(con), "connect %s\n", bt_pair_mac);
-			bt_pair_send(con);
-			bt_dbg("sent connect after pairing");
-		}
-		if (strstr(bt_pair_log, "Pairing successful") != NULL ||
-		    strstr(bt_pair_log, "Pairing complete") != NULL) {
-			bt_pair_finish(1);
-		} else if (bt_pair_saw_pair &&
-		           (strstr(bt_pair_log, "Connected: yes") != NULL ||
-		            strstr(bt_pair_log, "[Connected") != NULL ||
-		            strstr(bt_pair_log, "Connection successful") != NULL)) {
-			bt_pair_finish(1);
-		} else if (strstr(bt_pair_log, "Failed to pair") != NULL ||
-		           strstr(bt_pair_log, "Failed to connect") != NULL ||
-		           strstr(bt_pair_log, "org.bluez.Error.AuthenticationFailed") != NULL ||
-		           strstr(bt_pair_log, "org.bluez.Error.Rejected") != NULL ||
-		           strstr(bt_pair_log, "org.bluez.Error.RemoveFailed") != NULL) {
-			bt_pair_finish(0);
-		}
-	}
-}
-
-/* Read bluetoothctl's output as it arrives (pairing session). */
-static int
-bt_pair_read_cb(int fd, uint32_t mask, void *data)
-{
-	char buf[4096];
-	ssize_t r;
-	int done = 0;
-	(void)data;
-
-	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
-		done = 1;
-
-	while ((r = read(fd, buf, sizeof(buf))) > 0)
-		bt_pair_parse_output(buf, (int)r);
-	if (r == 0)
-		done = 1;
-
-	if (done && !bt_pair_done) {
-		/* bluetoothctl exited (or quit command processed). Determine success
-		 * from what it printed. */
-		bt_pair_finish(strstr(bt_pair_log, "successful") != NULL ||
-		               strstr(bt_pair_log, "Connected") != NULL);
-	} else if (bt_pair_done) {
-		/* Already finalized by content detection; nothing more to do. */
-	}
-	return 1;
-}
-
-/* Spawn a fresh bluetoothctl session with an agent and wire up the pipes.
- * Returns 1 on success; on return the new session is in bt_pair_in_fd /
- * bt_pair_out_fd / bt_pair_pid and bt_pair_active is 1. */
-static int
-bt_pair_spawn(void)
-{
-	int in_pipe[2], out_pipe[2];
-	pid_t pid;
-
-	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0) {
-		if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
-		if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
-		return 0;
-	}
-
-	pid = fork();
-	if (pid == 0) {
-		setsid();
-		close(in_pipe[1]);   /* parent writes into child's stdin */
-		close(out_pipe[0]);
-		dup2(in_pipe[0], STDIN_FILENO);
-		close(in_pipe[0]);
-		dup2(out_pipe[1], STDOUT_FILENO);
-		dup2(out_pipe[1], STDERR_FILENO);
-		close(out_pipe[1]);
-		execl("/usr/bin/bluetoothctl", "bluetoothctl", (char *)NULL);
-		_exit(127);
-	}
-
-	/* Parent */
-	close(in_pipe[0]);   /* reading from child's stdin side is closed */
-	close(out_pipe[1]);
-	bt_pair_in_fd = in_pipe[1];    /* write here to send commands/answers */
-	bt_pair_out_fd = out_pipe[0];  /* read here to see prompts */
-	bt_pair_pid = pid;
-	bt_pair_active = 1;
-
-	{
-		int flags = fcntl(bt_pair_out_fd, F_GETFL, 0);
-		if (flags >= 0)
-			fcntl(bt_pair_out_fd, F_SETFL, flags | O_NONBLOCK);
-		flags = fcntl(bt_pair_in_fd, F_GETFL, 0);
-		if (flags >= 0)
-			fcntl(bt_pair_in_fd, F_SETFL, flags | O_NONBLOCK);
-	}
-
-	bt_pair_source = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
-		bt_pair_out_fd, WL_EVENT_READABLE, bt_pair_read_cb, NULL);
-	return 1;
-}
-
-/* Ensure a bluetoothctl session exists; spawn it if needed and register the
- * KeyboardDisplay agent. Shared by the menu-initiated pairing (bt_pair_start)
- * and the passive listener (bt_pair_watch). Resets the rolling state. */
-static void
-bt_pair_ensure_session(void)
-{
-	if (bt_pair_pid <= 0)
-		bt_pair_spawn();
-	bt_pair_log_len = 0;
-	bt_pair_log[0] = '\0';
-	bt_pair_pin[0] = '\0';
-	bt_pair_prompt = 0;
-	bt_pair_done = 0;
-	bt_pair_ok = 0;
-	bt_pair_connected = 0;
-	bt_pair_saw_pair = 0;
-}
-
-/* Start an interactive bluetoothctl pairing session for a discovered device.
- * bluetoothctl runs with our pipes as its stdin/stdout; we register an agent
- * and pair; the passkey prompt is answered with yes/no from the keyboard. */
-static void
-bt_pair_start(const char *mac, const char *name)
-{
-	char seq[NET_EXEC_LEN + 128];
-
-	if (bt_pair_pid > 0)
-		bt_pair_stop();
-	bt_pair_ensure_session();
-
-	strncpy(bt_pair_mac, mac, NET_CAT_LEN - 1);
-	bt_pair_mac[NET_CAT_LEN - 1] = '\0';
-	strncpy(bt_pair_name, name, NET_NAME_LEN - 1);
-	bt_pair_name[NET_NAME_LEN - 1] = '\0';
-
-	/* Register a KeyboardDisplay agent and request the pairing. We do NOT
-	 * enqueue "connect" here: bluetoothctl reads stdin line by line, so a
-	 * pre-queued "connect AA:BB" would be consumed as the answer to the
-	 * passkey prompt. The "connect" is sent only once "Pairing successful"
-	 * shows up (see bt_pair_parse_output). */
-	snprintf(seq, sizeof(seq),
-		"agent KeyboardDisplay\ndefault-agent\ntrust %s\npair %s\n",
-		mac, mac);
-	bt_pair_send(seq);
-
-	bt_pair_incoming = 0;
-	bt_pair_dialog = 1;
-	updatenetmenu();
-}
-
-/* Passive listener: keep a bluetoothctl agent registered so an incoming
- * pairing request started from the phone reaches us and shows the passkey
- * dialog inside "Buscar dispositivos". No device is targeted here. */
-static void
-bt_pair_watch(void)
-{
-	if (bt_pair_pid <= 0)
-		bt_pair_spawn();
-
-	bt_pair_mac[0] = '\0';
-	bt_pair_name[0] = '\0';
-	bt_pair_log_len = 0;
-	bt_pair_log[0] = '\0';
-	bt_pair_pin[0] = '\0';
-	bt_pair_prompt = 0;
-	bt_pair_done = 0;
-	bt_pair_ok = 0;
-	bt_pair_connected = 0;
-	bt_pair_saw_pair = 0;
-	bt_pair_incoming = 0;
-	bt_pair_dialog = 0;
-
-	/* Only register the agent once: after the session bootstraps, further
-	 * "agent" lines would just print "Agent is already registered". We
-	 * always re-send so a just-spawned session gets its agent. */
-	bt_pair_send("agent KeyboardDisplay\ndefault-agent\n");
-}
-
-/* Stop and clean up an active pairing session. */
-static void
-bt_pair_stop(void)
-{
-	if (bt_pair_source) {
-		wl_event_source_remove(bt_pair_source);
-		bt_pair_source = NULL;
-	}
-	if (bt_pair_out_fd >= 0) {
-		close(bt_pair_out_fd);
-		bt_pair_out_fd = -1;
-	}
-	if (bt_pair_in_fd >= 0) {
-		close(bt_pair_in_fd);
-		bt_pair_in_fd = -1;
-	}
-	if (bt_pair_pid > 0) {
-		kill(bt_pair_pid, SIGTERM);
-		waitpid(bt_pair_pid, NULL, WNOHANG);
-		bt_pair_pid = -1;
-	}
-	bt_pair_active = 0;
-	bt_pair_dialog = 0;
-	bt_pair_incoming = 0;
-}
-
-/* Confirm (yes) or reject (no) the pairing passkey. */
-static void
-bt_pair_answer(int accept)
-{
-	if (accept)
-		bt_pair_send("yes\n");
-	else
-		bt_pair_send("no\n");
-}
-
-/* Passive listener watchdog: while the menu is open on the "Buscar
- * dispositivos" sub-topic, keep a bluetoothctl agent alive so pairing
- * requests initiated from the phone are caught and shown in the dialog.
- * When the user leaves that view or closes the menu, stop the session. */
-static int
-bt_pair_watchdog(void *data)
-{
-	(void)data;
-	if (netmenu_active && netmenu_scan_is_active()) {
-		/* On "Buscar dispositivos": keep a passive agent (unless a pairing
-		 * dialog from the user already owns the session). */
-		if (bt_pair_pid <= 0 && !bt_pair_dialog)
-			bt_pair_watch();
-	} else if (bt_pair_pid > 0 && !bt_pair_dialog) {
-		bt_pair_stop();
-	}
-	wl_event_source_timer_update(bt_pair_watch_timer, 3000);
-	return 1;
-}
 
 /* Run an entry's command, or switch to password entry if it needs one. */
 static void
@@ -4798,7 +4375,7 @@ netmenu_run(NetEntry *e)
 		return;
 	}
 	if (e->btpair) {
-		bt_pair_start(e->exec, e->name);
+		blt_start(e->exec, e->name);
 		return; /* menu stays open showing the pairing dialog */
 	}
 	{
@@ -4846,34 +4423,19 @@ netmenukey(xkb_keysym_t sym)
 	int item_count;
 	int content_rows = 23; /* menu_cells_h - 2 */
 
-	/* Bluetooth pairing dialog: consume everything, only a few keys act */
-	if (bt_pair_dialog) {
-		if (sym == XKB_KEY_Escape || sym == XKB_KEY_N || sym == XKB_KEY_n) {
-			if (bt_pair_prompt) {
-				bt_pair_answer(0);
-				bt_pair_prompt = 0;
-			} else {
-				bt_pair_stop();
+	/* Bluetooth pairing dialog: the session lives in bluetooth.c; it tells us
+	 * whether the key was consumed and whether a finished menu-initiated
+	 * pairing should close the menu. */
+	{
+		int btk = blt_key((unsigned int)sym);
+		if (btk != BLKEY_IGNORED) {
+			if (btk == BLKEY_CLOSE_MENU) {
+				netmenu_active = 0;
+				updatebars();
 			}
 			updatenetmenu();
 			return 1;
 		}
-		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_S || sym == XKB_KEY_s) {
-			if (bt_pair_prompt) {
-				bt_pair_answer(1);
-				bt_pair_prompt = 0;
-			} else if (bt_pair_done) {
-				bt_pair_stop();
-				if (!bt_pair_incoming) {
-					netmenu_active = 0;
-					updatebars();
-				}
-				updatenetmenu();
-			}
-			updatenetmenu();
-			return 1;
-		}
-		return 1; /* swallow everything else while pairing */
 	}
 
 	/* Password entry mode: consume everything, only a few keys act */
@@ -6188,9 +5750,12 @@ run(char *startup_cmd)
 	net_scan_timer = wl_event_loop_add_timer(event_loop, netmenu_scan_keepalive, NULL);
 	wl_event_source_timer_update(net_scan_timer, 0);
 
-	/* Passive Bluetooth agent watchdog (pairing requests coming FROM a phone) */
-	bt_pair_watch_timer = wl_event_loop_add_timer(event_loop, bt_pair_watchdog, NULL);
-	wl_event_source_timer_update(bt_pair_watch_timer, 3000);
+	/* Bluetooth pairing module: the bluetoothctl session, its pipes, the
+	 * stdout fd watcher and the passive-listener watchdog all live inside
+	 * bluetooth.c. It needs to know when the net menu is focused on a search
+	 * sub-topic (passive pairing keepalive) and to repaint that menu whenever
+	 * pairing state changes. */
+	bluetooth_init(dpy, netmenu_scan_is_active, updatenetmenu);
 
 	/* Run on-startup commands from config */
 	run_startup_commands();
@@ -9068,11 +8633,11 @@ updatenetmenu(void)
 		render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
 	}
 
-	/* Bluetooth pairing dialog view */
-	if (bt_pair_dialog) {
+	/* Bluetooth pairing dialog view (state lives in bluetooth.c) */
+	if (blt_dialog()) {
 		int mtext = menu_cells_w - 2;
 		int row_y;
-		const char *pin_label = bt_pair_pin[0] ? bt_pair_pin : "---";
+		const char *pin_label = blt_pin()[0] ? blt_pin() : "---";
 		const char *status;
 		const char *keys;
 		int pi;
@@ -9080,7 +8645,7 @@ updatenetmenu(void)
 
 		/* Row 1: device name */
 		row_y = cell_height;
-		snprintf(dlg, sizeof(dlg), "Conectar a %s", bt_pair_name);
+		snprintf(dlg, sizeof(dlg), "Conectar a %s", blt_name());
 		for (pi = 0; dlg[pi] && pi < mtext; pi++)
 			render_char_to_buffer(pixels, menu_width, menu_height,
 				cell_width + pi * cell_width, row_y, dlg[pi], text_color);
@@ -9102,9 +8667,9 @@ updatenetmenu(void)
 
 		/* Row 3: status + keys */
 		row_y = 3 * cell_height;
-		if (bt_pair_done)
-			status = bt_pair_ok ? "Emparejado correctamente" : "Emparejamiento fallido";
-		else if (bt_pair_prompt)
+		if (blt_done())
+			status = blt_ok() ? "Emparejado correctamente" : "Emparejamiento fallido";
+		else if (blt_prompt())
 			status = "Confirmar PIN en el dispositivo";
 		else
 			status = "Buscando dispositivo...";
@@ -9114,9 +8679,9 @@ updatenetmenu(void)
 
 		/* Row 4: key hints */
 		row_y = 4 * cell_height;
-		if (bt_pair_prompt)
+		if (blt_prompt())
 			keys = "S/Enter = aceptar PIN   N/Esc = rechazar";
-		else if (bt_pair_done)
+		else if (blt_done())
 			keys = "Enter = cerrar";
 		else
 			keys = "Esperando al dispositivo...";

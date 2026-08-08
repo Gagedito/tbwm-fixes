@@ -4,7 +4,9 @@ Arreglos para [tbwm](https://github.com/WheeledCord/tbwm) (TurboWM), un
 compositor Wayland. Todo lo necesario para aplicarlos está en este repo:
 
 - **`tbwm-fixes.patch`** — parche con los arreglos de `tbwm.c`, `config.h`,
-  `config.def.h`, `config.mk` e `install.sh`.
+  `config.def.h`, `config.mk`, `Makefile` e `install.sh`. El parche también
+  **añade los archivos nuevos** `bluetooth.c`, `bluetooth.h` (módulo de
+  emparejado Bluetooth del menú de red) y `tbwm-network`.
 - **`config.scm`** — configuración de ejemplo funcional (bindings, Flatpak,
   audio, brillo, REPL, TTYs, menú de red).
 - **`tbwm-audio`** — script para arrancar PipeWire/PipeWire-pulse/WirePlumber
@@ -264,6 +266,36 @@ El menú de red ahora soporta **jerarquía de 4 niveles** en `tbwm.c`:
   se dibujen, `updatenetmenu()` debe tener la rama `net_current_group < 0` que
   pinta la lista de sub-temas antes del nivel de entidades; sin ella el menú
   quedaba vacío (leía `net_groups[-1]`).
+
+### 20. Bluetooth: rescan en vivo + diálogo de emparejado en el menú (confirmar PIN)
+El flujo de Bluetooth ahora se completa **dentro del menú de red**, sin salir a
+la terminal:
+
+- `tbwm-network` hace **rescan en vivo**: re-lanza el escaneo bluetooth mientras
+  el menú está en el sub-apartado "Buscar dispositivos", fusiona los
+  dispositivos descubiertos con los ya cacheados y emite cada uno con el flag
+  `BTPAIR` en la 6ª columna (`...<TAB><MAC><TAB>BTPAIR`).
+- Al elegir "Conectar" sobre un dispositivo sin emparejar, `tbwm` abre un
+  **diálogo de emparejado** que muestra el **PIN/passkey** que BlueZ está
+  pidiendo y dos filas de teclas/estado. El usuario confirma con `S`/`Enter`
+  (`yes` al prompt de bluetoothctl) o rechaza con `N`/`Esc` (`no`), y el `connect`
+  solo se envía una vez visto "Pairing successful/complete". El `connect` nunca
+  se cola antes de tiempo
+  (bluetoothctl lee stdin línea a línea y consumiría el comando como respuesta
+  al prompt).
+- **Escucha pasiva**: las peticiones de emparejado **iniciadas desde el celular**
+  mientras el menú está abierto en "Buscar dispositivos" también abren el
+  diálogo (con el nombre/MAC extraídos de la línea `[NEW] Device ...` emitida por
+  bluetoothctl) para confirmar el PIN y cerrar el emparejado sin salir del menú.
+  Un watchdog (`blt_watchdog`, cada 3s) mantiene el agente `KeyboardDisplay`
+  vivo solo mientras se navega esa sub-vista y lo detiene al salir/cerrar.
+- **`bluetooth.c` como módulo**: toda la lógica de emparejado (spawn de
+  `bluetoothctl`, pipes stdin/stdout, fd watcher del event loop, watchdog y
+  máquina de estados del PIN) vive en un módulo separado (`bluetooth.h`
+  expone la API opaca `blt_*`); `tbwm.c` solo dibuja el diálogo y enruta las
+  teclas del menú vía `blt_key()`. En `cleanup()` se mata la sesión de
+  `bluetoothctl` si el WM muere con un diálogo abierto (evita huérfanos).
+- Requiere recompilar `tbwm` (`make` + instalar binario).
 
 ## Menú de red (WiFi + Bluetooth)
 

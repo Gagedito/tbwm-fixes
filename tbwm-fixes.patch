@@ -1,3 +1,1039 @@
+diff --git a/Makefile b/Makefile
+index 296971d..abc3219 100644
+--- a/Makefile
++++ b/Makefile
+@@ -17,11 +17,13 @@ TBWMCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(TBWMCPPFLAGS) $(TBWM
+ LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
+ 
+ all: tbwm
+-tbwm: tbwm.o util.o s7.o
+-	$(CC) tbwm.o util.o s7.o $(TBWMCFLAGS) $(LDFLAGS) $(LDLIBS) -ldl -o $@
++tbwm: tbwm.o bluetooth.o util.o s7.o
++	$(CC) tbwm.o bluetooth.o util.o s7.o $(TBWMCFLAGS) $(LDFLAGS) $(LDLIBS) -ldl -o $@
+ tbwm.o: tbwm.c client.h config.h config.mk s7.h cursor-shape-v1-protocol.h \
+ 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
+-	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h
++	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h bluetooth.h
++bluetooth.o: bluetooth.c bluetooth.h config.mk
++	$(CC) $(CPPFLAGS) $(TBWMCFLAGS) -o $@ -c bluetooth.c
+ util.o: util.c util.h
+ s7.o: s7.c s7.h
+ 	$(CC) -c -O2 -I. s7.c -o s7.o
+diff --git a/bluetooth.c b/bluetooth.c
+new file mode 100644
+index 0000000..9282ad9
+--- /dev/null
++++ b/bluetooth.c
+@@ -0,0 +1,545 @@
++#include <fcntl.h>
++#include <signal.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include <wayland-server.h>
++#include <xkbcommon/xkbcommon.h>
++
++#include "bluetooth.h"
++
++#define BLT_MAC_LEN  32
++#define BLT_NAME_LEN 128
++#define BLT_CMD_LEN  384   /* big enough for the agent/pair/reject sequences */
++
++/* Rolling state of the pairing session. Everything here is private to the
++ * module; tbwm.c only sees it through the blt_*() accessors. */
++static struct wl_display *bt_dpy = NULL;
++static int (*bt_scan_cb)(void) = NULL;
++static void (*bt_refresh_cb)(void) = NULL;
++
++static int bt_dialog = 0;      /* 1 = draw/key the pairing dialog (session alive) */
++static pid_t bt_pid = -1;
++static int bt_in_fd = -1;      /* write side: to bluetoothctl's stdin */
++static int bt_out_fd = -1;     /* read side: bluetoothctl's stdout */
++static struct wl_event_source *bt_source = NULL;
++static struct wl_event_source *bt_watch_timer = NULL; /* passive listener keepalive */
++static char bt_mac[BLT_MAC_LEN] = "";
++static char bt_name[BLT_NAME_LEN] = "";
++static char bt_log[2048];      /* recent bluetoothctl output */
++static int bt_log_len = 0;
++static char bt_pin[64] = "";
++static int bt_prompt = 0;      /* 1 = waiting for yes/no (passkey shown) */
++static int bt_done = 0;        /* 1 = pairing finished (ok or fail) */
++static int bt_ok = 0;          /* 1 = pairing succeeded */
++static int bt_connected = 0;   /* 1 = "connect" sent after pairing */
++static int bt_saw_pair = 0;    /* 1 = "Pairing successful" seen (real pairing done) */
++static int bt_incoming = 0;    /* 1 = pairing request came from the phone (watch) */
++
++static void blt_send(const char *line);
++static void blt_finish(int ok);
++static void blt_watch(void);
++static int blt_watchdog(void *data);
++
++/* Send a line to bluetoothctl's stdin (the pairing session). */
++static void
++blt_send(const char *line)
++{
++	if (bt_in_fd >= 0) {
++		if (write(bt_in_fd, line, strlen(line)) < 0) {
++			/* ignore EPIPE (child already gone) */
++		}
++	}
++}
++
++/* Debug helper: append a line to /tmp/tbwm-bt.log for post-mortem of the
++ * pairing session (bluetoothctl is stateful, so we log what it prints and
++ * what we decide). */
++static void
++blt_dbg(const char *fmt, ...)
++{
++	FILE *f = fopen("/tmp/tbwm-bt.log", "a");
++	va_list ap;
++	if (!f)
++		return;
++	va_start(ap, fmt);
++	vfprintf(f, fmt, ap);
++	va_end(ap);
++	fputc('\n', f);
++	fclose(f);
++}
++
++/* Mark the pairing as finished, clean up the session, and keep the dialog
++ * open showing the result until the user presses a key. */
++static void
++blt_finish(int ok)
++{
++	if (bt_done)
++		return;
++	bt_done = 1;
++	bt_ok = ok;
++	blt_dbg("blt_finish: %s", ok ? "ok" : "fail");
++	if (bt_source) {
++		wl_event_source_remove(bt_source);
++		bt_source = NULL;
++	}
++	if (bt_out_fd >= 0) {
++		close(bt_out_fd);
++		bt_out_fd = -1;
++	}
++	if (bt_pid > 0) {
++		waitpid(bt_pid, NULL, WNOHANG);
++		bt_pid = -1;
++	}
++	if (bt_refresh_cb)
++		bt_refresh_cb();
++}
++
++/* Parse bluetoothctl output for a passkey and a yes/no prompt. The child
++ * runs `bluetoothctl` interactively: we must only read its stdout here and,
++ * when we need to answer a passkey prompt, write "yes\n"/"no\n" to the pipe
++ * from the key handler. We never pre-enqueue a command that would be eaten
++ * as an answer by a prompt still pending. */
++static void
++blt_parse(const char *buf, int len)
++{
++	int i;
++
++	for (i = 0; i < len; i++) {
++		blt_dbg("%02x%c", (unsigned char)buf[i] >= 0x20 ? '.' : '+', buf[i]);
++	}
++	/* Append to the rolling log */
++	for (i = 0; i < len && bt_log_len < (int)sizeof(bt_log) - 1; i++) {
++		bt_log[bt_log_len++] = buf[i];
++	}
++	bt_log[bt_log_len] = '\0';
++
++	/* Keep only the tail (last ~1KB) so memory stays bounded */
++	if (bt_log_len > 1024) {
++		memmove(bt_log, bt_log + bt_log_len - 1024, 1024);
++		bt_log_len = 1024;
++		bt_log[1024] = '\0';
++	}
++
++	/* Show the passkey when bluetoothctl asks for confirmation.
++	 * bluetoothctl 5.?? prints, e.g.:
++	 *   [agent] Confirm passkey 123456 (yes/no)
++	 *   Requesting confirmation
++	 *   [agent] No input no output (auto accept) ...
++	 * In interactive pairing of a phone the agent prompts with
++	 * "(yes/no)". We also match the older "Confirm passkey" text. */
++	if (!bt_prompt && !bt_done &&
++	    (strstr(bt_log, "(yes/no") != NULL ||
++	     strstr(bt_log, "(yes,no") != NULL ||
++	     strstr(bt_log, "Confirm passkey") != NULL)) {
++		bt_prompt = 1;
++		blt_dbg("prompt: confirmed");
++		/* If this is an incoming pairing (no target set), try to name the
++		 * device from the associated "[NEW] Device <MAC> <name>" line that
++		 * bluetoothctl emits when the request arrives, then show the dialog. */
++		if (bt_mac[0] == '\0' && !bt_dialog) {
++			const char *nd = strstr(bt_log, "[NEW] Device ");
++			if (nd) {
++				const char *sp = strchr(nd + 13, ' ');
++				if (sp) {
++					char mac[BLT_MAC_LEN];
++					int j;
++					for (j = 0; j < BLT_MAC_LEN - 1 && (nd[13 + j] != ' ') && nd[13 + j]; j++)
++						mac[j] = nd[13 + j];
++					mac[j] = '\0';
++					strncpy(bt_mac, mac, BLT_MAC_LEN - 1);
++					bt_mac[BLT_MAC_LEN - 1] = '\0';
++					j = 0;
++					while (sp[j + 1] && j < BLT_NAME_LEN - 1 &&
++					       sp[j + 1] != ' ' && sp[j + 1] != '\n') {
++						bt_name[j] = sp[j + 1];
++						j++;
++					}
++					bt_name[j] = '\0';
++					blt_dbg("incoming from %s (%s)", bt_mac, bt_name);
++				}
++			}
++			if (bt_name[0] == '\0')
++				strncpy(bt_name, "Dispositivo nuevo", BLT_NAME_LEN - 1);
++			bt_incoming = 1;
++			bt_dialog = 1;
++		}
++		if (bt_refresh_cb)
++			bt_refresh_cb();
++	}
++
++	/* Extract the passkey itself: "passkey <digits>", "PIN code:" or digits on a line */
++	{
++		const char *pk = strstr(bt_log, "passkey ");
++		if (pk) {
++			pk += 8;
++			if (pk[0] >= '0' && pk[0] <= '9') {
++				int j = 0;
++				while (pk[j] >= '0' && pk[j] <= '9' && j < (int)sizeof(bt_pin) - 1)
++					j++;
++				memcpy(bt_pin, pk, j);
++				bt_pin[j] = '\0';
++				blt_dbg("passkey captured: %s", bt_pin);
++			}
++		}
++		if (!bt_pin[0]) {
++			const char *pin = strstr(bt_log, "PIN ");
++			if (pin) {
++				pin += 4;
++				if (pin[0] >= '0' && pin[0] <= '9') {
++					int j = 0;
++					while (pin[j] >= '0' && pin[j] <= '9' && j < (int)sizeof(bt_pin) - 1)
++						bt_pin[j] = pin[j], j++;
++					bt_pin[j] = '\0';
++					blt_dbg("passkey (PIN) captured: %s", bt_pin);
++				}
++			}
++		}
++	}
++
++	/* Detect completion. "Connected: yes" alone is NOT proof of pairing:
++	 * bluetoothctl prints it as soon as the ACL link comes up, which can
++	 * happen while pairing is still in progress (and the phone shows the
++	 * passkey). We only trust "Pairing successful"/"Pairing complete" as
++	 * the real finish marker, then send "connect" and finally accept
++	 * "Connected: yes" once pairing has truly finished. */
++	if (!bt_done) {
++		if (!bt_saw_pair &&
++		    (strstr(bt_log, "Pairing successful") != NULL ||
++		     strstr(bt_log, "Pairing complete") != NULL)) {
++			bt_saw_pair = 1;
++			blt_dbg("pairing confirmed");
++		}
++		if (bt_saw_pair && !bt_connected) {
++			char con[BLT_CMD_LEN];
++			bt_connected = 1;
++			snprintf(con, sizeof(con), "connect %s\n", bt_mac);
++			blt_send(con);
++			blt_dbg("sent connect after pairing");
++		}
++		if (strstr(bt_log, "Pairing successful") != NULL ||
++		    strstr(bt_log, "Pairing complete") != NULL) {
++			blt_finish(1);
++		} else if (bt_saw_pair &&
++		           (strstr(bt_log, "Connected: yes") != NULL ||
++		            strstr(bt_log, "[Connected") != NULL ||
++		            strstr(bt_log, "Connection successful") != NULL)) {
++			blt_finish(1);
++		} else if (strstr(bt_log, "Failed to pair") != NULL ||
++		           strstr(bt_log, "Failed to connect") != NULL ||
++		           strstr(bt_log, "org.bluez.Error.AuthenticationFailed") != NULL ||
++		           strstr(bt_log, "org.bluez.Error.Rejected") != NULL ||
++		           strstr(bt_log, "org.bluez.Error.RemoveFailed") != NULL) {
++			blt_finish(0);
++		}
++	}
++}
++
++/* Read bluetoothctl's output as it arrives (pairing session). */
++static int
++blt_read_cb(int fd, uint32_t mask, void *data)
++{
++	char buf[4096];
++	ssize_t r;
++	int done = 0;
++	(void)data;
++
++	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
++		done = 1;
++
++	while ((r = read(fd, buf, sizeof(buf))) > 0)
++		blt_parse(buf, (int)r);
++	if (r == 0)
++		done = 1;
++
++	if (done && !bt_done) {
++		/* bluetoothctl exited (or quit command processed). Determine success
++		 * from what it printed. */
++		blt_finish(strstr(bt_log, "successful") != NULL ||
++		           strstr(bt_log, "Connected") != NULL);
++	} else if (bt_done) {
++		/* Already finalized by content detection; nothing more to do. */
++	}
++	return 1;
++}
++
++/* Spawn a fresh bluetoothctl session with an agent and wire up the pipes.
++ * Returns 1 on success; on return the new session is in bt_in_fd /
++ * bt_out_fd / bt_pid. The stdout fd watcher is registered here (not in
++ * tbwm.c's setup()) so module state stays in one place. */
++static int
++blt_spawn(void)
++{
++	int in_pipe[2], out_pipe[2];
++	pid_t pid;
++
++	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0) {
++		if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
++		if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
++		return 0;
++	}
++
++	pid = fork();
++	if (pid == 0) {
++		setsid();
++		close(in_pipe[1]);   /* parent writes into child's stdin */
++		close(out_pipe[0]);
++		dup2(in_pipe[0], STDIN_FILENO);
++		close(in_pipe[0]);
++		dup2(out_pipe[1], STDOUT_FILENO);
++		dup2(out_pipe[1], STDERR_FILENO);
++		close(out_pipe[1]);
++		execl("/usr/bin/bluetoothctl", "bluetoothctl", (char *)NULL);
++		_exit(127);
++	}
++
++	/* Parent */
++	close(in_pipe[0]);   /* reading from child's stdin side is closed */
++	close(out_pipe[1]);
++	bt_in_fd = in_pipe[1];    /* write here to send commands/answers */
++	bt_out_fd = out_pipe[0];  /* read here to see prompts */
++	bt_pid = pid;
++
++	{
++		int flags = fcntl(bt_out_fd, F_GETFL, 0);
++		if (flags >= 0)
++			fcntl(bt_out_fd, F_SETFL, flags | O_NONBLOCK);
++		flags = fcntl(bt_in_fd, F_GETFL, 0);
++		if (flags >= 0)
++			fcntl(bt_in_fd, F_SETFL, flags | O_NONBLOCK);
++	}
++
++	if (bt_dpy) {
++		bt_source = wl_event_loop_add_fd(wl_display_get_event_loop(bt_dpy),
++			bt_out_fd, WL_EVENT_READABLE, blt_read_cb, NULL);
++	}
++	return 1;
++}
++
++/* Ensure a bluetoothctl session exists; spawn it if needed and register the
++ * KeyboardDisplay agent. Shared by the menu-initiated pairing (blt_start)
++ * and the passive listener (blt_watch). Resets the rolling state. */
++static void
++blt_ensure_session(void)
++{
++	if (bt_pid <= 0)
++		blt_spawn();
++	bt_log_len = 0;
++	bt_log[0] = '\0';
++	bt_pin[0] = '\0';
++	bt_prompt = 0;
++	bt_done = 0;
++	bt_ok = 0;
++	bt_connected = 0;
++	bt_saw_pair = 0;
++}
++
++/* Start an interactive bluetoothctl pairing session for a discovered device.
++ * bluetoothctl runs with our pipes as its stdin/stdout; we register an agent
++ * and pair; the passkey prompt is answered with yes/no from the keyboard. */
++void
++blt_start(const char *mac, const char *name)
++{
++	char seq[BLT_CMD_LEN];
++
++	if (bt_pid > 0)
++		blt_stop();
++	blt_ensure_session();
++
++	strncpy(bt_mac, mac, BLT_MAC_LEN - 1);
++	bt_mac[BLT_MAC_LEN - 1] = '\0';
++	strncpy(bt_name, name, BLT_NAME_LEN - 1);
++	bt_name[BLT_NAME_LEN - 1] = '\0';
++
++	/* Register a KeyboardDisplay agent and request the pairing. We do NOT
++	 * enqueue "connect" here: bluetoothctl reads stdin line by line, so a
++	 * pre-queued "connect AA:BB" would be consumed as the answer to the
++	 * passkey prompt. The "connect" is sent only once "Pairing successful"
++	 * shows up (see blt_parse). */
++	snprintf(seq, sizeof(seq),
++		"agent KeyboardDisplay\ndefault-agent\ntrust %s\npair %s\n",
++		mac, mac);
++	blt_send(seq);
++
++	bt_incoming = 0;
++	bt_dialog = 1;
++	if (bt_refresh_cb)
++		bt_refresh_cb();
++}
++
++/* Passive listener: keep a bluetoothctl agent registered so an incoming
++ * pairing request started from the phone reaches us and shows the passkey
++ * dialog inside "Buscar dispositivos". No device is targeted here. */
++static void
++blt_watch(void)
++{
++	if (bt_pid <= 0)
++		blt_spawn();
++
++	bt_mac[0] = '\0';
++	bt_name[0] = '\0';
++	bt_log_len = 0;
++	bt_log[0] = '\0';
++	bt_pin[0] = '\0';
++	bt_prompt = 0;
++	bt_done = 0;
++	bt_ok = 0;
++	bt_connected = 0;
++	bt_saw_pair = 0;
++	bt_incoming = 0;
++	bt_dialog = 0;
++
++	/* Only register the agent once: after the session bootstraps, further
++	 * "agent" lines would just print "Agent is already registered". We
++	 * always re-send so a just-spawned session gets its agent. */
++	blt_send("agent KeyboardDisplay\ndefault-agent\n");
++}
++
++/* Stop and clean up an active pairing session. */
++void
++blt_stop(void)
++{
++	if (bt_source) {
++		wl_event_source_remove(bt_source);
++		bt_source = NULL;
++	}
++	if (bt_out_fd >= 0) {
++		close(bt_out_fd);
++		bt_out_fd = -1;
++	}
++	if (bt_in_fd >= 0) {
++		close(bt_in_fd);
++		bt_in_fd = -1;
++	}
++	if (bt_pid > 0) {
++		kill(bt_pid, SIGTERM);
++		waitpid(bt_pid, NULL, WNOHANG);
++		bt_pid = -1;
++	}
++	bt_dialog = 0;
++	bt_incoming = 0;
++}
++
++/* Confirm (yes) or reject (no) the pairing passkey. */
++static void
++blt_answer(int accept)
++{
++	if (accept)
++		blt_send("yes\n");
++	else
++		blt_send("no\n");
++}
++
++/* Passive listener watchdog: while the menu is open on the "Buscar
++ * dispositivos" sub-topic, keep a bluetoothctl agent alive so pairing
++ * requests initiated from the phone are caught and shown in the dialog.
++ * When the user leaves that view or closes the menu, stop the session. */
++static int
++blt_watchdog(void *data)
++{
++	(void)data;
++	if (bt_scan_cb && bt_scan_cb()) {
++		/* On "Buscar dispositivos": keep a passive agent (unless a pairing
++		 * dialog from the user already owns the session). */
++		if (bt_pid <= 0 && !bt_dialog)
++			blt_watch();
++	} else if (bt_pid > 0 && !bt_dialog) {
++		blt_stop();
++	}
++	wl_event_source_timer_update(bt_watch_timer, 3000);
++	return 1;
++}
++
++void
++bluetooth_init(struct wl_display *dpy, int (*scan_cb)(void), void (*refresh_cb)(void))
++{
++	bt_dpy = dpy;
++	bt_scan_cb = scan_cb;
++	bt_refresh_cb = refresh_cb;
++	bt_watch_timer = wl_event_loop_add_timer(wl_display_get_event_loop(dpy),
++		blt_watchdog, NULL);
++	wl_event_source_timer_update(bt_watch_timer, 3000);
++}
++
++int
++blt_dialog(void)
++{
++	return bt_dialog;
++}
++
++int
++blt_prompt(void)
++{
++	return bt_prompt;
++}
++
++int
++blt_done(void)
++{
++	return bt_done;
++}
++
++int
++blt_ok(void)
++{
++	return bt_ok;
++}
++
++int
++blt_incoming(void)
++{
++	return bt_incoming;
++}
++
++const char *
++blt_pin(void)
++{
++	return bt_pin;
++}
++
++const char *
++blt_name(void)
++{
++	return bt_name;
++}
++
++/* Route a net menu key event while the pairing dialog owns the keyboard.
++ * Mirrors the old inline handling in netmenukey: Escape/N reject, Enter/S
++ * accept (or close the dialog once the pairing finished). */
++int
++blt_key(unsigned int sym)
++{
++	if (!bt_dialog)
++		return BLKEY_IGNORED;
++
++	if (sym == XKB_KEY_Escape || sym == XKB_KEY_N || sym == XKB_KEY_n) {
++		if (bt_prompt) {
++			blt_answer(0);
++			bt_prompt = 0;
++		} else {
++			blt_stop();
++		}
++		return BLKEY_HANDLED;
++	}
++
++	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
++	    sym == XKB_KEY_S || sym == XKB_KEY_s) {
++		if (bt_prompt) {
++			blt_answer(1);
++			bt_prompt = 0;
++			return BLKEY_HANDLED;
++		}
++		if (bt_done) {
++			int was_incoming = bt_incoming;
++			blt_stop();
++			return was_incoming ? BLKEY_HANDLED : BLKEY_CLOSE_MENU;
++		}
++		return BLKEY_HANDLED;
++	}
++
++	/* swallow everything else while pairing */
++	return BLKEY_HANDLED;
++}
+\ No newline at end of file
+diff --git a/bluetooth.h b/bluetooth.h
+new file mode 100644
+index 0000000..4b9598b
+--- /dev/null
++++ b/bluetooth.h
+@@ -0,0 +1,53 @@
++#ifndef TBWM_BLUETOOTH_H
++#define TBWM_BLUETOOTH_H
++
++/*
++ * Bluetooth pairing driver for tbwm's network menu.
++ *
++ * tbwm.c owns the GUI (drawing the PIN dialog, the S/N/Esc/Enter handling in
++ * netmenukey) and only talks to this module through these opaque accessors:
++ * no struct or pipe state is ever exposed. bluetooth.c owns the bluetoothctl
++ * session (spawn, pipes, fd watcher, passkey watchdog) entirely.
++ *
++ * The fd watcher and the passive-listener timer are registered/unregistered
++ * inside this module (blt_init / blt_start / blt_stop), never from tbwm.c's
++ * setup().
++ */
++
++struct wl_display;
++
++/* Returns from blt_key() */
++enum {
++	BLKEY_IGNORED = 0,  /* no active pairing dialog: key not handled */
++	BLKEY_HANDLED = 1,  /* consumed by the dialog, menu stays open */
++	BLKEY_CLOSE_MENU = 2 /* consumed, pairing finished from the menu: close menu */
++};
++
++/*
++ * Initialize the module. dpy is used to reach the event loop (fd watcher and
++ * watchdog timer). scan_cb() returns 1 while the netmenu is focused on a
++ * "Buscar dispositivos" sub-topic (passive listener keepalive). refresh_cb()
++ * is called to repaint the net menu whenever pairing state changes.
++ */
++void bluetooth_init(struct wl_display *dpy,
++		int (*scan_cb)(void), void (*refresh_cb)(void));
++
++/* Start a menu-initiated pairing for mac (device name for the dialog). */
++void blt_start(const char *mac, const char *name);
++
++/* Stop the session and drop the dialog (menu key and WM shutdown). */
++void blt_stop(void);
++
++/* Opaque accessors for the dialog rendering. */
++int blt_dialog(void);       /* 1 = dialog is open (draw + key interception) */
++int blt_prompt(void);       /* 1 = passkey shown, waiting for yes/no */
++int blt_done(void);         /* 1 = pairing finished (ok or fail) */
++int blt_ok(void);           /* 1 = the finished pairing succeeded */
++int blt_incoming(void);     /* 1 = pairing started from the phone (watch) */
++const char *blt_pin(void);  /* captured passkey, "" if none yet */
++const char *blt_name(void); /* device name shown in the dialog */
++
++/* Route a net menu key event; returns a BLKEY_* constant. */
++int blt_key(unsigned int sym);
++
++#endif /* TBWM_BLUETOOTH_H */
+\ No newline at end of file
+diff --git a/config.def.h b/config.def.h
+index 0095e7d..8599043 100644
+--- a/config.def.h
++++ b/config.def.h
+@@ -57,6 +57,12 @@ static const struct xkb_rule_names xkb_rules = {
+ 	/* example:
+ 	.options = "ctrl:nocaps",
+ 	*/
++	/* Keyboard layout: override at build time with TBWM_XKB_LAYOUT,
++	 * e.g. `TBWM_XKB_LAYOUT=latam make` (the install script prompts). */
++#ifndef TBWM_XKB_LAYOUT
++#define TBWM_XKB_LAYOUT NULL
++#endif
++	.layout = TBWM_XKB_LAYOUT,
+ 	.options = NULL,
+ };
+ 
+diff --git a/config.h b/config.h
+index a52155a..cd62d1b 100644
+--- a/config.h
++++ b/config.h
+@@ -24,8 +24,15 @@ static const MonitorRule monrules[] = {
+ 	{ NULL,       0.55f, 1,      1,    &layouts[0], WL_OUTPUT_TRANSFORM_NORMAL,   -1,  -1 },
+ };
+ 
+-/* Default keyboard XKB rules - empty means system default */
++/* Default keyboard XKB rules - empty means system default.
++ * Override the keyboard layout at build/install time by setting
++ * TBWM_XKB_LAYOUT, e.g. `TBWM_XKB_LAYOUT=latam make` (the install
++ * script prompts for this). */
++#ifndef TBWM_XKB_LAYOUT
++#define TBWM_XKB_LAYOUT NULL
++#endif
+ static const struct xkb_rule_names xkb_rules = {
++	.layout = TBWM_XKB_LAYOUT,
+ 	.options = NULL,
+ };
+ 
+diff --git a/config.mk b/config.mk
+index 9ccea74..f1c4055 100644
+--- a/config.mk
++++ b/config.mk
+@@ -34,3 +34,10 @@ XLIBS = xcb xcb-icccm
+ # To avoid warnings about them, we do not use -std=c99 and instead of using the
+ # gmake default 'CC=c99', we use cc.
+ CC = cc
++
++# Optional keyboard layout override, selectable at install time:
++#   TBWM_XKB_LAYOUT=latam make
++# (Uses CFLAGS because the Makefile redefines TBWMCPPFLAGS after including us.)
++ifdef TBWM_XKB_LAYOUT
++CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
++endif
+diff --git a/install.sh b/install.sh
+index 8a401bc..fb37425 100755
+--- a/install.sh
++++ b/install.sh
+@@ -46,13 +46,29 @@ install_deps() {
+     info "Installing dependencies..."
+     
+     case "$DISTRO" in
+-        arch|endeavouros|manjaro|garuda|cachyos)
+-            # Arch-based
+-            sudo pacman -S --needed --noconfirm \
+-                wlroots wayland wayland-protocols libinput libxkbcommon \
++        arch|endeavouros|manjaro|garuda|cachyos|artix)
++            # Arch-based. Artix ships wlroots 0.19 as the wlroots0.19 package;
++            # on Arch the regular wlroots package is already 0.19+.
++            if [ "$DISTRO" = "artix" ]; then
++                WLROOTS_PKG="wlroots0.19"
++                # runit service packages for the WiFi/Bluetooth menu. If connman
++                # is already installed, keep using it instead of NetworkManager
++                # (installing both leaves the network menu without a backend).
++                if [ "$NET_BACKEND" = "connman" ]; then
++                    NET_DEPS="connman connman-runit bluez bluez-utils bluez-runit dbus-runit"
++                else
++                    NET_DEPS="networkmanager networkmanager-runit bluez bluez-utils bluez-runit dbus-runit"
++                fi
++            else
++                WLROOTS_PKG="wlroots"
++                NET_DEPS="networkmanager bluez bluez-utils"
++            fi
++            sudo pacman -Sy --needed --noconfirm \
++                "$WLROOTS_PKG" wayland wayland-protocols libinput libxkbcommon \
+                 pixman freetype2 pango cairo libxcb xcb-util-wm \
+                 xorg-xwayland meson ninja gcc pkgconf make git \
+-                fontconfig ttf-font || true
++                fontconfig ttf-font grim slurp wl-clipboard $NET_DEPS \
++                xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr || true
+             ;;
+         debian|ubuntu|pop|linuxmint|elementary)
+             # Debian-based - note: libwlroots-dev often not available or too old
+@@ -65,7 +81,7 @@ install_deps() {
+                 libdrm-dev libgbm-dev libseat-dev \
+                 libdisplay-info-dev libliftoff-dev hwdata \
+                 meson ninja-build gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard networkmanager bluez || true
+             ;;
+         fedora|rhel|centos|rocky|almalinux)
+             # Fedora/RHEL-based
+@@ -75,7 +91,7 @@ install_deps() {
+                 freetype-devel pango-devel cairo-devel \
+                 libxcb-devel xcb-util-wm-devel xorg-x11-server-Xwayland \
+                 meson ninja-build gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard NetworkManager bluez || true
+             ;;
+         opensuse*|suse*)
+             # openSUSE
+@@ -84,7 +100,7 @@ install_deps() {
+                 libinput-devel libxkbcommon-devel libpixman-1-0-devel \
+                 freetype2-devel pango-devel cairo-devel \
+                 libxcb-devel xwayland meson ninja gcc pkg-config make git \
+-                fontconfig || true
++                fontconfig grim slurp wl-clipboard NetworkManager bluez || true
+             ;;
+         void)
+             # Void Linux
+@@ -93,7 +109,8 @@ install_deps() {
+                 libinput-devel libxkbcommon-devel pixman-devel \
+                 freetype-devel pango-devel cairo-devel \
+                 libxcb-devel xcb-util-wm-devel xorg-server-xwayland \
+-                meson ninja gcc pkg-config make git fontconfig || true
++                meson ninja gcc pkg-config make git fontconfig \
++                grim slurp wl-clipboard NetworkManager bluez || true
+             ;;
+         gentoo)
+             warn "Gentoo detected. Please ensure you have the following USE flags enabled:"
+@@ -112,6 +129,8 @@ install_deps() {
+             echo "  - libinput, libxkbcommon"
+             echo "  - freetype2, pango, cairo, pixman"
+             echo "  - libxcb, xcb-util-wm"
++            echo "  - grim, slurp, wl-clipboard (for screenshots)"
++            echo "  - networkmanager (nmcli) and bluez/bluez-utils (bluetoothctl) for the network menu"
+             echo "  - xwayland (optional, for X11 apps)"
+             echo ""
+             read -p "Continue anyway? [y/N] " -n 1 -r
+@@ -124,6 +143,95 @@ install_deps() {
+     success "Dependencies installed"
+ }
+ 
++# Detect the keyboard layout currently used on the system / DE.
++# Order matters: file-based sources reflect the real layout, while
++# setxkbmap -query reports the X layout and is only reliable in a pure
++# X11 session (under Wayland it would query XWayland, which is wrong).
++detect_keyboard_layout() {
++    local detected=""
++
++    # 1. KDE Plasma
++    if [ -z "$detected" ] && [ -f "$HOME/.config/kxkbrc" ]; then
++        detected="$(sed -n 's/^LayoutList=//p' "$HOME/.config/kxkbrc" | head -1)"
++    fi
++
++    # 2. /etc/default/keyboard (Debian/Ubuntu, also present on some Arch/Artix systems)
++    if [ -z "$detected" ] && [ -f /etc/default/keyboard ]; then
++        detected="$(sed -n 's/^XKBLAYOUT="\?\([^"]*\)"\?.*/\1/p' /etc/default/keyboard)"
++    fi
++
++    # 3. Xorg keyboard config
++    if [ -z "$detected" ] && [ -d /etc/X11/xorg.conf.d ]; then
++        detected="$(grep -rhoE 'XkbLayout[[:space:]]+"[^"]+"' /etc/X11/xorg.conf.d 2>/dev/null | head -1 | sed -E 's/.*"([^"]+)"/\1/')"
++    fi
++
++    # 4. systemd-based distros
++    if [ -z "$detected" ] && command -v localectl >/dev/null 2>&1; then
++        detected="$(localectl status 2>/dev/null | awk '/X11 Layout/{print $3}')"
++    fi
++
++    # 5. GNOME
++    if [ -z "$detected" ] && command -v gsettings >/dev/null 2>&1; then
++        detected="$(gsettings get org.gnome.desktop.input-sources sources 2>/dev/null | sed -n "s/.*'xkb', *'\([^']*\)'.*/\1/p")"
++    fi
++
++    # 6. Pure X11 session only (setxkbmap is unreliable under Wayland/XWayland)
++    if [ -z "$detected" ] && [ "$XDG_SESSION_TYPE" = "x11" ] && command -v setxkbmap >/dev/null 2>&1; then
++        detected="$(setxkbmap -query 2>/dev/null | awk -F': *' '/layout/{print $2; exit}')"
++    fi
++
++    # Sanitize: layouts never contain spaces
++    if [[ "$detected" =~ [^A-Za-z0-9_,()+.-] ]]; then
++        detected=""
++    fi
++
++    echo "$detected"
++}
++
++# Ask for the keyboard layout to bake into the compositor, defaulting to the
++# layout detected on the system / DE when possible.
++setup_keyboard_layout() {
++    local detected
++    detected="$(detect_keyboard_layout)"
++
++    echo ""
++    if [ -n "$detected" ]; then
++        echo "Detected keyboard layout: $detected"
++        echo "  (press Enter to use it, type another layout, or 'none' for system default)"
++        read -r -p "Keyboard layout [$detected]: " kblayout
++        case "$kblayout" in
++            "")
++                kblayout="$detected"
++                ;;
++            "system default"|"system"|"default"|"none")
++                kblayout=""
++                ;;
++        esac
++    else
++        echo "No keyboard layout detected on this system."
++        echo "  e.g. latam, us, es, de, fr, gb  (empty = system default)"
++        read -r -p "Keyboard layout: " kblayout
++        case "$kblayout" in
++            ""|"system default"|"system"|"default"|"none")
++                kblayout=""
++                ;;
++        esac
++    fi
++
++    # Safety net: layouts are single tokens without spaces; reject anything else.
++    if [[ "$kblayout" =~ [^A-Za-z0-9_,()+.-] ]]; then
++        warn "Invalid keyboard layout '$kblayout'. Using system default."
++        kblayout=""
++    fi
++
++    if [ -n "$kblayout" ]; then
++        export TBWM_XKB_LAYOUT="$kblayout"
++        info "Will build with keyboard layout: $kblayout"
++    else
++        info "Using system default keyboard layout"
++    fi
++}
++
+ # Check wlroots version
+ check_wlroots() {
+     info "Checking wlroots version..."
+@@ -170,8 +278,8 @@ build_wlroots() {
+     
+     # Install meson build deps
+     case "$DISTRO" in
+-        arch|endeavouros|manjaro|garuda|cachyos)
+-            sudo pacman -S --needed --noconfirm \
++        arch|endeavouros|manjaro|garuda|cachyos|artix)
++            sudo pacman -Sy --needed --noconfirm \
+                 meson ninja hwdata libdisplay-info libliftoff seatd || true
+             ;;
+         debian|ubuntu|pop|linuxmint|elementary)
+@@ -195,6 +303,9 @@ build_wlroots() {
+     cd wlroots
+     
+     info "Configuring..."
++    if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
++        error "meson/ninja not found. Install them and re-run (e.g. 'sudo pacman -S meson ninja' on Arch/Artix, 'sudo apt install meson ninja-build' on Debian/Ubuntu)."
++    fi
+     meson setup build --prefix=/usr/local -Dexamples=false
+     
+     info "Building..."
+@@ -272,13 +383,32 @@ install_tbwm() {
+     sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
+     success "Installed fonts (from fonts/ directory)"
+     
++    # tbwm-network helper for the WiFi/Bluetooth menu
++    if [ -f "$SCRIPT_DIR/tbwm-network" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-network" /usr/local/bin/tbwm-network
++        sudo chmod 755 /usr/local/bin/tbwm-network
++        success "Installed /usr/local/bin/tbwm-network"
++    else
++        warn "tbwm-network not found; the network menu (WiFi/Bluetooth) will be empty"
++    fi
++    
++    # tbwm-session launcher (starts a session D-Bus bus so Flatpak apps and
++    # the XDG desktop portals can connect)
++    if [ -f "$SCRIPT_DIR/tbwm-session" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-session" /usr/local/bin/tbwm-session
++        sudo chmod 755 /usr/local/bin/tbwm-session
++        success "Installed /usr/local/bin/tbwm-session"
++    else
++        warn "tbwm-session not found; apps may have no session D-Bus bus (Flatpak/portals may fail)"
++    fi
++    
+     # Session file for display managers
+     sudo mkdir -p /usr/share/wayland-sessions
+     sudo tee /usr/share/wayland-sessions/tbwm.desktop > /dev/null << 'EOF'
+ [Desktop Entry]
+ Name=TurboWM
+ Comment=A Wayland compositor with s7 Scheme configuration
+-Exec=/usr/local/bin/tbwm
++Exec=/usr/local/bin/tbwm-session
+ Type=Application
+ EOF
+     success "Installed session file"
+@@ -307,6 +437,94 @@ exec /usr/local/bin/tbwm.bin "$@"
+ EOF
+         sudo chmod 755 /usr/local/bin/tbwm
+     fi
++
++    enable_net_services
++
++    # Make the XDG desktop portal frontend pick xdg-desktop-portal-wlr for
++    # screen capture (ScreenCast). The frontend matches XDG_CURRENT_DESKTOP
++    # (tbwm sets it to "tbwm") against each .portal file's UseIn= list, so
++    # "tbwm" must be in that list for the wlr backend to be chosen.
++    WLR_PORTAL="/usr/share/xdg-desktop-portal/portals/wlr.portal"
++    if [ -f "$WLR_PORTAL" ]; then
++        if ! grep -q 'UseIn=.*tbwm' "$WLR_PORTAL"; then
++            sudo sed -i 's/^UseIn=\(.*\)$/UseIn=tbwm;\1/' "$WLR_PORTAL"
++            success "Added tbwm to UseIn in wlr.portal"
++        else
++            info "tbwm already in UseIn of wlr.portal"
++        fi
++    else
++        warn "wlr.portal not found; screen capture (ScreenCast) may not work"
++    fi
++}
++
++# Pick which network manager is in use (connman and NetworkManager conflict if
++# both are enabled at the same time, so we always enable exactly one of them).
++detect_net_backend() {
++    NET_BACKEND="networkmanager"
++    if pgrep -x connmand >/dev/null 2>&1; then
++        NET_BACKEND="connman"
++    elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
++        NET_BACKEND="networkmanager"
++    elif command -v connmanctl >/dev/null 2>&1; then
++        NET_BACKEND="connman"
++    fi
++    info "Network backend: $NET_BACKEND"
++}
++
++# Enable the active network manager and Bluetooth services for the menu
++enable_net_services() {
++    detect_net_backend
++    if [ "$NET_BACKEND" = "connman" ]; then
++        NET_SERVICE="connmand"
++        info "Enabling connman ($NET_SERVICE) and Bluetooth services..."
++    else
++        NET_SERVICE="NetworkManager"
++        info "Enabling NetworkManager and Bluetooth services..."
++    fi
++
++    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
++        # ensure only one network manager is enabled/started
++        if [ "$NET_SERVICE" = "connmand" ]; then
++            sudo systemctl disable --now NetworkManager 2>/dev/null || true
++        else
++            sudo systemctl disable --now connmand 2>/dev/null || true
++        fi
++        sudo systemctl enable --now "$NET_SERVICE" bluetooth 2>/dev/null || \
++            warn "Could not enable $NET_SERVICE/bluetooth (systemd)"
++    elif [ -d /etc/runit/runsvdir/current ]; then
++        # runit (Artix, Void): link service dirs into runsvdir
++        OTHER="connmand"
++        [ "$NET_SERVICE" = "connmand" ] && OTHER="NetworkManager"
++        # remove the other manager so they never fight over the interface
++        if [ -d "/etc/runit/sv/$OTHER" ]; then
++            sudo rm -f "/etc/runit/runsvdir/current/$OTHER"
++            sudo sv down "$OTHER" 2>/dev/null || true
++            info "runit service '$OTHER' disabled"
++        fi
++        for svc in "$NET_SERVICE" bluetoothd; do
++            if [ -d "/etc/runit/sv/$svc" ]; then
++                sudo ln -sf "/etc/runit/sv/$svc" "/etc/runit/runsvdir/current/"
++                sudo sv up "$svc" 2>/dev/null || true
++                info "runit service '$svc' enabled"
++            else
++                warn "runit service dir /etc/runit/sv/$svc not found (is the -runit package installed?)"
++            fi
++        done
++    elif command -v rc-update >/dev/null 2>&1; then
++        # openrc (Gentoo, Artix-openrc)
++        OTHER="connmand"
++        [ "$NET_SERVICE" = "connmand" ] && OTHER="NetworkManager"
++        sudo rc-update del "$OTHER" default 2>/dev/null || true
++        sudo rc-service "$OTHER" stop 2>/dev/null || true
++        sudo rc-update add "$NET_SERVICE" default 2>/dev/null || \
++            warn "could not add $NET_SERVICE to openrc default"
++        sudo rc-update add bluetoothd default 2>/dev/null || \
++            warn "could not add bluetoothd to openrc default"
++        sudo rc-service "$NET_SERVICE" start 2>/dev/null || true
++        sudo rc-service bluetoothd start 2>/dev/null || true
++    else
++        warn "Unknown init system: enable $NET_SERVICE and Bluetooth manually"
++    fi
+ }
+ 
+ # Main
+@@ -319,6 +537,8 @@ main() {
+     
+     check_not_root
+     detect_distro
++    detect_net_backend
++    setup_keyboard_layout
+     
+     # Ask what to do
+     echo ""
+@@ -356,7 +576,8 @@ main() {
+     echo ""
+     echo "To use TurboWM:"
+     echo "  • Log out and select 'TurboWM' from your display manager"
+-    echo "  • Or run: tbwm (from a TTY)"
++    echo "  • Or run: tbwm-session (from a TTY) - starts a session D-Bus bus"
++    echo "    (use 'tbwm' directly only if you know you don't need one)"
+     echo ""
+     echo "Config file: ~/.config/tbwm/config.scm"
+     echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
 index 0000000..c9252f6
@@ -251,18 +1287,21 @@ index 0000000..c9252f6
 +fi
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..d9a106a 100644
+index a1e049d..265654b 100644
 --- a/tbwm.c
 +++ b/tbwm.c
-@@ -17,6 +17,7 @@
+@@ -17,8 +17,10 @@
  #include <time.h>
  #include <unistd.h>
  #include <sys/eventfd.h>
 +#include <poll.h>
  #include <errno.h>
  #include <stdarg.h>
++#include "bluetooth.h"
  #include <wayland-server-core.h>
-@@ -440,6 +441,18 @@ static void updatebar(Monitor *m);
+ #include <wlr/backend.h>
+ #include <wlr/backend/libinput.h>
+@@ -440,6 +442,18 @@ static void updatebar(Monitor *m);
  static void updatebars(void);
  static void updateappmenu(void);
  static int appmenu_item_count(void);
@@ -281,7 +1320,7 @@ index a1e049d..d9a106a 100644
  static int timingtimer(void *data);
  static int bartimer(void *data);
  static int scrolltimer(void *data);
-@@ -505,7 +518,11 @@ static int launcher_active = 0;
+@@ -505,7 +519,11 @@ static int launcher_active = 0;
  static char launcher_input[256] = {0};
  static int launcher_input_len = 0;
  static int launcher_selection = 0;
@@ -294,7 +1333,7 @@ index a1e049d..d9a106a 100644
  static int app_cache_count = 0;
  
  /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
-@@ -640,6 +657,7 @@ static int signal_fd = -1;
+@@ -640,6 +658,7 @@ static int signal_fd = -1;
  static struct wl_event_source *signal_fd_source = NULL;
  
  static struct wl_event_source *bar_timer = NULL;
@@ -302,7 +1341,7 @@ index a1e049d..d9a106a 100644
  static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
  static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
  static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
-@@ -649,7 +667,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
+@@ -649,7 +668,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
  static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
  
  /* REPL state */
@@ -311,7 +1350,7 @@ index a1e049d..d9a106a 100644
  static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
  static char repl_input[1024] = {0};      /* current input line */
  static int repl_input_len = 0;
-@@ -706,12 +724,94 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
+@@ -706,12 +725,71 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
  static uint32_t cfg_menu_color = 0xaaaaaa;         /* grey menu background */
  static uint32_t cfg_menu_text_color = 0x000000;    /* black menu text */
  static char cfg_menu_button[16] = "X";             /* app menu button label */
@@ -366,33 +1405,10 @@ index a1e049d..d9a106a 100644
 +static void netmenu_run(NetEntry *e);
 +static void netmenu_connect_with_password(void);
 +
-+/* Bluetooth pairing in-menu: tbwm drives `bluetoothctl --agent KeyboardDisplay`
-+ * (stdin/stdout through pipes) so it can show the passkey and let the user
-+ * confirm or reject it before trusting/connecting the device. */
-+static int bt_pair_active = 0;              /* 1 while a pairing dialog is open */
-+static int bt_pair_dialog = 0;              /* 1 = draw/key the pairing dialog (session alive) */
-+static pid_t bt_pair_pid = -1;
-+static int bt_pair_in_fd = -1;              /* write side: to bluetoothctl's stdin */
-+static int bt_pair_out_fd = -1;             /* read side: bluetoothctl's stdout */
-+static struct wl_event_source *bt_pair_source = NULL;
-+static struct wl_event_source *bt_pair_watch_timer = NULL; /* passive listener keepalive */
-+static char bt_pair_mac[NET_CAT_LEN] = "";  /* device MAC being paired */
-+static char bt_pair_name[NET_NAME_LEN] = ""; /* device name shown in the dialog */
-+static char bt_pair_log[2048];              /* recent bluetoothctl output */
-+static int bt_pair_log_len = 0;
-+static char bt_pair_pin[64] = "";           /* passkey captured from bluetoothctl */
-+static int bt_pair_prompt = 0;              /* 1 = waiting for yes/no (passkey shown) */
-+static int bt_pair_done = 0;                /* 1 = pairing finished (ok or fail) */
-+static int bt_pair_ok = 0;                  /* 1 = pairing succeeded */
-+static int bt_pair_connected = 0;           /* 1 = "connect" sent after pairing */
-+static int bt_pair_saw_pair = 0;            /* 1 = "Pairing successful" seen (real pairing done) */
-+static int bt_pair_incoming = 0;            /* 1 = pairing request came from the phone (watch) */
-+static void bt_pair_start(const char *mac, const char *name);
-+static void bt_pair_stop(void);
-+static void bt_pair_send(const char *line);
-+static void bt_pair_finish(int ok);
-+static void bt_pair_watch(void);
-+static int bt_pair_watchdog(void *data);
++/* Bluetooth pairing lives in bluetooth.c (blt_* API in bluetooth.h): the
++ * pairing dialog, the bluetoothcd session (pipes + fd watcher) and the
++ * passkey watchdog are owned by that module. tbwm.c only draws the dialog
++ * and routes net menu keys through blt_key(); it never touches module state. */
 +
 +/* Asynchronous netmenu data loader: the command runs in a forked child and
 + * its stdout is read through a non-blocking pipe in the Wayland event loop,
@@ -406,7 +1422,7 @@ index a1e049d..d9a106a 100644
  /* App launcher data structures */
  #define MAX_APPS 512
  #define MAX_CATEGORIES 32
-@@ -857,6 +957,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
+@@ -857,6 +935,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
  };
  
  static pid_t child_pid = -1;
@@ -414,7 +1430,7 @@ index a1e049d..d9a106a 100644
  static int locked;
  static void *exclusive_focus;
  static struct wl_display *dpy;
-@@ -1304,6 +1405,51 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1304,6 +1383,51 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -466,7 +1482,7 @@ index a1e049d..d9a106a 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1521,141 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1499,141 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -608,7 +1624,7 @@ index a1e049d..d9a106a 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1591,6 +1872,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+@@ -1591,6 +1850,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
  	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
  }
  
@@ -677,7 +1693,7 @@ index a1e049d..d9a106a 100644
  void
  cleanup(void)
  {
-@@ -1606,6 +1949,10 @@ cleanup(void)
+@@ -1606,6 +1927,13 @@ cleanup(void)
  		kill(-child_pid, SIGTERM);
  		waitpid(child_pid, NULL, 0);
  	}
@@ -685,10 +1701,13 @@ index a1e049d..d9a106a 100644
 +		kill(session_dbus_pid, SIGTERM);
 +		session_dbus_pid = -1;
 +	}
++	/* Kill any leftover bluetoothctl pairing session (e.g. the menu was
++	 * closed/exited while the pairing dialog was still open). */
++	blt_stop();
  	wlr_xcursor_manager_destroy(cursor_mgr);
  
  	/* Clean up glyph cache bitmaps */
-@@ -1633,6 +1980,18 @@ cleanup(void)
+@@ -1633,6 +1961,18 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -707,7 +1726,7 @@ index a1e049d..d9a106a 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +2041,6 @@ cleanup(void)
+@@ -1682,9 +2022,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -717,7 +1736,7 @@ index a1e049d..d9a106a 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -3191,9 +3547,10 @@ void
+@@ -3191,9 +3528,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -731,7 +1750,7 @@ index a1e049d..d9a106a 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +3723,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +3704,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -757,7 +1776,7 @@ index a1e049d..d9a106a 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +3751,9 @@ launcher_get_match(int index)
+@@ -3382,9 +3732,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -769,7 +1788,7 @@ index a1e049d..d9a106a 100644
  			count++;
  		}
  	}
-@@ -3586,124 +3955,1301 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,124 +3936,882 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -1275,7 +2294,7 @@ index a1e049d..d9a106a 100644
 +	} else {
 +		netmenu_cancel_load();
 +		net_password_reset();
-+		bt_pair_stop();
++		blt_stop();
 +	}
 +	updatenetmenu();
 +	updatebars();
@@ -1289,410 +2308,6 @@ index a1e049d..d9a106a 100644
 +	net_password[0] = '\0';
 +}
 +
-+/* Send a line to bluetoothctl's stdin (the pairing session). */
-+static void
-+bt_pair_send(const char *line)
-+{
-+	if (bt_pair_in_fd >= 0) {
-+		if (write(bt_pair_in_fd, line, strlen(line)) < 0) {
-+			/* ignore EPIPE (child already gone) */
-+		}
-+	}
-+}
-+
-+/* Debug helper: append a line to /tmp/tbwm-bt.log for post-mortem of the
-+ * pairing session (bluetoothctl is stateful, so we log what it prints and
-+ * what we decide). */
-+static void
-+bt_dbg(const char *fmt, ...)
-+{
-+	FILE *f = fopen("/tmp/tbwm-bt.log", "a");
-+	va_list ap;
-+	if (!f)
-+		return;
-+	va_start(ap, fmt);
-+	vfprintf(f, fmt, ap);
-+	va_end(ap);
-+	fputc('\n', f);
-+	fclose(f);
-+}
-+
-+/* Mark the pairing as finished, clean up the session, and keep the dialog
-+ * open showing the result until the user presses a key. */
-+static void
-+bt_pair_finish(int ok)
-+{
-+	if (bt_pair_done)
-+		return;
-+	bt_pair_done = 1;
-+	bt_pair_ok = ok;
-+	bt_dbg("bt_pair_finish: %s", ok ? "ok" : "fail");
-+	if (bt_pair_source) {
-+		wl_event_source_remove(bt_pair_source);
-+		bt_pair_source = NULL;
-+	}
-+	if (bt_pair_out_fd >= 0) {
-+		close(bt_pair_out_fd);
-+		bt_pair_out_fd = -1;
-+	}
-+	if (bt_pair_pid > 0) {
-+		waitpid(bt_pair_pid, NULL, WNOHANG);
-+		bt_pair_pid = -1;
-+	}
-+	updatenetmenu();
-+}
-+
-+/* Parse bluetoothctl output for a passkey and a yes/no prompt. The child
-+ * runs `bluetoothctl` interactively: we must only read its stdout here and,
-+ * when we need to answer a passkey prompt, write "yes\n"/"no\n" to the pipe
-+ * from the key handler. We never pre-enqueue a command that would be eaten
-+ * as an answer by a prompt still pending. */
-+static void
-+bt_pair_parse_output(const char *buf, int len)
-+{
-+	int i;
-+
-+	for (i = 0; i < len; i++) {
-+		bt_dbg("%02x%c", (unsigned char)buf[i] >= 0x20 ? '.' : '+', buf[i]);
-+	}
-+	/* Append to the rolling log */
-+	for (i = 0; i < len && bt_pair_log_len < (int)sizeof(bt_pair_log) - 1; i++) {
-+		bt_pair_log[bt_pair_log_len++] = buf[i];
-+	}
-+	bt_pair_log[bt_pair_log_len] = '\0';
-+
-+	/* Keep only the tail (last ~1KB) so memory stays bounded */
-+	if (bt_pair_log_len > 1024) {
-+		memmove(bt_pair_log, bt_pair_log + bt_pair_log_len - 1024, 1024);
-+		bt_pair_log_len = 1024;
-+		bt_pair_log[1024] = '\0';
-+	}
-+
-+	/* Show the passkey when bluetoothctl asks for confirmation.
-+	 * bluetoothctl 5.?? prints, e.g.:
-+	 *   [agent] Confirm passkey 123456 (yes/no)
-+	 *   Requesting confirmation
-+	 *   [agtiem] No input no output (auto accept) ...
-+	 * In interactive pairing of a phone the agent prompts with
-+	 * "(yes/no)" . We also match the older "Confirm passkey" text. */
-+	if (!bt_pair_prompt && !bt_pair_done &&
-+	    (strstr(bt_pair_log, "(yes/no") != NULL ||
-+	     strstr(bt_pair_log, "(yes,no") != NULL ||
-+	     strstr(bt_pair_log, "Confirm passkey") != NULL)) {
-+		bt_pair_prompt = 1;
-+		bt_dbg("promptbs: confirmed");
-+		/* If this is an incoming pairing (no target set), try to name the
-+		 * device from the associated "[NEW] Device <MAC> <name>" line that
-+		 * bluetoothctl emits when the request arrives, then show the TODO. */
-+		if (bt_pair_mac[0] == '\0' && !bt_pair_dialog) {
-+			const char *nd = strstr(bt_pair_log, "[NEW] Device ");
-+			if (nd) {
-+				const char *sp = strchr(nd + 13, ' ');
-+				if (sp) {
-+					char mac[NET_CAT_LEN];
-+					int j;
-+					for (j = 0; j < NET_CAT_LEN - 1 && (nd[13 + j] != ' ') && nd[13 + j]; j++)
-+						mac[j] = nd[13 + j];
-+					mac[j] = '\0';
-+					strncpy(bt_pair_mac, mac, NET_CAT_LEN - 1);
-+					bt_pair_mac[NET_CAT_LEN - 1] = '\0';
-+					j = 0;
-+					while (sp[j + 1] && j < NET_NAME_LEN - 1 &&
-+					       sp[j + 1] != ' ' && sp[j + 1] != '\n') {
-+						bt_pair_name[j] = sp[j + 1];
-+						j++;
-+					}
-+					bt_pair_name[j] = '\0';
-+					bt_dbg("incoming from %s (%s)", bt_pair_mac, bt_pair_name);
-+				}
-+			}
-+			if (bt_pair_name[0] == '\0')
-+				strncpy(bt_pair_name, "Dispositivo nuevo", NET_NAME_LEN - 1);
-+			bt_pair_incoming = 1;
-+			bt_pair_dialog = 1;
-+		}
-+		updatenetmenu();
-+	}
-+
-+	/* Extract the passkey itself: "passkey <digits>", "PIN code:" or digits on a line */
-+	{
-+		const char *pk = strstr(bt_pair_log, "passkey ");
-+		if (pk) {
-+			pk += 8;
-+			if (pk[0] >= '0' && pk[0] <= '9') {
-+				int j = 0;
-+				while (pk[j] >= '0' && pk[j] <= '9' && j < (int)sizeof(bt_pair_pin) - 1)
-+					j++;
-+				memcpy(bt_pair_pin, pk, j);
-+				bt_pair_pin[j] = '\0';
-+				bt_dbg("passkey captured: %s", bt_pair_pin);
-+			}
-+		}
-+		if (!bt_pair_pin[0]) {
-+			const char *pin = strstr(bt_pair_log, "PIN ");
-+			if (pin) {
-+				pin += 4;
-+				if (pin[0] >= '0' && pin[0] <= '9') {
-+					int j = 0;
-+					while (pin[j] >= '0' && pin[j] <= '9' && j < (int)sizeof(bt_pair_pin) - 1)
-+						bt_pair_pin[j] = pin[j], j++;
-+					bt_pair_pin[j] = '\0';
-+					bt_dbg("passkey (PIN) captured: %s", bt_pair_pin);
-+				}
-+			}
-+		}
-+	}
-+
-+	/* Detect completion. "Connected: yes" alone is NOT proof of pairing:
-+	 * bluetoothctl prints it as soon as the ACL link comes up, which can
-+	 * happen while pairing is still in progress (and the phone shows the
-+	 * passkey). We only trust "Pairing successful"/"Pairing complete" as
-+	 * the real finish marker, then send "connect" and finally accept
-+	 * "Connected: yes" once pairing has truly finished. */
-+	if (!bt_pair_done) {
-+		if (!bt_pair_saw_pair &&
-+		    (strstr(bt_pair_log, "Pairing successful") != NULL ||
-+		     strstr(bt_pair_log, "Pairing complete") != NULL)) {
-+			bt_pair_saw_pair = 1;
-+			bt_dbg("pairing confirmed");
-+		}
-+		if (bt_pair_saw_pair && !bt_pair_connected) {
-+			char con[NET_EXEC_LEN + 32];
-+			bt_pair_connected = 1;
-+			snprintf(con, sizeof(con), "connect %s\n", bt_pair_mac);
-+			bt_pair_send(con);
-+			bt_dbg("sent connect after pairing");
-+		}
-+		if (strstr(bt_pair_log, "Pairing successful") != NULL ||
-+		    strstr(bt_pair_log, "Pairing complete") != NULL) {
-+			bt_pair_finish(1);
-+		} else if (bt_pair_saw_pair &&
-+		           (strstr(bt_pair_log, "Connected: yes") != NULL ||
-+		            strstr(bt_pair_log, "[Connected") != NULL ||
-+		            strstr(bt_pair_log, "Connection successful") != NULL)) {
-+			bt_pair_finish(1);
-+		} else if (strstr(bt_pair_log, "Failed to pair") != NULL ||
-+		           strstr(bt_pair_log, "Failed to connect") != NULL ||
-+		           strstr(bt_pair_log, "org.bluez.Error.AuthenticationFailed") != NULL ||
-+		           strstr(bt_pair_log, "org.bluez.Error.Rejected") != NULL ||
-+		           strstr(bt_pair_log, "org.bluez.Error.RemoveFailed") != NULL) {
-+			bt_pair_finish(0);
-+		}
-+	}
-+}
-+
-+/* Read bluetoothctl's output as it arrives (pairing session). */
-+static int
-+bt_pair_read_cb(int fd, uint32_t mask, void *data)
-+{
-+	char buf[4096];
-+	ssize_t r;
-+	int done = 0;
-+	(void)data;
-+
-+	if (mask & (WL_EVENT_HANGUP | WL_EVENT_ERROR))
-+		done = 1;
-+
-+	while ((r = read(fd, buf, sizeof(buf))) > 0)
-+		bt_pair_parse_output(buf, (int)r);
-+	if (r == 0)
-+		done = 1;
-+
-+	if (done && !bt_pair_done) {
-+		/* bluetoothctl exited (or quit command processed). Determine success
-+		 * from what it printed. */
-+		bt_pair_finish(strstr(bt_pair_log, "successful") != NULL ||
-+		               strstr(bt_pair_log, "Connected") != NULL);
-+	} else if (bt_pair_done) {
-+		/* Already finalized by content detection; nothing more to do. */
-+	}
-+	return 1;
-+}
-+
-+/* Spawn a fresh bluetoothctl session with an agent and wire up the pipes.
-+ * Returns 1 on success; on return the new session is in bt_pair_in_fd /
-+ * bt_pair_out_fd / bt_pair_pid and bt_pair_active is 1. */
-+static int
-+bt_pair_spawn(void)
-+{
-+	int in_pipe[2], out_pipe[2];
-+	pid_t pid;
-+
-+	if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0) {
-+		if (in_pipe[0] >= 0) { close(in_pipe[0]); close(in_pipe[1]); }
-+		if (out_pipe[0] >= 0) { close(out_pipe[0]); close(out_pipe[1]); }
-+		return 0;
-+	}
-+
-+	pid = fork();
-+	if (pid == 0) {
-+		setsid();
-+		close(in_pipe[1]);   /* parent writes into child's stdin */
-+		close(out_pipe[0]);
-+		dup2(in_pipe[0], STDIN_FILENO);
-+		close(in_pipe[0]);
-+		dup2(out_pipe[1], STDOUT_FILENO);
-+		dup2(out_pipe[1], STDERR_FILENO);
-+		close(out_pipe[1]);
-+		execl("/usr/bin/bluetoothctl", "bluetoothctl", (char *)NULL);
-+		_exit(127);
-+	}
-+
-+	/* Parent */
-+	close(in_pipe[0]);   /* reading from child's stdin side is closed */
-+	close(out_pipe[1]);
-+	bt_pair_in_fd = in_pipe[1];    /* write here to send commands/answers */
-+	bt_pair_out_fd = out_pipe[0];  /* read here to see prompts */
-+	bt_pair_pid = pid;
-+	bt_pair_active = 1;
-+
-+	{
-+		int flags = fcntl(bt_pair_out_fd, F_GETFL, 0);
-+		if (flags >= 0)
-+			fcntl(bt_pair_out_fd, F_SETFL, flags | O_NONBLOCK);
-+		flags = fcntl(bt_pair_in_fd, F_GETFL, 0);
-+		if (flags >= 0)
-+			fcntl(bt_pair_in_fd, F_SETFL, flags | O_NONBLOCK);
-+	}
-+
-+	bt_pair_source = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
-+		bt_pair_out_fd, WL_EVENT_READABLE, bt_pair_read_cb, NULL);
-+	return 1;
-+}
-+
-+/* Ensure a bluetoothctl session exists; spawn it if needed and register the
-+ * KeyboardDisplay agent. Shared by the menu-initiated pairing (bt_pair_start)
-+ * and the passive listener (bt_pair_watch). Resets the rolling state. */
-+static void
-+bt_pair_ensure_session(void)
-+{
-+	if (bt_pair_pid <= 0)
-+		bt_pair_spawn();
-+	bt_pair_log_len = 0;
-+	bt_pair_log[0] = '\0';
-+	bt_pair_pin[0] = '\0';
-+	bt_pair_prompt = 0;
-+	bt_pair_done = 0;
-+	bt_pair_ok = 0;
-+	bt_pair_connected = 0;
-+	bt_pair_saw_pair = 0;
-+}
-+
-+/* Start an interactive bluetoothctl pairing session for a discovered device.
-+ * bluetoothctl runs with our pipes as its stdin/stdout; we register an agent
-+ * and pair; the passkey prompt is answered with yes/no from the keyboard. */
-+static void
-+bt_pair_start(const char *mac, const char *name)
-+{
-+	char seq[NET_EXEC_LEN + 128];
-+
-+	if (bt_pair_pid > 0)
-+		bt_pair_stop();
-+	bt_pair_ensure_session();
-+
-+	strncpy(bt_pair_mac, mac, NET_CAT_LEN - 1);
-+	bt_pair_mac[NET_CAT_LEN - 1] = '\0';
-+	strncpy(bt_pair_name, name, NET_NAME_LEN - 1);
-+	bt_pair_name[NET_NAME_LEN - 1] = '\0';
-+
-+	/* Register a KeyboardDisplay agent and request the pairing. We do NOT
-+	 * enqueue "connect" here: bluetoothctl reads stdin line by line, so a
-+	 * pre-queued "connect AA:BB" would be consumed as the answer to the
-+	 * passkey prompt. The "connect" is sent only once "Pairing successful"
-+	 * shows up (see bt_pair_parse_output). */
-+	snprintf(seq, sizeof(seq),
-+		"agent KeyboardDisplay\ndefault-agent\ntrust %s\npair %s\n",
-+		mac, mac);
-+	bt_pair_send(seq);
-+
-+	bt_pair_incoming = 0;
-+	bt_pair_dialog = 1;
-+	updatenetmenu();
-+}
-+
-+/* Passive listener: keep a bluetoothctl agent registered so an incoming
-+ * pairing request started from the phone reaches us and shows the passkey
-+ * dialog inside "Buscar dispositivos". No device is targeted here. */
-+static void
-+bt_pair_watch(void)
-+{
-+	if (bt_pair_pid <= 0)
-+		bt_pair_spawn();
-+
-+	bt_pair_mac[0] = '\0';
-+	bt_pair_name[0] = '\0';
-+	bt_pair_log_len = 0;
-+	bt_pair_log[0] = '\0';
-+	bt_pair_pin[0] = '\0';
-+	bt_pair_prompt = 0;
-+	bt_pair_done = 0;
-+	bt_pair_ok = 0;
-+	bt_pair_connected = 0;
-+	bt_pair_saw_pair = 0;
-+	bt_pair_incoming = 0;
-+	bt_pair_dialog = 0;
-+
-+	/* Only register the agent once: after the session bootstraps, further
-+	 * "agent" lines would just print "Agent is already registered". We
-+	 * always re-send so a just-spawned session gets its agent. */
-+	bt_pair_send("agent KeyboardDisplay\ndefault-agent\n");
-+}
-+
-+/* Stop and clean up an active pairing session. */
-+static void
-+bt_pair_stop(void)
-+{
-+	if (bt_pair_source) {
-+		wl_event_source_remove(bt_pair_source);
-+		bt_pair_source = NULL;
-+	}
-+	if (bt_pair_out_fd >= 0) {
-+		close(bt_pair_out_fd);
-+		bt_pair_out_fd = -1;
-+	}
-+	if (bt_pair_in_fd >= 0) {
-+		close(bt_pair_in_fd);
-+		bt_pair_in_fd = -1;
-+	}
-+	if (bt_pair_pid > 0) {
-+		kill(bt_pair_pid, SIGTERM);
-+		waitpid(bt_pair_pid, NULL, WNOHANG);
-+		bt_pair_pid = -1;
-+	}
-+	bt_pair_active = 0;
-+	bt_pair_dialog = 0;
-+	bt_pair_incoming = 0;
-+}
-+
-+/* Confirm (yes) or reject (no) the pairing passkey. */
-+static void
-+bt_pair_answer(int accept)
-+{
-+	if (accept)
-+		bt_pair_send("yes\n");
-+	else
-+		bt_pair_send("no\n");
-+}
-+
-+/* Passive listener watchdog: while the menu is open on the "Buscar
-+ * dispositivos" sub-topic, keep a bluetoothctl agent alive so pairing
-+ * requests initiated from the phone are caught and shown in the dialog.
-+ * When the user leaves that view or closes the menu, stop the session. */
-+static int
-+bt_pair_watchdog(void *data)
-+{
-+	(void)data;
-+	if (netmenu_active && netmenu_scan_is_active()) {
-+		/* On "Buscar dispositivos": keep a passive agent (unless a pairing
-+		 * dialog from the user already owns the session). */
-+		if (bt_pair_pid <= 0 && !bt_pair_dialog)
-+			bt_pair_watch();
-+	} else if (bt_pair_pid > 0 && !bt_pair_dialog) {
-+		bt_pair_stop();
-+	}
-+	wl_event_source_timer_update(bt_pair_watch_timer, 3000);
-+	return 1;
-+}
 +
 +/* Run an entry's command, or switch to password entry if it needs one. */
 +static void
@@ -1710,7 +2325,7 @@ index a1e049d..d9a106a 100644
 +		return;
 +	}
 +	if (e->btpair) {
-+		bt_pair_start(e->exec, e->name);
++		blt_start(e->exec, e->name);
 +		return; /* menu stays open showing the pairing dialog */
 +	}
 +	{
@@ -1758,34 +2373,19 @@ index a1e049d..d9a106a 100644
 +	int item_count;
 +	int content_rows = 23; /* menu_cells_h - 2 */
 +
-+	/* Bluetooth pairing dialog: consume everything, only a few keys act */
-+	if (bt_pair_dialog) {
-+		if (sym == XKB_KEY_Escape || sym == XKB_KEY_N || sym == XKB_KEY_n) {
-+			if (bt_pair_prompt) {
-+				bt_pair_answer(0);
-+				bt_pair_prompt = 0;
-+			} else {
-+				bt_pair_stop();
++	/* Bluetooth pairing dialog: the session lives in bluetooth.c; it tells us
++	 * whether the key was consumed and whether a finished menu-initiated
++	 * pairing should close the menu. */
++	{
++		int btk = blt_key((unsigned int)sym);
++		if (btk != BLKEY_IGNORED) {
++			if (btk == BLKEY_CLOSE_MENU) {
++				netmenu_active = 0;
++				updatebars();
 +			}
 +			updatenetmenu();
 +			return 1;
 +		}
-+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_S || sym == XKB_KEY_s) {
-+			if (bt_pair_prompt) {
-+				bt_pair_answer(1);
-+				bt_pair_prompt = 0;
-+			} else if (bt_pair_done) {
-+				bt_pair_stop();
-+				if (!bt_pair_incoming) {
-+					netmenu_active = 0;
-+					updatebars();
-+				}
-+				updatenetmenu();
-+			}
-+			updatenetmenu();
-+			return 1;
-+		}
-+		return 1; /* swallow everything else while pairing */
 +	}
 +
 +	/* Password entry mode: consume everything, only a few keys act */
@@ -2165,7 +2765,7 @@ index a1e049d..d9a106a 100644
  		if (sym == XKB_KEY_Left) {
  			file_debug_log("tbwm: fallback: M-S-Left -> swapdir\n");
  			Arg a = { .i = DirLeft };
-@@ -4043,6 +5589,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+@@ -4043,6 +5151,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  		/* If compositor entered screenshot-grab mode, forward motion only to the
  		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
  		if (screenshot_mode) {
@@ -2178,7 +2778,7 @@ index a1e049d..d9a106a 100644
  			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
  			if (cursor && cursor_mgr)
  				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
-@@ -4075,6 +5627,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+@@ -4075,6 +5189,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  				}
  			}
  		}
@@ -2208,7 +2808,7 @@ index a1e049d..d9a106a 100644
  	}
  
  	/* Update drag icon's position */
-@@ -4609,6 +6184,14 @@ run(char *startup_cmd)
+@@ -4609,6 +5746,17 @@ run(char *startup_cmd)
  	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
  	wl_event_source_timer_update(timing_timer, 500);
  
@@ -2216,14 +2816,17 @@ index a1e049d..d9a106a 100644
 +	net_scan_timer = wl_event_loop_add_timer(event_loop, netmenu_scan_keepalive, NULL);
 +	wl_event_source_timer_update(net_scan_timer, 0);
 +
-+	/* Passive Bluetooth agent watchdog (pairing requests coming FROM a phone) */
-+	bt_pair_watch_timer = wl_event_loop_add_timer(event_loop, bt_pair_watchdog, NULL);
-+	wl_event_source_timer_update(bt_pair_watch_timer, 3000);
++	/* Bluetooth pairing module: the bluetoothctl session, its pipes, the
++	 * stdout fd watcher and the passive-listener watchdog all live inside
++	 * bluetooth.c. It needs to know when the net menu is focused on a search
++	 * sub-topic (passive pairing keepalive) and to repaint that menu whenever
++	 * pairing state changes. */
++	bluetooth_init(dpy, netmenu_scan_is_active, updatenetmenu);
 +
  	/* Run on-startup commands from config */
  	run_startup_commands();
  
-@@ -5530,6 +7113,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
+@@ -5530,6 +6678,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
  	repl_add_line("(tag-window N)     - move window to tag N");
  	repl_add_line("(reload-config)    - reload config.scm");
  	repl_add_line("(bind-key K F)     - bind key to function");
@@ -2231,7 +2834,7 @@ index a1e049d..d9a106a 100644
  	repl_add_line("=== Appearance ===");
  	repl_add_line("(set-background-color C) - highlight/bg color");
  	repl_add_line("(set-border-line-color C)- box-drawing color");
-@@ -5846,6 +7430,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
+@@ -5846,6 +6995,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -2252,7 +2855,7 @@ index a1e049d..d9a106a 100644
  /* Scheme: (set-menu-button "text") - set the app menu button label */
  static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-@@ -5855,6 +7453,15 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
+@@ -5855,6 +7018,15 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -2268,7 +2871,7 @@ index a1e049d..d9a106a 100644
  /* ========== END COLOR CONFIG API ========== */
  
  /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
-@@ -6209,7 +7816,10 @@ setup_scheme(void)
+@@ -6209,7 +7381,10 @@ setup_scheme(void)
  	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB\") set app menu background color");
  	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB\") set app menu text color");
  	s7_define_function(sc, "set-menu-button", scm_set_menu_button, 1, 0, false, "(set-menu-button \"text\") set app menu button label in bar");
@@ -2279,7 +2882,7 @@ index a1e049d..d9a106a 100644
  	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
  	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
  	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
-@@ -6392,6 +8002,11 @@ static const char *default_config_parts[] = {
+@@ -6392,6 +7567,11 @@ static const char *default_config_parts[] = {
  "(bind-key \"Print\" (lambda () (spawn-grab \"sh -c 'grim - | wl-copy'\")))\n"
  "(bind-key \"S-Print\" (lambda () (spawn-grab \"sh -c 'grim -g \\\"$(slurp)\\\" - | wl-copy'\")))\n"
  "\n"
@@ -2291,7 +2894,7 @@ index a1e049d..d9a106a 100644
  ";; Volume control (requires wpctl/wireplumber)\n"
  "(bind-key \"XF86AudioRaiseVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\")))\n"
  "(bind-key \"XF86AudioLowerVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\")))\n"
-@@ -6416,62 +8031,7 @@ static const char *default_config_parts[] = {
+@@ -6416,62 +7596,7 @@ static const char *default_config_parts[] = {
  "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
  "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
  "\n"
@@ -2355,7 +2958,7 @@ index a1e049d..d9a106a 100644
  "\n"
  ";; Advanced setters (examples - not necessarily key bound):\n"
  ";; (set-border-width 2)\n"
-@@ -6650,83 +8210,165 @@ setup_foot_config(void)
+@@ -6650,83 +7775,165 @@ setup_foot_config(void)
  		rename(path, backup);
  	}
  
@@ -2581,7 +3184,7 @@ index a1e049d..d9a106a 100644
  	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
  }
  
-@@ -6891,6 +8533,7 @@ void
+@@ -6891,6 +8098,7 @@ void
  togglerepl(const Arg *arg)
  {
  	repl_input_active = !repl_input_active;
@@ -2589,7 +3192,7 @@ index a1e049d..d9a106a 100644
  	repl_input[0] = '\0';
  	repl_input_len = 0;
  	updatebars();
-@@ -7068,12 +8711,20 @@ load_applications(void)
+@@ -7068,12 +8276,20 @@ load_applications(void)
  	/* Scan system applications */
  	scan_desktop_dir("/usr/share/applications");
  	scan_desktop_dir("/usr/local/share/applications");
@@ -2610,7 +3213,7 @@ index a1e049d..d9a106a 100644
  	}
  	
  	/* Sort apps and categories */
-@@ -7098,8 +8749,226 @@ toggleappmenu(const Arg *arg)
+@@ -7098,8 +8314,226 @@ toggleappmenu(const Arg *arg)
  	updatebars();
  }
  
@@ -2839,7 +3442,7 @@ index a1e049d..d9a106a 100644
  {
  	struct TitleBuffer *tb;
  	uint32_t *pixels;
-@@ -7112,72 +8981,72 @@ updateappmenu(void)
+@@ -7112,72 +8546,72 @@ updateappmenu(void)
  	uint32_t line_color = RGB_TO_ARGB(cfg_border_line_color);
  	uint32_t content_bg = RGB_TO_ARGB(cfg_menu_color);
  	uint32_t text_color = RGB_TO_ARGB(cfg_menu_text_color);
@@ -2941,7 +3544,7 @@ index a1e049d..d9a106a 100644
  		for (col = 1; col < menu_cells_w - 1; col++) {
  			if (col >= title_start && col < title_start + title_len) {
  				render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, 0, title[col - title_start], line_color);
-@@ -7186,38 +9055,156 @@ updateappmenu(void)
+@@ -7186,38 +8620,156 @@ updateappmenu(void)
  			}
  		}
  	}
@@ -2963,11 +3566,11 @@ index a1e049d..d9a106a 100644
 -	
 -	/* Draw content: categories or apps */
 +
-+	/* Bluetooth pairing dialog view */
-+	if (bt_pair_dialog) {
++	/* Bluetooth pairing dialog view (state lives in bluetooth.c) */
++	if (blt_dialog()) {
 +		int mtext = menu_cells_w - 2;
 +		int row_y;
-+		const char *pin_label = bt_pair_pin[0] ? bt_pair_pin : "---";
++		const char *pin_label = blt_pin()[0] ? blt_pin() : "---";
 +		const char *status;
 +		const char *keys;
 +		int pi;
@@ -2975,7 +3578,7 @@ index a1e049d..d9a106a 100644
 +
 +		/* Row 1: device name */
 +		row_y = cell_height;
-+		snprintf(dlg, sizeof(dlg), "Conectar a %s", bt_pair_name);
++		snprintf(dlg, sizeof(dlg), "Conectar a %s", blt_name());
 +		for (pi = 0; dlg[pi] && pi < mtext; pi++)
 +			render_char_to_buffer(pixels, menu_width, menu_height,
 +				cell_width + pi * cell_width, row_y, dlg[pi], text_color);
@@ -2997,9 +3600,9 @@ index a1e049d..d9a106a 100644
 +
 +		/* Row 3: status + keys */
 +		row_y = 3 * cell_height;
-+		if (bt_pair_done)
-+			status = bt_pair_ok ? "Emparejado correctamente" : "Emparejamiento fallido";
-+		else if (bt_pair_prompt)
++		if (blt_done())
++			status = blt_ok() ? "Emparejado correctamente" : "Emparejamiento fallido";
++		else if (blt_prompt())
 +			status = "Confirmar PIN en el dispositivo";
 +		else
 +			status = "Buscando dispositivo...";
@@ -3009,9 +3612,9 @@ index a1e049d..d9a106a 100644
 +
 +		/* Row 4: key hints */
 +		row_y = 4 * cell_height;
-+		if (bt_pair_prompt)
++		if (blt_prompt())
 +			keys = "S/Enter = aceptar PIN   N/Esc = rechazar";
-+		else if (bt_pair_done)
++		else if (blt_done())
 +			keys = "Enter = cerrar";
 +		else
 +			keys = "Esperando al dispositivo...";
@@ -3117,7 +3720,7 @@ index a1e049d..d9a106a 100644
  				if (is_selected) {
  					int px, py;
  					for (py = text_y; py < text_y + cell_height; py++) {
-@@ -7226,30 +9213,148 @@ updateappmenu(void)
+@@ -7226,30 +8778,148 @@ updateappmenu(void)
  						}
  					}
  				}
@@ -3276,7 +3879,7 @@ index a1e049d..d9a106a 100644
  				if (is_selected) {
  					int px, py;
  					for (py = text_y; py < text_y + cell_height; py++) {
-@@ -7258,26 +9363,27 @@ updateappmenu(void)
+@@ -7258,26 +8928,27 @@ updateappmenu(void)
  						}
  					}
  				}
@@ -3317,7 +3920,7 @@ index a1e049d..d9a106a 100644
  						if (is_selected) {
  							int px, py;
  							for (py = text_y; py < text_y + cell_height; py++) {
-@@ -7286,32 +9392,32 @@ updateappmenu(void)
+@@ -7286,32 +8957,32 @@ updateappmenu(void)
  								}
  							}
  						}
@@ -3365,7 +3968,7 @@ index a1e049d..d9a106a 100644
  	/* Don't drop - we're caching the buffer for reuse */
  }
  
-@@ -7412,9 +9518,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +9083,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -3377,7 +3980,7 @@ index a1e049d..d9a106a 100644
  		return 1;
  	}
  
-@@ -7643,37 +9751,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +9316,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -3440,7 +4043,7 @@ index a1e049d..d9a106a 100644
  			}
  		}
  	} else {
-@@ -7884,66 +9992,98 @@ render_tabs:
+@@ -7884,66 +9557,98 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -3584,7 +4187,7 @@ index a1e049d..d9a106a 100644
  				}
  			}
  		}
-@@ -9561,6 +11701,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +11266,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  
