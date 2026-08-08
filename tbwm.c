@@ -452,6 +452,10 @@ static void netmenu_cancel_load(void);
 static int netmenu_read_cb(int fd, uint32_t mask, void *data);
 static void togglenetmenu(const Arg *arg);
 static int netmenukey(xkb_keysym_t sym);
+static void togglethememenu(const Arg *arg);
+static int thememenu_key(xkb_keysym_t sym);
+static void updatethememenu(void);
+static s7_pointer scm_toggle_thememenu(s7_scheme *sc, s7_pointer args);
 static int netmenu_scan_keepalive(void *data);
 static int netmenu_scan_is_active(void);
 static int timingtimer(void *data);
@@ -775,6 +779,20 @@ static char net_password_exec[NET_EXEC_LEN];   /* nmcli command, password is app
 static void net_password_reset(void);
 static void netmenu_run(NetEntry *e);
 static void netmenu_connect_with_password(void);
+
+/* Theme menu: a native, centered color picker for the compositor colors.
+ * It lists the settable colors and lets the user pick a basic palette entry
+ * or type a custom #RRGGBB via the on-screen input buffer. */
+#define THEMEMENU_MAX_HEX 8 /* "RRGGBB" + NUL, "#" optional */
+static struct wlr_scene_buffer *thememenu_buffer = NULL;
+static struct TitleBuffer *thememenu_tb = NULL;  /* cached buffer for reuse */
+static int thememenu_active = 0;
+static int thememenu_scroll_offset = 0;
+static int thememenu_selected_row = 0;
+static int thememenu_target = 0;     /* which color is being edited (index into thememenu_targets) */
+static int thememenu_palette_mode = 0; /* 1 = showing palette for chosen target */
+static char thememenu_hex[THEMEMENU_MAX_HEX]; /* custom hex input buffer */
+static int thememenu_hex_len = 0;
 
 /* Bluetooth pairing lives in bluetooth.c (blt_* API in bluetooth.h): the
  * pairing dialog, the bluetoothcd session (pipes + fd watcher) and the
@@ -1972,6 +1990,15 @@ cleanup(void)
 	/* Clean up any in-flight network menu data load */
 	netmenu_cancel_load();
 	net_password_reset();
+
+	/* Clean up theme menu buffer */
+	if (thememenu_buffer) {
+		wlr_scene_buffer_set_buffer(thememenu_buffer, NULL);
+	}
+	if (thememenu_tb) {
+		wlr_buffer_drop(&thememenu_tb->base);
+		thememenu_tb = NULL;
+	}
 
 	/* Clean up REPL buffers on all monitors */
 	wl_list_for_each(m, &mons, link) {
@@ -4780,6 +4807,8 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 		return 1;
 	if (netmenu_active && netmenukey(sym))
 		return 1;
+	if (thememenu_active && thememenu_key(sym))
+		return 1;
 
 	/*
 	 * Fallback: some keyboards or keymaps produce plain F1..F12 for Ctrl+Alt+Fx
@@ -7385,6 +7414,7 @@ setup_scheme(void)
 	s7_define_function(sc, "toggle-appmenu", scm_toggle_appmenu, 0, 0, false, "(toggle-appmenu) toggle the app menu visibility");
 	s7_define_function(sc, "set-net-menu-cmd", scm_set_net_menu_cmd, 1, 0, false, "(set-net-menu-cmd \"cmd\") set command that lists network menu entries");
 	s7_define_function(sc, "toggle-net-menu", scm_toggle_net_menu, 0, 0, false, "(toggle-net-menu) toggle the network (WiFi/Bluetooth) menu");
+	s7_define_function(sc, "toggle-thememenu", scm_toggle_thememenu, 0, 0, false, "(toggle-thememenu) toggle the in-wm color theme menu");
 	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
 	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
 	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
@@ -8984,6 +9014,416 @@ updatenetmenu(void)
 	}
 	wlr_scene_buffer_set_buffer(netmenu_buffer, &tb->base);
 	/* Don't drop - we're caching the buffer for reuse */
+}
+
+/* ==================== THEME MENU ====================
+ * A native, centered color picker. Level 1 picks which color to edit; level 2
+ * picks from a basic palette or types a custom #RRGGBB via the on-screen hex
+ * input. Changes apply immediately through the cfg_* variables, exactly like
+ * the Scheme setters (set-border-color, set-bar-color, ...). */
+enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT };
+#define THEME_TARGET_COUNT 6
+#define THEME_PALETTE_COUNT 12
+
+static const char *const themetarget_names[THEME_TARGET_COUNT] = {
+	"Marco (fondo)", "Marco (lineas)", "Barra (fondo)",
+	"Barra (texto)", "Fondo general", "Texto general"
+};
+static const char *const themepalette_names[THEME_PALETTE_COUNT] = {
+	"Rojo", "Verde", "Azul", "Amarillo", "Cian", "Magenta",
+	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Gris oscuro"
+};
+static const uint32_t themepalette_rgb[THEME_PALETTE_COUNT] = {
+	0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff,
+	0xff8800, 0x8800ff, 0xffffff, 0xaaaaaa, 0x000000, 0x555555
+};
+
+/* Current value of a target (index into themetarget_names). Passing the
+ * target explicitly avoids relying on global thememenu_target. */
+static uint32_t
+thememenu_target_color(int target)
+{
+	switch (target) {
+	case TT_BORDER:      return cfg_border_color;
+	case TT_BORDER_LINE: return cfg_border_line_color;
+	case TT_BAR:         return cfg_bar_color;
+	case TT_BAR_TEXT:    return cfg_bar_text_color;
+	case TT_BG:          return cfg_bg_color;
+	case TT_BG_TEXT:     return cfg_bg_text_color;
+	default:             return 0;
+	}
+}
+
+/* Apply an RGB value to the current target and refresh the affected buffers */
+static void
+thememenu_apply_rgb(uint32_t rgb)
+{
+	switch (thememenu_target) {
+	case TT_BORDER:      cfg_border_color = rgb;      updateframes(); break;
+	case TT_BORDER_LINE: cfg_border_line_color = rgb; updateframes(); break;
+	case TT_BAR:         cfg_bar_color = rgb;         break;
+	case TT_BAR_TEXT:    cfg_bar_text_color = rgb;    break;
+	case TT_BG:          cfg_bg_color = rgb;          updaterepl(); break;
+	case TT_BG_TEXT:     cfg_bg_text_color = rgb;     updaterepl(); break;
+	}
+	updatebars();
+	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: %s -> #%06x\n",
+		themetarget_names[thememenu_target], rgb);
+}
+
+/* Apply a hex string (optional '#') to the current target */
+static void
+thememenu_apply_hex(const char *hexstr)
+{
+	thememenu_apply_rgb(parse_color_rgb(hexstr));
+}
+
+/* Draw one content row. `row` is 0-based content line under the title bar.
+ * If swatch stays non-NULL, paint a swatch on the right edge. */
+static void
+thememenu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
+              const char *text, int is_selected,
+              uint32_t text_color, uint32_t hi_bg, uint32_t hi_fg,
+              const uint32_t *swatch)
+{
+	int text_y = (row + 1) * cell_height;
+	int limit = menu_width / cell_width - 2;
+	int ci, px, py;
+
+	if (is_selected)
+		for (py = text_y; py < text_y + cell_height; py++)
+			for (px = cell_width; px < menu_width - cell_width; px++)
+				pixels[py * menu_width + px] = hi_bg;
+
+	for (ci = 0; text[ci] && ci < limit; ci++)
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			cell_width + ci * cell_width, text_y,
+			(unsigned char)text[ci], is_selected ? hi_fg : text_color);
+
+	if (swatch) {
+		uint32_t sc = RGB_TO_ARGB(*swatch);
+		int sx = menu_width - cell_width * 5;
+		int ex = menu_width - cell_width;
+		for (py = text_y; py < text_y + cell_height; py++)
+			for (px = sx; px < ex; px++)
+				pixels[py * menu_width + px] = sc;
+	}
+}
+
+/* Render the whole menu into the cached buffer and attach it, centered. */
+static void
+updatethememenu(void)
+{
+	struct TitleBuffer *tb;
+	uint32_t *pixels;
+	int menu_cells_w = 25;
+	int menu_cells_h = 25;
+	int menu_width, menu_height;
+	int i, x, y, col, row, cur_row = 0, ci;
+	uint32_t frame_bg, line_color, content_bg, text_color, hi_bg, hi_fg;
+	char title[40];
+	int content_rows = menu_cells_h - 2;
+	Monitor *m;
+
+	if (!thememenu_active) {
+		if (thememenu_buffer)
+			wlr_scene_node_set_enabled(&thememenu_buffer->node, 0);
+		return;
+	}
+	m = selmon;
+	if (!m)
+		return;
+
+	menu_width  = menu_cells_w * cell_width;
+	menu_height = menu_cells_h * cell_height;
+	frame_bg   = RGB_TO_ARGB(cfg_border_color);
+	line_color = RGB_TO_ARGB(cfg_border_line_color);
+	content_bg = RGB_TO_ARGB(cfg_menu_color);
+	text_color = RGB_TO_ARGB(cfg_menu_text_color);
+	hi_bg      = RGB_TO_ARGB(cfg_border_color);
+	hi_fg      = line_color;
+
+	if (!thememenu_tb) {
+		thememenu_tb = ecalloc(1, sizeof(*thememenu_tb));
+		thememenu_tb->stride = menu_width * 4;
+		thememenu_tb->data = ecalloc(1, thememenu_tb->stride * menu_height);
+		wlr_buffer_init(&thememenu_tb->base, &titlebuf_impl, menu_width, menu_height);
+		titlebuf_alloc_count++;
+	}
+	tb = thememenu_tb;
+	pixels = (uint32_t *)tb->data;
+
+	/* background + frame */
+	for (i = 0; i < menu_width * menu_height; i++)
+		pixels[i] = content_bg;
+	for (y = 0; y < cell_height; y++)
+		for (x = 0; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	for (y = (menu_cells_h - 1) * cell_height; y < menu_height; y++)
+		for (x = 0; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	for (y = 0; y < menu_height; y++) {
+		for (x = 0; x < cell_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+		for (x = (menu_cells_w - 1) * cell_width; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	}
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, 0, 0x2554, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, 0, 0x2557, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, (menu_cells_h - 1) * cell_height, 0x255A, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
+
+	snprintf(title, sizeof(title), "%s",
+		thememenu_palette_mode ? "Color: elige / Custom" : "Tema: que cambiar");
+	{
+		int tl = (int)strlen(title);
+		int ts = 2;
+		for (col = 1; col < menu_cells_w - 1; col++) {
+			if (col >= ts && col < ts + tl)
+				render_char_to_buffer(pixels, menu_width, menu_height,
+					col * cell_width, 0, title[col - ts], line_color);
+			else
+				render_char_to_buffer(pixels, menu_width, menu_height,
+					col * cell_width, 0, 0x2550, line_color);
+		}
+	}
+	for (col = 1; col < menu_cells_w - 1; col++)
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			col * cell_width, (menu_cells_h - 1) * cell_height, 0x2550, line_color);
+	for (row = 1; row < menu_cells_h - 1; row++) {
+		render_char_to_buffer(pixels, menu_width, menu_height, 0, row * cell_height, 0x2551, line_color);
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			(menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
+	}
+
+	cur_row = 0;
+	if (!thememenu_palette_mode) {
+		/* Level 1: the six color targets */
+		for (row = 0; row < content_rows && row + thememenu_scroll_offset < THEME_TARGET_COUNT; row++) {
+			int item = row + thememenu_scroll_offset;
+			uint32_t cur = thememenu_target_color(item);
+			int is_sel = (row == thememenu_selected_row);
+			thememenu_row(pixels, menu_width, menu_height, cur_row,
+				themetarget_names[item], is_sel, text_color, hi_bg, hi_fg, &cur);
+			cur_row++;
+		}
+	} else {
+		/* Level 2: palette of named colors + a "Custom..." entry */
+		int items = THEME_PALETTE_COUNT + 1;
+		for (row = 0; row < content_rows && row + thememenu_scroll_offset < items; row++) {
+			int item = row + thememenu_scroll_offset;
+			int is_sel = (row == thememenu_selected_row);
+			if (item < THEME_PALETTE_COUNT) {
+				uint32_t rgb = themepalette_rgb[item];
+				char buf[28];
+				snprintf(buf, sizeof(buf), "%s #%06x",
+					themepalette_names[item], rgb);
+				thememenu_row(pixels, menu_width, menu_height, cur_row,
+					buf, is_sel, text_color, hi_bg, hi_fg, &rgb);
+			} else {
+				uint32_t cur = thememenu_target_color(thememenu_target);
+				char buf[36];
+				snprintf(buf, sizeof(buf), "Custom... (#%06x)", cur);
+				thememenu_row(pixels, menu_width, menu_height, cur_row,
+					buf, is_sel, text_color, hi_bg, hi_fg, NULL);
+			}
+			cur_row++;
+		}
+		/* footer: on-screen hex entry widget */
+		{
+			char hint[44];
+			int text_y = (cur_row + 1) * cell_height;
+			int limit = menu_width / cell_width - 2;
+			int ci;
+			if (thememenu_hex_len > 0)
+				snprintf(hint, sizeof(hint), "  > #%s_", thememenu_hex);
+			else
+				snprintf(hint, sizeof(hint), "  Enter aplica | escribe hex");
+			for (ci = 0; hint[ci] && ci < limit; ci++)
+				render_char_to_buffer(pixels, menu_width, menu_height,
+					cell_width + ci * cell_width, text_y,
+					(unsigned char)hint[ci], hi_fg);
+		}
+	}
+
+	if (!thememenu_buffer)
+		thememenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
+	wlr_scene_node_set_enabled(&thememenu_buffer->node, 1);
+	wlr_scene_node_set_position(&thememenu_buffer->node,
+		m->m.x + (int)m->m.width / 2 - menu_width / 2,
+		m->m.y + (int)m->m.height / 2 - menu_height / 2);
+	wlr_scene_buffer_set_buffer(thememenu_buffer, &tb->base);
+	/* buffer is cached for reuse; do not drop */
+}
+
+static void
+thememenu_reset_nav(void)
+{
+	thememenu_scroll_offset = 0;
+	thememenu_selected_row = 0;
+	thememenu_hex_len = 0;
+	thememenu_hex[0] = '\0';
+}
+
+static void
+thememenu_open_palette(int target)
+{
+	thememenu_target = target;
+	thememenu_palette_mode = 1;
+	thememenu_reset_nav();
+	updatethememenu();
+}
+
+static void
+thememenu_open_targets(void)
+{
+	thememenu_palette_mode = 0;
+	thememenu_reset_nav();
+	updatethememenu();
+}
+
+static void
+thememenu_close(void)
+{
+	thememenu_active = 0;
+	thememenu_palette_mode = 0;
+	thememenu_reset_nav();
+	updatethememenu();
+	updatebars();
+}
+
+static void
+togglethememenu(const Arg *arg)
+{
+	if (thememenu_active) {
+		thememenu_close();
+		return;
+	}
+	thememenu_active = 1;
+	thememenu_palette_mode = 0;
+	thememenu_reset_nav();
+	updatethememenu();
+	updatebars();
+}
+
+static int
+thememenu_key(xkb_keysym_t sym)
+{
+	int items, max_row, selected;
+	int content_rows = 24;
+
+	/* Custom hex input mode: consume printable characters */
+	if (thememenu_hex_len > 0) {
+		if (sym == XKB_KEY_Escape) {
+			thememenu_hex_len = 0;
+			thememenu_hex[0] = '\0';
+			updatethememenu();
+			return 1;
+		}
+		if (sym == XKB_KEY_BackSpace) {
+			if (thememenu_hex_len > 0)
+				thememenu_hex[--thememenu_hex_len] = '\0';
+			updatethememenu();
+			return 1;
+		}
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			if (thememenu_hex_len == 6 ||
+			    (thememenu_hex_len == 7 && thememenu_hex[0] == '#')) {
+				thememenu_apply_hex(thememenu_hex);
+			}
+			if (thememenu_hex_len == 6 ||
+			    (thememenu_hex_len == 7 && thememenu_hex[0] == '#')) {
+				thememenu_hex_len = 0;
+				thememenu_hex[0] = '\0';
+			}
+			updatethememenu();
+			return 1;
+		}
+		if ((sym >= XKB_KEY_a && sym <= XKB_KEY_f) ||
+		    (sym >= XKB_KEY_A && sym <= XKB_KEY_F) ||
+		    (sym >= XKB_KEY_0 && sym <= XKB_KEY_9) ||
+		    sym == XKB_KEY_numbersign) {
+			int len = thememenu_hex_len;
+			int allow_hash = (len == 0);
+			int maxlen = allow_hash ? 7 : 6;
+			char c = (char)sym;
+			if (c >= 'A' && c <= 'F')
+				c = (char)(c - 'A' + 'a');
+			if ((sym == XKB_KEY_numbersign && allow_hash && len == 0) ||
+			    (sym != XKB_KEY_numbersign && len + 1 <= maxlen)) {
+				thememenu_hex[len] = c;
+				thememenu_hex[len + 1] = '\0';
+				thememenu_hex_len = len + 1;
+			}
+			updatethememenu();
+			return 1;
+		}
+		return 1; /* consume everything while typing */
+	}
+
+	if (sym == XKB_KEY_Escape) {
+		if (thememenu_palette_mode)
+			thememenu_open_targets();
+		else
+			thememenu_close();
+		return 1;
+	}
+	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
+		if (thememenu_palette_mode)
+			thememenu_open_targets();
+		return 1;
+	}
+	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
+		if (thememenu_selected_row > 0)
+			thememenu_selected_row--;
+		updatethememenu();
+		return 1;
+	}
+	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
+		items = thememenu_palette_mode
+			? (THEME_PALETTE_COUNT + 1)
+			: THEME_TARGET_COUNT;
+		max_row = (items < content_rows) ? items - 1 : content_rows - 1;
+		if (thememenu_selected_row < max_row)
+			thememenu_selected_row++;
+		updatethememenu();
+		return 1;
+	}
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
+	    sym == XKB_KEY_Right || sym == XKB_KEY_l) {
+		selected = thememenu_selected_row + thememenu_scroll_offset;
+		if (!thememenu_palette_mode) {
+			if (selected >= 0 && selected < THEME_TARGET_COUNT) {
+				thememenu_open_palette(selected);
+			}
+			return 1;
+		}
+		/* palette level */
+		if (selected < THEME_PALETTE_COUNT) {
+			thememenu_apply_rgb(themepalette_rgb[selected]);
+			updatethememenu();
+			return 1;
+		}
+		/* Custom entry: start with the current value as a seed */
+		{
+			uint32_t cur = thememenu_target_color(thememenu_target);
+			snprintf(thememenu_hex, sizeof(thememenu_hex), "%06x", cur);
+			thememenu_hex_len = 6;
+			updatethememenu();
+		}
+		return 1;
+	}
+
+	return 0; /* let the toggle binding still work for Escape-like keys */
+}
+
+/* Scheme function: (toggle-thememenu) */
+static s7_pointer
+scm_toggle_thememenu(s7_scheme *sc, s7_pointer args)
+{
+	(void)args;
+	togglethememenu(NULL);
+	return s7_t(sc);
 }
 
 /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
