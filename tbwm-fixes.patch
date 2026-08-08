@@ -691,7 +691,7 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..fb37425 100755
+index 8a401bc..b16726c 100755
 --- a/install.sh
 +++ b/install.sh
 @@ -46,13 +46,29 @@ install_deps() {
@@ -892,7 +892,7 @@ index 8a401bc..fb37425 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -272,13 +383,32 @@ install_tbwm() {
+@@ -272,13 +383,41 @@ install_tbwm() {
      sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
      success "Installed fonts (from fonts/ directory)"
      
@@ -915,6 +915,15 @@ index 8a401bc..fb37425 100755
 +        warn "tbwm-session not found; apps may have no session D-Bus bus (Flatpak/portals may fail)"
 +    fi
 +    
++    # tbwm-wallpaper: wallpaper dinámico con waywallen (opcional, con degradado:
++    # sin waywallen instalado el script no hace nada y el fondo queda por defecto)
++    if [ -f "$SCRIPT_DIR/tbwm-wallpaper" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-wallpaper" /usr/local/bin/tbwm-wallpaper
++        sudo chmod 755 /usr/local/bin/tbwm-wallpaper
++        success "Installed /usr/local/bin/tbwm-wallpaper"
++        warn "wallpaper dinámico opcional: requerirá waywallen (Flatpak) y waywallen-layer-shell; ver sección \"Fondo de pantalla\" del README"
++    fi
++    
      # Session file for display managers
      sudo mkdir -p /usr/share/wayland-sessions
      sudo tee /usr/share/wayland-sessions/tbwm.desktop > /dev/null << 'EOF'
@@ -926,7 +935,7 @@ index 8a401bc..fb37425 100755
  Type=Application
  EOF
      success "Installed session file"
-@@ -307,6 +437,94 @@ exec /usr/local/bin/tbwm.bin "$@"
+@@ -307,6 +446,94 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
@@ -1021,7 +1030,7 @@ index 8a401bc..fb37425 100755
  }
  
  # Main
-@@ -319,6 +537,8 @@ main() {
+@@ -319,6 +546,8 @@ main() {
      
      check_not_root
      detect_distro
@@ -1030,7 +1039,7 @@ index 8a401bc..fb37425 100755
      
      # Ask what to do
      echo ""
-@@ -356,7 +576,8 @@ main() {
+@@ -356,7 +585,8 @@ main() {
      echo ""
      echo "To use TurboWM:"
      echo "  • Log out and select 'TurboWM' from your display manager"
@@ -1291,6 +1300,79 @@ index 0000000..c9252f6
 +else
 +    printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 +fi
+\ No newline at end of file
+diff --git a/tbwm-wallpaper b/tbwm-wallpaper
+new file mode 100755
+index 0000000..9687ac7
+--- /dev/null
++++ b/tbwm-wallpaper
+@@ -0,0 +1,66 @@
++#!/bin/sh
++# Launch the waywallen wallpaper daemon + layer-shell presenter under tbwm.
++#
++# waywallen (instalado como Flatpak) genera el fondo dinamico; el binario
++# waywallen-layer-shell lo presenta al compositor via zwlr_layer_shell_v1 +
++# linux-dmabuf + Vulkan WSI.
++#
++# Degradacion a proposito:
++#   * Si waywallen NO esta instalado -> no hace nada (exit 0). Sin esperas,
++#     sin consumo de memoria ni spam en el log: el fondo queda por defecto
++#     (negro o el swaybg/waly que el usuario configure en on-startup).
++#   * Si waywallen esta instalado pero falta el presentador -> aviso corto.
++#   * Idempotente: mata instancias previas y deja una sola.
++
++set -u
++
++LOG="${XDG_RUNTIME_DIR:-/tmp}/tbwm-waywallen.log"
++SOCK="${XDG_RUNTIME_DIR:-/tmp}/waywallen/display.sock"
++APPID="org.waywallen.waywallen"
++
++log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >>"$LOG"; }
++now()  { date +%s; }
++
++log "tbwm-waywallen: starting (WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-none})"
++
++# --- 0) waywallen instalado? Sino, no hacer nada ---------------------------
++if ! command -v flatpak >/dev/null 2>&1 \
++   || ! flatpak list --app 2>/dev/null | grep -q "$APPID"; then
++    log "waywallen ($APPID) no esta instalado; fondo por defecto. Para activar: flatpak install flathub $APPID + waywallen-layer-shell"
++    exit 0
++fi
++if [ ! -x "$HOME/.local/bin/waywallen-layer-shell" ]; then
++    log "waywallen instalado pero falta $HOME/.local/bin/waywallen-layer-shell; fondo por defecto"
++    exit 1
++fi
++
++# --- clean up previous instances -------------------------------------------
++# Comm names are capped at 15 chars in Linux, so match by full path too.
++pkill -x waywallen 2>/dev/null
++pkill -x waywallen-ui 2>/dev/null
++pkill -f 'waywallen-layer-shell' 2>/dev/null
++pkill -f 'bin/waywallen-layer' 2>/dev/null
++sleep 1
++
++# --- 1) daemon sin UI (Flatpak). --no-ui: solo el fondo, sin ventana. Para
++#    abrir la interfaz a mano: flatpak run org.waywallen.waywallen
++nohup flatpak run --branch=stable --command=waywallen "$APPID" \
++    --no-ui >>"$LOG" 2>&1 &
++
++# --- wait for the daemon's UDS socket --------------------------------------
++i=0
++while [ ! -S "$SOCK" ] && [ "$i" -lt 40 ]; do
++    sleep 1
++    i=$((i + 1))
++done
++if [ ! -S "$SOCK" ]; then
++    log "waywallen: ERROR socket no aparece tras ${i}s; abriendo interfaz para depurar: flatpak run $APPID"
++    exit 1
++fi
++log "daemon socket ready at $SOCK"
++
++# --- 2) layer-shell presenter (vulkan WSI sobre eDP-1/..) -------------------
++nohup "$HOME/.local/bin/waywallen-layer-shell" >>"$LOG" 2>&1 &
++log "layer-shell presenter launched"
++
++log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
 index a1e049d..265654b 100644

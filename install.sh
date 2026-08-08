@@ -402,6 +402,15 @@ install_tbwm() {
         warn "tbwm-session not found; apps may have no session D-Bus bus (Flatpak/portals may fail)"
     fi
     
+    # tbwm-wallpaper: wallpaper dinámico con waywallen (opcional, con degradado:
+    # sin waywallen instalado el script no hace nada y el fondo queda por defecto)
+    if [ -f "$SCRIPT_DIR/tbwm-wallpaper" ]; then
+        sudo cp "$SCRIPT_DIR/tbwm-wallpaper" /usr/local/bin/tbwm-wallpaper
+        sudo chmod 755 /usr/local/bin/tbwm-wallpaper
+        success "Installed /usr/local/bin/tbwm-wallpaper"
+        warn "wallpaper dinámico opcional: requerirá waywallen (Flatpak) y waywallen-layer-shell; ver sección \"Fondo de pantalla\" del README"
+    fi
+    
     # Session file for display managers
     sudo mkdir -p /usr/share/wayland-sessions
     sudo tee /usr/share/wayland-sessions/tbwm.desktop > /dev/null << 'EOF'

@@ -421,8 +421,7 @@ tbwm implementa el protocolo layer-shell, así que acepta cualquier cliente de
 fondo de Wayland como [swaybg](https://github.com/swaywm/swaybg), que se dibuja
 en la capa *Background* sin tocar el código del compositor.
 
-1. Instálalo: `sudo pacman -S swaybg` (o `apt install swaybg`, etc.).
-2. Añade una línea al `config.scm`:
+**Imagen fija (simple)** — instala `swaybg` y añade una línea al `config.scm`:
 
 ```scm
 (on-startup "swaybg -i ~/Imágenes/fondo.png -m fill")
@@ -431,6 +430,25 @@ en la capa *Background* sin tocar el código del compositor.
 Modos de ajuste (`-m`): `fill`, `contain`, `center`, `tile`, `stretch`. Con
 varios monitores usa `--output` para asignar una imagen por pantalla. Como tbwm
 no procesa autostart de XDG, la línea de `on-startup` es el lugar correcto.
+
+**Fondos dinámicos (opcional, waywallen)** — para videos, animaciones o
+wallpapers de Wallpaper Engine puedes usar
+[waywallen](https://github.com/waywallen/waywallen) + su presentador
+`waywallen-layer-shell` (mismo mecanismo layer-shell + linux-dmabuf + Vulkan
+WSI, probado en este entorno). `install.sh` instala el launcher
+`tbwm-wallpaper`, que lanza daemon y presentador; añade al `config.scm`:
+
+```scm
+(on-startup "/usr/local/bin/tbwm-wallpaper")
+```
+
+**Degradado**: si el usuario no tiene waywallen instalado, `tbwm-wallpaper`
+**no hace nada** (exit 0: sin esperas ni consumo de RAM ni log de error) y el
+fondo queda por defecto (negro o el `swaybg` del bloque anterior). Para
+activarlo: `flatpak install flathub org.waywallen.waywallen`; la GUI para
+gestionar los fondos se abre con `flatpak run org.waywallen.waywallen`.
+Si alguna GPU diera un frame negro con Vulkan, la imagen fija con swaybg
+sigue siendo el plan funcional.
 
 ## Notas del entorno de prueba
 
@@ -443,4 +461,6 @@ no procesa autostart de XDG, la línea de `on-startup` es el lugar correcto.
 - Para las teclas de brillo: `brightnessctl`.
 - Para audio (música, micrófono): PipeWire/PipeWire-pulse/WirePlumber
   (arrancados con `tbwm-audio`).
-- Para el fondo de pantalla: `swaybg` (ver sección "Fondo de pantalla").
+- Para fondo fijo con imagen: `swaybg`; para fondos dinámicos (opcional):
+  el launcher `tbwm-wallpaper` usa `waywallen` + `waywallen-layer-shell`
+  (ver "Fondo de pantalla").
