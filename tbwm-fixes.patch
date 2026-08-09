@@ -1051,10 +1051,10 @@ index 8a401bc..b16726c 100755
      echo ""
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..c9252f6
+index 0000000..c654c2f
 --- /dev/null
 +++ b/tbwm-network
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,253 @@
 +#!/bin/sh
 +# List WiFi networks and Bluetooth devices for tbwm's network menu.
 +# Output: Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>command[<TAB>needspass], one per line.
@@ -1222,6 +1222,7 @@ index 0000000..c9252f6
 +    paired="$(bluetoothctl devices Paired 2>/dev/null)"
 +    connected="$(bluetoothctl devices Connected 2>/dev/null)"
 +    devices="$(mktemp)"
++    scanmacs="$(mktemp)"
 +    bluetoothctl devices 2>/dev/null > "$devices"
 +
 +    # Merge newly discovered devices (from the scan output) into the list so
@@ -1245,6 +1246,7 @@ index 0000000..c9252f6
 +                *RSSI:*|*\[CHG\]*|Device*) continue;;
 +            esac
 +            [ -n "$name" ] || continue
++            printf '%s\n' "$mac" >> "$scanmacs"
 +            if ! grep -q " $mac " "$devices"; then
 +                printf 'Device %s %s\n' "$mac" "$name" >> "$devices"
 +            fi
@@ -1286,6 +1288,12 @@ index 0000000..c9252f6
 +                printf 'Bluetooth\tEmparejados\t%s\tConectar\tbluetoothctl connect %s\n' "$nq" "$mac"
 +                printf 'Bluetooth\tEmparejados\t%s\tOlvidar\tbluetoothctl remove %s\n' "$nq" "$mac"
 +            else
++                # Only show "Buscar dispositivos" for devices seen in the
++                # CURRENT scan; stale remembered devices that are no longer in
++                # range (or no longer visible) would stay forever in the list.
++                if ! grep -qxF "$mac" "$scanmacs"; then
++                    continue
++                fi
 +                has_discovered=1
 +                printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
 +            fi
@@ -1296,7 +1304,7 @@ index 0000000..c9252f6
 +    else
 +        printf 'Bluetooth\t\t\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
 +    fi
-+rm -f "$devices" "$btout"
++rm -f "$devices" "$btout" "$scanmacs"
 +else
 +    printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 +fi
