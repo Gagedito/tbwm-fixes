@@ -154,6 +154,12 @@ fi
 
 # --- Bluetooth (category: Bluetooth) ---
 if command -v bluetoothctl >/dev/null 2>&1; then
+    # Some laptops (e.g. Lenovo ideapad) leave the radio soft-blocked via
+    # rfkill, which makes "power on" fail with org.bluez.Error.Failed and the
+    # scan with "NotReady". Unblock first so the menu can actually scan. No
+    # privileges needed for the user's own rfkill entries.
+    rfkill unblock bluetooth 2>/dev/null
+    sleep 0.5
     bluetoothctl power on >/dev/null 2>&1
     btout="$(mktemp)"
     # Keep the scan alive while we inspect devices below: bluetoothctl info
