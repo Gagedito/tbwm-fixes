@@ -2,18 +2,46 @@
 # Start the PipeWire audio stack if it is not already running.
 # Used from TurboWM's (on-startup ...) because tbwm does not process
 # XDG autostart entries (only desktop environments like Plasma do).
+#
+# Everything is logged to ~/.local/state/tbwm-audio.log so startup
+# failures can be diagnosed instead of being silently swallowed.
+
+LOG="${LOG:-$HOME/.local/state/tbwm-audio.log}"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*" >> "$LOG"
+}
 
 XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
+# pam_mktemp creates the runtime dir a moment after login; pipewire needs it
+# to exist before it can bind its socket. Wait briefly, then try to create it.
+i=0
+while [ "$i" -lt 50 ] && [ ! -d "$XDG_RUNTIME_DIR" ]; do
+    sleep 0.2
+    i=$((i + 1))
+done
+if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+    log "WARN: $XDG_RUNTIME_DIR missing, trying to create it"
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null
+fi
+[ -d "$XDG_RUNTIME_DIR" ] && chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
 start_stack() {
-    /usr/bin/pipewire >/dev/null 2>&1 &
+    log "start_stack: pipewire"
+    /usr/bin/pipewire >> "$LOG" 2>&1 &
     sleep 0.5
-    /usr/bin/pipewire-pulse >/dev/null 2>&1 &
-    /usr/bin/wireplumber >/dev/null 2>&1 &
+    log "start_stack: pipewire-pulse"
+    /usr/bin/pipewire-pulse >> "$LOG" 2>&1 &
+    log "start_stack: wireplumber"
+    /usr/bin/wireplumber >> "$LOG" 2>&1 &
+    sleep 1
 }
 
 # Kill the whole stack so a stale/broken pipewire cannot hold dead sockets
 restart_stack() {
+    log "restart_stack: killing whole stack"
     pkill -x wireplumber 2>/dev/null
     pkill -x pipewire-pulse 2>/dev/null
     pkill -x pipewire 2>/dev/null
@@ -37,12 +65,22 @@ if ! pgrep -x pipewire >/dev/null 2>&1; then
     start_stack
 elif [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; then
     # pipewire is alive and its socket exists: make sure the rest is up
-    pgrep -x pipewire-pulse >/dev/null 2>&1 || /usr/bin/pipewire-pulse >/dev/null 2>&1 &
-    pgrep -x wireplumber >/dev/null 2>&1 || /usr/bin/wireplumber >/dev/null 2>&1 &
+    pgrep -x pipewire-pulse >/dev/null 2>&1 || { log "spawning pipewire-pulse"; /usr/bin/pipewire-pulse >> "$LOG" 2>&1 & }
+    pgrep -x wireplumber >/dev/null 2>&1 || { log "spawning wireplumber"; /usr/bin/wireplumber >> "$LOG" 2>&1 & }
 else
     # pipewire runs but its socket is gone (stale after a runtime-dir reset):
     # the whole stack is broken, restart it completely
     restart_stack
+fi
+
+# If pipewire just failed to bind its socket, surface the reason now.
+i=0
+while [ "$i" -lt 15 ] && ! [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; do
+    sleep 0.2
+    i=$((i + 1))
+done
+if ! [ -S "$XDG_RUNTIME_DIR/pipewire-0" ]; then
+    log "ERROR: pipewire socket still missing after start (see log above)"
 fi
 
 # Give WirePlumber time to enumerate the hardware. If it ends up with only the
@@ -51,8 +89,15 @@ fi
 attempts=0
 while [ "$attempts" -lt 6 ] && ! has_real_sink; do
     attempts=$((attempts + 1))
+    log "retry $attempts/6: restarting wireplumber (no real sink yet)"
     pkill -x wireplumber 2>/dev/null
     sleep 0.5
-    /usr/bin/wireplumber >/dev/null 2>&1 &
+    /usr/bin/wireplumber >> "$LOG" 2>&1 &
     sleep 2
 done
+
+if has_real_sink; then
+    log "audio stack OK"
+else
+    log "ERROR: no real audio sink after retries"
+fi
