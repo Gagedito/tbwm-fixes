@@ -165,9 +165,12 @@ if command -v bluetoothctl >/dev/null 2>&1; then
     # Keep the scan alive while we inspect devices below: bluetoothctl info
     # only reports RSSI while a discovery is running. Devices the daemon
     # merely remembers but are NOT in range anymore never get a fresh RSSI.
-    (timeout 14 bluetoothctl scan on > "$btout" 2>&1) &
-    scan_pid=$!
-    sleep 8
+    # bluetoothctl reads commands from stdin, so a bare "scan on" launched from
+    # a menu (stdin at EOF) would start the scan and exit immediately, never
+    # really discovering anything. Feed the commands through a pipe so the
+    # session stays alive for the whole discovery window.
+    ( echo "scan on"; sleep 16; echo "scan off" ) | bluetoothctl > "$btout" 2>&1 &
+    sleep 13
 
     paired="$(bluetoothctl devices Paired 2>/dev/null)"
     connected="$(bluetoothctl devices Connected 2>/dev/null)"
@@ -175,18 +178,27 @@ if command -v bluetoothctl >/dev/null 2>&1; then
     scanmacs="$(mktemp)"
     bluetoothctl devices 2>/dev/null > "$devices"
 
+    # Controller D-Bus root, used to read the live RSSI of each known device
+    # below. The daemon updates RSSI while discovery is running, so a non-empty
+    # value means "this device was seen in the current scan". Stale remembered
+    # devices that are no longer in range keep no RSSI, so they drop out of
+    # "Buscar dispositivos" automatically.
+    btroot=""
+    if command -v busctl >/dev/null 2>&1; then
+        btroot="$(busctl --system tree org.bluez 2>/dev/null | grep -oE '/org/bluez/hci[0-9]+' | sort -u | head -1)"
+    fi
+
     # Merge newly discovered devices (from the scan output) into the list so
     # "Buscar dispositivos" shows devices found during this scan, not only the
-    # ones the daemon already remembered. Later scan emits "[NEW] Device
-    # AA:BB:.. NAME" (and "[NEW] Controller ..." for the adapter). Stale
-    # remembered devices produce no [NEW] line during discovery, so they drop
-    # out of the category automatically. A device only appears under "Buscar
-    # dispositivos" when the current scan actually reported it.
+    # ones the daemon already remembered. The scan emits "[NEW] Device
+    # AA:BB:.. NAME" for devices seen for the first time and "[CHG] Device
+    # AA:BB:.. RSSI: ..." for updates to known ones — both prove the device was
+    # seen in the current scan.
     if [ -s "$btout" ]; then
         while IFS= read -r line; do
             [ -n "$line" ] || continue
             case "$line" in
-                *"NEW] Device "*|*"[NEW] Device"*|Device\ *) ;;
+                *"NEW] Device "*|*"[NEW] Device"*|*"CHG] Device "*|*"[CHG] Device"*|Device\ *) ;;
                 *) continue;;
             esac
             mac=$(printf '%s\n' "$line" | sed -n 's/.*Device \(\([0-9A-Fa-f][0-9A-Fa-f]:\)\{5\}[0-9A-Fa-f][0-9A-Fa-f]\).*/\1/p')
@@ -215,7 +227,7 @@ if command -v bluetoothctl >/dev/null 2>&1; then
                 [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
                 *) continue;;
             esac
-            name=$(printf '%s' "$line" | sed "s/^Device $mac //" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
+            name=$(printf '%s' "$line" | sed "s/^Device $mac //" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g' | sed -r 's/[[:space:]]*\([0-9]+\)$//')
             case "$name" in
                 *RSSI:*|*\[CHG\]*|Device*) name="";;
             esac
@@ -238,9 +250,19 @@ $mac"
                 # Only show "Buscar dispositivos" for devices seen in the
                 # CURRENT scan; stale remembered devices that are no longer in
                 # range (or no longer visible) would stay forever in the list.
-                if ! grep -qxF "$mac" "$scanmacs"; then
-                    continue
+                # A device counts as seen either if the scan output mentioned it
+                # ([NEW]/[CHG]) or if the daemon reports a live RSSI for it
+                # right now (bluetoothctl does not always emit [CHG] lines for
+                # known devices even though the daemon is picking them up).
+                inrange=0
+                if grep -qxF "$mac" "$scanmacs"; then
+                    inrange=1
+                elif [ -n "$btroot" ]; then
+                    devpath="${btroot}/dev_$(printf '%s' "$mac" | tr ':' '_')"
+                    rssi=$(busctl --system get-property org.bluez "$devpath" org.bluez.Device1 RSSI 2>/dev/null | sed -n 's/^n //p')
+                    [ -n "$rssi" ] && inrange=1
                 fi
+                [ "$inrange" = 1 ] || continue
                 has_discovered=1
                 printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
             fi
