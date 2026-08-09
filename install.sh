@@ -392,6 +392,17 @@ install_tbwm() {
         warn "tbwm-network not found; the network menu (WiFi/Bluetooth) will be empty"
     fi
     
+    # tbwm-audio helper: starts/restarts the PipeWire stack (pipewire,
+    # pipewire-pulse, wireplumber) from (on-startup ...); tbwm does not
+    # process XDG autostart
+    if [ -f "$SCRIPT_DIR/tbwm-audio" ]; then
+        sudo cp "$SCRIPT_DIR/tbwm-audio" /usr/local/bin/tbwm-audio
+        sudo chmod 755 /usr/local/bin/tbwm-audio
+        success "Installed /usr/local/bin/tbwm-audio"
+    else
+        warn "tbwm-audio not found; add (on-startup \"tbwm-audio\") to config.scm after installing it"
+    fi
+    
     # tbwm-session launcher (starts a session D-Bus bus so Flatpak apps and
     # the XDG desktop portals can connect)
     if [ -f "$SCRIPT_DIR/tbwm-session" ]; then
@@ -422,14 +433,9 @@ Type=Application
 EOF
     success "Installed session file"
     
-    # Create default config if it doesn't exist
-    if [ ! -f "$HOME/.config/tbwm/config.scm" ]; then
-        mkdir -p "$HOME/.config/tbwm"
-        if [ -f "docs/example-config.scm" ]; then
-            cp docs/example-config.scm "$HOME/.config/tbwm/config.scm"
-            success "Created default config at ~/.config/tbwm/config.scm"
-        fi
-    fi
+    # Default config: tbwm itself writes a default config.scm to
+    # ~/.config/tbwm on first start, so there is nothing to copy here.
+    mkdir -p "$HOME/.config/tbwm"
     
     # If wlroots was built from source, create a wrapper that sets LD_LIBRARY_PATH
     if [ -f "/usr/local/lib/libwlroots-0.19.so" ] || [ -f "/usr/local/lib64/libwlroots-0.19.so" ]; then

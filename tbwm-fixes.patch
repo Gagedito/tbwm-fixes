@@ -691,7 +691,7 @@ index 9ccea74..f1c4055 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..b16726c 100755
+index 8a401bc..4cda6d7 100755
 --- a/install.sh
 +++ b/install.sh
 @@ -46,13 +46,29 @@ install_deps() {
@@ -892,7 +892,7 @@ index 8a401bc..b16726c 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -272,13 +383,41 @@ install_tbwm() {
+@@ -272,25 +383,59 @@ install_tbwm() {
      sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
      success "Installed fonts (from fonts/ directory)"
      
@@ -903,6 +903,17 @@ index 8a401bc..b16726c 100755
 +        success "Installed /usr/local/bin/tbwm-network"
 +    else
 +        warn "tbwm-network not found; the network menu (WiFi/Bluetooth) will be empty"
++    fi
++    
++    # tbwm-audio helper: starts/restarts the PipeWire stack (pipewire,
++    # pipewire-pulse, wireplumber) from (on-startup ...); tbwm does not
++    # process XDG autostart
++    if [ -f "$SCRIPT_DIR/tbwm-audio" ]; then
++        sudo cp "$SCRIPT_DIR/tbwm-audio" /usr/local/bin/tbwm-audio
++        sudo chmod 755 /usr/local/bin/tbwm-audio
++        success "Installed /usr/local/bin/tbwm-audio"
++    else
++        warn "tbwm-audio not found; add (on-startup \"tbwm-audio\") to config.scm after installing it"
 +    fi
 +    
 +    # tbwm-session launcher (starts a session D-Bus bus so Flatpak apps and
@@ -935,7 +946,22 @@ index 8a401bc..b16726c 100755
  Type=Application
  EOF
      success "Installed session file"
-@@ -307,6 +446,94 @@ exec /usr/local/bin/tbwm.bin "$@"
+     
+-    # Create default config if it doesn't exist
+-    if [ ! -f "$HOME/.config/tbwm/config.scm" ]; then
+-        mkdir -p "$HOME/.config/tbwm"
+-        if [ -f "docs/example-config.scm" ]; then
+-            cp docs/example-config.scm "$HOME/.config/tbwm/config.scm"
+-            success "Created default config at ~/.config/tbwm/config.scm"
+-        fi
+-    fi
++    # Default config: tbwm itself writes a default config.scm to
++    # ~/.config/tbwm on first start, so there is nothing to copy here.
++    mkdir -p "$HOME/.config/tbwm"
+     
+     # If wlroots was built from source, create a wrapper that sets LD_LIBRARY_PATH
+     if [ -f "/usr/local/lib/libwlroots-0.19.so" ] || [ -f "/usr/local/lib64/libwlroots-0.19.so" ]; then
+@@ -307,6 +452,94 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
@@ -1030,7 +1056,7 @@ index 8a401bc..b16726c 100755
  }
  
  # Main
-@@ -319,6 +546,8 @@ main() {
+@@ -319,6 +552,8 @@ main() {
      
      check_not_root
      detect_distro
@@ -1039,7 +1065,7 @@ index 8a401bc..b16726c 100755
      
      # Ask what to do
      echo ""
-@@ -356,7 +585,8 @@ main() {
+@@ -356,7 +591,8 @@ main() {
      echo ""
      echo "To use TurboWM:"
      echo "  • Log out and select 'TurboWM' from your display manager"
@@ -1049,6 +1075,7 @@ index 8a401bc..b16726c 100755
      echo ""
      echo "Config file: ~/.config/tbwm/config.scm"
      echo ""
+
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
 index 0000000..05e09fb
