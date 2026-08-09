@@ -28,16 +28,12 @@
 ;;;; ==================== STARTUP COMMANDS ====================
 
 ;; Commands to run when the compositor starts
-;; Start the PipeWire audio stack (tbwm doesn't process XDG autostart).
-;; Scripts are installed into PATH (/usr/local/bin) by install.sh.
-(on-startup "tbwm-audio")
-
-;; Dynamic wallpaper (waywallen: Flatpak + layer-shell presenter)
-;; Alternative: install swaybg and use (on-startup "swaybg -i /ruta/fondo.png -m fill")
-(on-startup "tbwm-wallpaper")
-
 ;; Uncomment and customize as needed:
 ;; (on-startup "waybar" "mako" "foot --server")
+
+;; Audio stack (PipeWire) y wallpaper dinámico (scripts instalados en PATH)
+(on-startup "tbwm-audio")
+(on-startup "tbwm-wallpaper")
 
 ;;;; ==================== STATUS BAR ====================
 
@@ -89,12 +85,8 @@
 ;; App menu
 (bind-key "M-x" (lambda () (toggle-appmenu)))
 
-;; Theme menu (integrated in the WM): frame/bar/background colors, palette or custom
+;; Theme menu (in-WM): frame/bar/background colors, palette or custom
 (bind-key "M-t" (lambda () (toggle-thememenu)))
-
-;; Network menu (WiFi + Bluetooth) - see tbwm-network script (installed in PATH)
-(set-net-menu-cmd "tbwm-network")
-(bind-key "M-n" (lambda () (toggle-net-menu)))
 
 ;; Close window
 (bind-key "M-q" (lambda () (kill-client)))
@@ -158,6 +150,11 @@
 (bind-key "Print" (lambda () (spawn-grab "sh -c 'grim - | wl-copy'")))
 (bind-key "S-Print" (lambda () (spawn-grab "sh -c 'grim -g \"$(slurp)\" - | wl-copy'")))
 
+;; Network menu (WiFi + Bluetooth) - requires networkmanager, bluez and the
+;; tbwm-network helper (installed by install.sh)
+(set-net-menu-cmd "tbwm-network")
+(bind-key "M-n" (lambda () (toggle-net-menu)))
+
 ;; Volume control (requires wpctl/wireplumber)
 (bind-key "XF86AudioRaiseVolume" (lambda () (spawn "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+")))
 (bind-key "XF86AudioLowerVolume" (lambda () (spawn "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-")))
@@ -186,8 +183,7 @@
 (bind-key "C-A-F11" (lambda () (chvt 11)))
 (bind-key "C-A-F12" (lambda () (chvt 12)))
 
-;;; The old "Complete Scheme binding examples" block was removed: it duplicated the
-;;; bindings above and overwrote M-h/M-k/M-l (focus navigation) plus M-k killing windows.
+;;; Complete Scheme binding examples removed (duplicated bindings above broke focus keys)
 
 ;; Advanced setters (examples - not necessarily key bound):
 ;; (set-border-width 2)
