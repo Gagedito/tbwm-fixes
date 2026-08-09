@@ -31,7 +31,8 @@
 ;; Uncomment and customize as needed:
 ;; (on-startup "waybar" "mako" "foot --server")
 
-;; Audio stack (PipeWire) y wallpaper dinámico (scripts instalados en PATH)
+;; Start the PipeWire audio stack and the dynamic wallpaper (scripts
+;; installed into PATH by install.sh: tbwm-audio, tbwm-wallpaper)
 (on-startup "tbwm-audio")
 (on-startup "tbwm-wallpaper")
 
