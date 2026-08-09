@@ -445,10 +445,10 @@ static int appmenu_item_count(void);
 static void updatenetmenu(void);
 static int netmenu_item_count(void);
 static void netmenu_refresh(void);
-static void netmenu_parse(void);
 static void netmenu_build_groups(void);
 static void netmenu_build_subgroups(void);
 static void netmenu_cancel_load(void);
+static void netmenu_reparse(void);
 static int netmenu_read_cb(int fd, uint32_t mask, void *data);
 static void togglenetmenu(const Arg *arg);
 static int netmenukey(xkb_keysym_t sym);
@@ -664,6 +664,7 @@ static struct wl_event_source *signal_fd_source = NULL;
 
 static struct wl_event_source *bar_timer = NULL;
 static struct wl_event_source *net_scan_timer = NULL;  /* auto-rescan while focused on a search sub-topic */
+static int netmenu_last_sub = 0;        /* last netmenu_refresh() used a focused subcommand (tbwm-network bt/wifi) */
 static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
 static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
 static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
@@ -4004,28 +4005,23 @@ netmenu_item_count(void)
 	}
 }
 
-/* Parse the accumulated netmenu command output into net_entries and
- * net_categories. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Name<TAB>exec[<TAB>needspass]".
+/* Parse a NUL-terminated netmenu payload into dst[] and return the entry
+ * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Name<TAB>exec[<TAB>needspass]".
  * Legacy format "Category<TAB>Group<TAB>Name<TAB>exec[<TAB>needspass]" is still
  * detected (the 3rd field then is the action name, e.g. "Conectar a X"). */
-static void
-netmenu_parse(void)
+static int
+netmenu_parse_buffer(const char *out, NetEntry *dst, int max)
 {
-	char *p = netmenu_out;
+	const char *p = out;
 	int n = 0;
 
-	net_entry_count = 0;
-	net_category_count = 0;
-
-	netmenu_out[netmenu_out_len] = '\0';
-	while (n < MAX_NET_ENTRIES && *p) {
+	while (n < max && *p) {
 		char line[512];
 		char *tok[6];
 		int nt = 0;
-		int ci;
 
 		{
-			char *eol = strchr(p, '\n');
+			const char *eol = strchr(p, '\n');
 			size_t len = eol ? (size_t)(eol - p) : strlen(p);
 			if (len >= sizeof(line))
 				len = sizeof(line) - 1;
@@ -4054,42 +4050,157 @@ netmenu_parse(void)
 		    (strcmp(tok[3], "Conectar") == 0 || strcmp(tok[3], "Desconectar") == 0 ||
 		     strcmp(tok[3], "Olvidar") == 0 || strcmp(tok[3], "Info") == 0)) {
 			/* new: cat group subgroup name exec[ need] */
-			strncpy(net_entries[n].category, tok[0], NET_CAT_LEN - 1);
-			strncpy(net_entries[n].group, tok[1], NET_CAT_LEN - 1);
-			strncpy(net_entries[n].subgroup, tok[2], NET_CAT_LEN - 1);
-			strncpy(net_entries[n].name, tok[3], NET_NAME_LEN - 1);
-			strncpy(net_entries[n].exec, tok[4], NET_EXEC_LEN - 1);
-			net_entries[n].needspass = (nt >= 6 && tok[5][0] == '1');
-			net_entries[n].btpair = (nt >= 6 && strcmp(tok[5], "BTPAIR") == 0);
+			strncpy(dst[n].category, tok[0], NET_CAT_LEN - 1);
+			strncpy(dst[n].group, tok[1], NET_CAT_LEN - 1);
+			strncpy(dst[n].subgroup, tok[2], NET_CAT_LEN - 1);
+			strncpy(dst[n].name, tok[3], NET_NAME_LEN - 1);
+			strncpy(dst[n].exec, tok[4], NET_EXEC_LEN - 1);
+			dst[n].needspass = (nt >= 6 && tok[5][0] == '1');
+			dst[n].btpair = (nt >= 6 && strcmp(tok[5], "BTPAIR") == 0);
 		} else {
 			/* legacy: cat group name exec[ need] */
-			strncpy(net_entries[n].category, tok[0], NET_CAT_LEN - 1);
-			strncpy(net_entries[n].group, tok[1], NET_CAT_LEN - 1);
-			net_entries[n].subgroup[0] = '\0';
-			strncpy(net_entries[n].name, tok[2], NET_NAME_LEN - 1);
-			strncpy(net_entries[n].exec, tok[3], NET_EXEC_LEN - 1);
-			net_entries[n].needspass = (nt >= 5 && tok[4][0] == '1');
-			net_entries[n].btpair = 0;
+			strncpy(dst[n].category, tok[0], NET_CAT_LEN - 1);
+			strncpy(dst[n].group, tok[1], NET_CAT_LEN - 1);
+			dst[n].subgroup[0] = '\0';
+			strncpy(dst[n].name, tok[2], NET_NAME_LEN - 1);
+			strncpy(dst[n].exec, tok[3], NET_EXEC_LEN - 1);
+			dst[n].needspass = (nt >= 5 && tok[4][0] == '1');
+			dst[n].btpair = 0;
 		}
-		net_entries[n].category[NET_CAT_LEN - 1] = '\0';
-		net_entries[n].group[NET_CAT_LEN - 1] = '\0';
-		net_entries[n].subgroup[NET_CAT_LEN - 1] = '\0';
-		net_entries[n].name[NET_NAME_LEN - 1] = '\0';
-		net_entries[n].exec[NET_EXEC_LEN - 1] = '\0';
+		dst[n].category[NET_CAT_LEN - 1] = '\0';
+		dst[n].group[NET_CAT_LEN - 1] = '\0';
+		dst[n].subgroup[NET_CAT_LEN - 1] = '\0';
+		dst[n].name[NET_NAME_LEN - 1] = '\0';
+		dst[n].exec[NET_EXEC_LEN - 1] = '\0';
+		n++;
+	}
+	return n;
+}
 
-		/* Add category if new */
-		for (ci = 0; ci < net_category_count; ci++) {
-			if (strcmp(net_categories[ci], net_entries[n].category) == 0)
+/* Rebuild net_categories from the current net_entries, preserving the
+ * existing category order so the list never reorders between focused wifi/bt
+ * rescans. Categories that still have entries keep their position; categories
+ * first seen in the new stream are appended. */
+static void
+netmenu_rebuild_categories(void)
+{
+	char old[MAX_NET_CATEGORIES][NET_CAT_LEN];
+	int oldn = net_category_count;
+	int i;
+	int ci;
+	int j;
+
+	for (i = 0; i < oldn; i++)
+		strcpy(old[i], net_categories[i]);
+
+	net_category_count = 0;
+
+	/* Categories that already existed keep their previous position */
+	for (i = 0; i < oldn; i++) {
+		int has = 0;
+		for (ci = 0; ci < net_entry_count; ci++) {
+			if (strcmp(net_entries[ci].category, old[i]) == 0) {
+				has = 1;
 				break;
+			}
 		}
-		if (ci >= net_category_count && net_category_count < MAX_NET_CATEGORIES) {
-			strncpy(net_categories[net_category_count], net_entries[n].category, NET_CAT_LEN - 1);
+		if (has && net_category_count < MAX_NET_CATEGORIES) {
+			strncpy(net_categories[net_category_count], old[i], NET_CAT_LEN - 1);
 			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
 			net_category_count++;
 		}
-		n++;
 	}
-	net_entry_count = n;
+	/* Brand new categories go to the end */
+	for (ci = 0; ci < net_entry_count; ci++) {
+		for (j = 0; j < net_category_count; j++) {
+			if (strcmp(net_categories[j], net_entries[ci].category) == 0)
+				break;
+		}
+		if (j >= net_category_count && net_category_count < MAX_NET_CATEGORIES) {
+			strncpy(net_categories[net_category_count], net_entries[ci].category, NET_CAT_LEN - 1);
+			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
+			net_category_count++;
+		}
+	}
+}
+
+/* Is `cat` present in the given category set? */
+static int
+netmenu_cat_in_set(const char *cat, const char scats[MAX_NET_CATEGORIES][NET_CAT_LEN], int n)
+{
+	int ci;
+	for (ci = 0; ci < n; ci++) {
+		if (strcmp(scats[ci], cat) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* Merge a freshly parsed stream (src) into the live menu data (net_entries /
+ * net_categories). Categories not covered by src keep their existing entries,
+ * so a focused wifi/bt rescan never blanks the other category (which caused
+ * the Bluetooth category to flicker out on every search cycle). When grow is
+ * set (the child is still streaming), entries of src's categories that src
+ * has not re-emitted yet are kept too, so a live scan grows the list item by
+ * item instead of briefly dropping networks/devices on each refresh. The
+ * final stream of a command is authoritative: it replaces its categories so
+ * stale devices/networks that left range drop out. */
+static void
+netmenu_merge_parse(const NetEntry *src, int src_count, int grow)
+{
+	char scats[MAX_NET_CATEGORIES][NET_CAT_LEN];
+	int scatn = 0;
+	NetEntry merged[MAX_NET_ENTRIES];
+	int mc = 0;
+	int i;
+	int j;
+	int ci;
+
+	for (i = 0; i < src_count; i++) {
+		for (ci = 0; ci < scatn; ci++) {
+			if (strcmp(scats[ci], src[i].category) == 0)
+				break;
+		}
+		if (ci >= scatn && scatn < MAX_NET_CATEGORIES) {
+			strncpy(scats[scatn], src[i].category, NET_CAT_LEN - 1);
+			scats[scatn][NET_CAT_LEN - 1] = '\0';
+			scatn++;
+		}
+	}
+
+	/* Keep existing entries whose category the new stream does not cover */
+	for (i = 0; i < net_entry_count && mc < MAX_NET_ENTRIES; i++) {
+		if (!netmenu_cat_in_set(net_entries[i].category, scats, scatn))
+			merged[mc++] = net_entries[i];
+	}
+
+	if (grow) {
+		/* Keep covered-category entries the stream has not re-emitted yet */
+		for (i = 0; i < net_entry_count && mc < MAX_NET_ENTRIES; i++) {
+			int dup = 0;
+			if (!netmenu_cat_in_set(net_entries[i].category, scats, scatn))
+				continue;
+			for (j = 0; j < src_count; j++) {
+				if (strcmp(src[j].category, net_entries[i].category) == 0 &&
+				    strcmp(src[j].group, net_entries[i].group) == 0 &&
+				    strcmp(src[j].subgroup, net_entries[i].subgroup) == 0) {
+					dup = 1;
+					break;
+				}
+			}
+			if (!dup)
+				merged[mc++] = net_entries[i];
+		}
+	}
+
+	/* The new stream is authoritative for the categories it covers */
+	for (i = 0; i < src_count && mc < MAX_NET_ENTRIES; i++)
+		merged[mc++] = src[i];
+
+	for (i = 0; i < mc; i++)
+		net_entries[i] = merged[i];
+	net_entry_count = mc;
+	netmenu_rebuild_categories();
 }
 
 /* Build the list of sub-topics (groups) for the currently selected category.
@@ -4172,6 +4283,75 @@ netmenu_cancel_load(void)
 	}
 }
 
+/* Re-parse the accumulated netmenu output and re-render, preserving the
+ * user's navigation position by name. Called while the child is still
+ * streaming output (incremental render, so "Buscar dispositivos" grows item
+ * by item) and once it exits (final render). The stream is merged into the
+ * live data instead of replacing it: a focused wifi/bt subcommand only
+ * carries one category, so the other category stays, and while the child is
+ * running the list only grows (a live rescan never blanks the networks or
+ * devices the user is looking at). */
+static void
+netmenu_reparse(void)
+{
+	NetEntry tmp[MAX_NET_ENTRIES];
+	int tmp_count;
+	char saved_cat[NET_CAT_LEN] = "";
+	char saved_group[NET_CAT_LEN] = "";
+	char saved_subgroup[NET_CAT_LEN] = "";
+	int keep = 0;
+	int gi;
+	int i;
+
+	/* Remember where the user was so a background reload doesn't jump */
+	if (net_current_category >= 0 && net_current_category < net_category_count) {
+		strncpy(saved_cat, net_categories[net_current_category], NET_CAT_LEN - 1);
+		saved_cat[NET_CAT_LEN - 1] = '\0';
+		if (net_current_group >= 0 && net_current_group < net_group_count)
+			strncpy(saved_group, net_groups[net_current_group], NET_CAT_LEN - 1);
+		if (net_current_subgroup >= 0 && net_current_subgroup < net_subgroup_count)
+			strncpy(saved_subgroup, net_subgroups[net_current_subgroup], NET_CAT_LEN - 1);
+		keep = 1;
+	}
+
+	netmenu_out[netmenu_out_len] = '\0';
+	tmp_count = netmenu_parse_buffer(netmenu_out, tmp, MAX_NET_ENTRIES);
+	netmenu_merge_parse(tmp, tmp_count, netmenu_child_pid > 0);
+
+	if (keep) {
+		net_current_category = -1;
+		for (i = 0; i < net_category_count; i++) {
+			if (strcmp(net_categories[i], saved_cat) == 0) {
+				net_current_category = i;
+				break;
+			}
+		}
+	}
+	netmenu_build_groups();
+	if (keep && net_current_category >= 0) {
+		net_current_group = -1;
+		for (gi = 0; gi < net_group_count; gi++) {
+			if (strcmp(net_groups[gi], saved_group) == 0) {
+				net_current_group = gi;
+				break;
+			}
+		}
+		if (net_current_group >= 0) {
+			net_current_subgroup = -1;
+			netmenu_build_subgroups();
+			net_group_has_sub = (net_subgroup_count > 0);
+			for (gi = 0; gi < net_subgroup_count; gi++) {
+				if (strcmp(net_subgroups[gi], saved_subgroup) == 0) {
+					net_current_subgroup = gi;
+					break;
+				}
+			}
+		}
+	}
+	if (netmenu_active)
+		updatenetmenu();
+}
+
 /* Read netmenu command output as it arrives; finalize when the child closes
  * the pipe (EOF). Never blocks the event loop. */
 static int
@@ -4185,26 +4365,27 @@ netmenu_read_cb(int fd, uint32_t mask, void *data)
 	(void)data;
 
 	while ((r = read(fd, buf, sizeof(buf))) > 0) {
-		if (netmenu_out_len + r < (int)sizeof(netmenu_out))
-			memcpy(netmenu_out + netmenu_out_len, buf, r);
-		netmenu_out_len += r;
-		if (netmenu_out_len >= (int)sizeof(netmenu_out)) {
-			netmenu_out_len = sizeof(netmenu_out) - 1;
+		ssize_t n = r;
+		if (netmenu_out_len + n > (int)sizeof(netmenu_out) - 1) {
+			n = (int)sizeof(netmenu_out) - 1 - netmenu_out_len;
 			done = 1;
-			break;
 		}
+		if (n > 0) {
+			memcpy(netmenu_out + netmenu_out_len, buf, n);
+			netmenu_out_len += n;
+		}
+		/* Stream while the child is still running: re-render as soon as a
+		 * complete line arrives so "Buscar dispositivos" grows live. Skip
+		 * chunks that end mid-line to avoid rendering a partial entry. */
+		if (!done && n > 0 && buf[n - 1] == '\n' && netmenu_active)
+			netmenu_reparse();
+		if (done)
+			break;
 	}
 	if (r == 0)
 		done = 1;
 
 	if (done) {
-		char saved_cat[NET_CAT_LEN] = "";
-		char saved_group[NET_CAT_LEN] = "";
-		char saved_subgroup[NET_CAT_LEN] = "";
-		int keep = 0;
-		int gi;
-		int i;
-
 		/* A reload invalidates any in-progress password entry */
 		net_password_reset();
 
@@ -4222,49 +4403,7 @@ netmenu_read_cb(int fd, uint32_t mask, void *data)
 			waitpid(netmenu_child_pid, NULL, WNOHANG);
 			netmenu_child_pid = -1;
 		}
-		/* Remember where the user was so a background reload doesn't jump */
-		if (net_current_category >= 0 && net_current_category < net_category_count) {
-			strncpy(saved_cat, net_categories[net_current_category], NET_CAT_LEN - 1);
-			saved_cat[NET_CAT_LEN - 1] = '\0';
-			if (net_current_group >= 0 && net_current_group < net_group_count)
-				strncpy(saved_group, net_groups[net_current_group], NET_CAT_LEN - 1);
-			if (net_current_subgroup >= 0 && net_current_subgroup < net_subgroup_count)
-				strncpy(saved_subgroup, net_subgroups[net_current_subgroup], NET_CAT_LEN - 1);
-			keep = 1;
-		}
-		netmenu_parse();
-		if (keep) {
-			net_current_category = -1;
-			for (i = 0; i < net_category_count; i++) {
-				if (strcmp(net_categories[i], saved_cat) == 0) {
-					net_current_category = i;
-					break;
-				}
-			}
-		}
-		netmenu_build_groups();
-		if (keep && net_current_category >= 0) {
-			net_current_group = -1;
-			for (gi = 0; gi < net_group_count; gi++) {
-				if (strcmp(net_groups[gi], saved_group) == 0) {
-					net_current_group = gi;
-					break;
-				}
-			}
-			if (net_current_group >= 0) {
-				net_current_subgroup = -1;
-				netmenu_build_subgroups();
-				net_group_has_sub = (net_subgroup_count > 0);
-				for (gi = 0; gi < net_subgroup_count; gi++) {
-					if (strcmp(net_subgroups[gi], saved_subgroup) == 0) {
-						net_current_subgroup = gi;
-						break;
-					}
-				}
-			}
-		}
-		if (netmenu_active)
-			updatenetmenu();
+		netmenu_reparse();
 	}
 	return 1;
 }
@@ -4295,22 +4434,42 @@ netmenu_refresh(void)
 	if (flags >= 0)
 		fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
 
-	pid = fork();
-	if (pid < 0) {
-		tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: fork() failed: %s\n", strerror(errno));
-		close(p[0]);
-		close(p[1]);
-		return;
-	}
-	if (pid == 0) {
-		/* Child: run the command, send stdout (and stderr) down the pipe */
-		setsid();
-		close(p[0]);
-		dup2(p[1], STDOUT_FILENO);
-		dup2(p[1], STDERR_FILENO);
-		close(p[1]);
-		execl("/bin/sh", "/bin/sh", "-c", netmenu_cmd, (char *)NULL);
-		_exit(127);
+	/* When focused on a search sub-topic, rescan only that section so the
+	 * refresh is short and streams quickly (tbwm-network bt / wifi instead
+	 * of the full two-category command). */
+	{
+		char cmd[576];
+		const char *sub = "";
+		netmenu_last_sub = netmenu_scan_is_active();
+		if (netmenu_last_sub) {
+			const char *g = net_groups[net_current_group];
+			if (strcmp(g, "Buscar dispositivos") == 0)
+				sub = " bt";
+			else if (strcmp(g, "Buscar red") == 0)
+				sub = " wifi";
+		}
+		if (sub[0])
+			snprintf(cmd, sizeof(cmd), "%s%s", netmenu_cmd, sub);
+		else
+			snprintf(cmd, sizeof(cmd), "%s", netmenu_cmd);
+
+		pid = fork();
+		if (pid < 0) {
+			tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: fork() failed: %s\n", strerror(errno));
+			close(p[0]);
+			close(p[1]);
+			return;
+		}
+		if (pid == 0) {
+			/* Child: run the command, send stdout (and stderr) down the pipe */
+			setsid();
+			close(p[0]);
+			dup2(p[1], STDOUT_FILENO);
+			dup2(p[1], STDERR_FILENO);
+			close(p[1]);
+			execl("/bin/sh", "/bin/sh", "-c", cmd, (char *)NULL);
+			_exit(127);
+		}
 	}
 
 	/* Parent */
@@ -4349,8 +4508,11 @@ netmenu_scan_keepalive(void *data)
 	(void)data;
 	if (netmenu_scan_is_active() && netmenu_child_pid <= 0) {
 		netmenu_refresh();
-		wl_event_source_timer_update(net_scan_timer, 8000);
 	}
+	/* Re-arm while on a search sub-topic even if the previous refresh is
+	 * still running, so the next fire picks it up as soon as it finishes. */
+	if (netmenu_scan_is_active())
+		wl_event_source_timer_update(net_scan_timer, 8000);
 	return 1;
 }
 
@@ -4368,6 +4530,7 @@ togglenetmenu(const Arg *arg)
 		net_subgroup_count = 0;
 		net_scroll_offset = 0;
 		net_selected_row = 0;
+		netmenu_last_sub = 0;
 		netmenu_refresh();
 	} else {
 		netmenu_cancel_load();
@@ -8604,6 +8767,12 @@ updatenetmenu(void)
 	if (net_scan_timer) {
 		wl_event_source_timer_update(net_scan_timer,
 			netmenu_scan_is_active() ? 8000 : 0);
+	}
+	/* Keep the scan in sync with where the user is: entering a search
+	 * sub-topic switches the next refresh to a focused subcommand so it
+	 * streams quickly; leaving it restores the full two-category list. */
+	if (netmenu_scan_is_active() != netmenu_last_sub && netmenu_child_pid <= 0) {
+		netmenu_refresh();
 	}
 
 	/* Reuse cached buffer or allocate new one */
