@@ -1375,7 +1375,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..cc14347 100644
+index a1e049d..3d9e121 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -17,8 +17,10 @@
@@ -1389,7 +1389,7 @@ index a1e049d..cc14347 100644
  #include <wayland-server-core.h>
  #include <wlr/backend.h>
  #include <wlr/backend/libinput.h>
-@@ -440,6 +442,22 @@ static void updatebar(Monitor *m);
+@@ -440,6 +442,23 @@ static void updatebar(Monitor *m);
  static void updatebars(void);
  static void updateappmenu(void);
  static int appmenu_item_count(void);
@@ -1406,13 +1406,14 @@ index a1e049d..cc14347 100644
 +static void togglethememenu(const Arg *arg);
 +static int thememenu_key(xkb_keysym_t sym);
 +static void updatethememenu(void);
++static void theme_persist(void);
 +static s7_pointer scm_toggle_thememenu(s7_scheme *sc, s7_pointer args);
 +static int netmenu_scan_keepalive(void *data);
 +static int netmenu_scan_is_active(void);
  static int timingtimer(void *data);
  static int bartimer(void *data);
  static int scrolltimer(void *data);
-@@ -505,7 +523,11 @@ static int launcher_active = 0;
+@@ -505,7 +524,11 @@ static int launcher_active = 0;
  static char launcher_input[256] = {0};
  static int launcher_input_len = 0;
  static int launcher_selection = 0;
@@ -1425,7 +1426,7 @@ index a1e049d..cc14347 100644
  static int app_cache_count = 0;
  
  /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
-@@ -640,6 +662,7 @@ static int signal_fd = -1;
+@@ -640,6 +663,7 @@ static int signal_fd = -1;
  static struct wl_event_source *signal_fd_source = NULL;
  
  static struct wl_event_source *bar_timer = NULL;
@@ -1433,7 +1434,7 @@ index a1e049d..cc14347 100644
  static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
  static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
  static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
-@@ -649,7 +672,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
+@@ -649,7 +673,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
  static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
  
  /* REPL state */
@@ -1442,7 +1443,7 @@ index a1e049d..cc14347 100644
  static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
  static char repl_input[1024] = {0};      /* current input line */
  static int repl_input_len = 0;
-@@ -706,12 +729,85 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
+@@ -706,12 +730,85 @@ static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
  static uint32_t cfg_menu_color = 0xaaaaaa;         /* grey menu background */
  static uint32_t cfg_menu_text_color = 0x000000;    /* black menu text */
  static char cfg_menu_button[16] = "X";             /* app menu button label */
@@ -1528,7 +1529,7 @@ index a1e049d..cc14347 100644
  /* App launcher data structures */
  #define MAX_APPS 512
  #define MAX_CATEGORIES 32
-@@ -857,6 +953,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
+@@ -857,6 +954,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
  };
  
  static pid_t child_pid = -1;
@@ -1536,7 +1537,7 @@ index a1e049d..cc14347 100644
  static int locked;
  static void *exclusive_focus;
  static struct wl_display *dpy;
-@@ -1304,6 +1401,51 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1304,6 +1402,51 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -1588,7 +1589,7 @@ index a1e049d..cc14347 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1517,141 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1518,141 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -1730,7 +1731,7 @@ index a1e049d..cc14347 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1591,6 +1868,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+@@ -1591,6 +1869,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
  	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
  }
  
@@ -1799,7 +1800,7 @@ index a1e049d..cc14347 100644
  void
  cleanup(void)
  {
-@@ -1606,6 +1945,13 @@ cleanup(void)
+@@ -1606,6 +1946,13 @@ cleanup(void)
  		kill(-child_pid, SIGTERM);
  		waitpid(child_pid, NULL, 0);
  	}
@@ -1813,7 +1814,7 @@ index a1e049d..cc14347 100644
  	wlr_xcursor_manager_destroy(cursor_mgr);
  
  	/* Clean up glyph cache bitmaps */
-@@ -1633,6 +1979,27 @@ cleanup(void)
+@@ -1633,6 +1980,27 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -1841,7 +1842,7 @@ index a1e049d..cc14347 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +2049,6 @@ cleanup(void)
+@@ -1682,9 +2050,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -1851,7 +1852,7 @@ index a1e049d..cc14347 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -3191,9 +3555,10 @@ void
+@@ -3191,9 +3556,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -1865,7 +1866,7 @@ index a1e049d..cc14347 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +3731,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +3732,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -1891,7 +1892,7 @@ index a1e049d..cc14347 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +3759,9 @@ launcher_get_match(int index)
+@@ -3382,9 +3760,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -1903,7 +1904,7 @@ index a1e049d..cc14347 100644
  			count++;
  		}
  	}
-@@ -3586,95 +3963,855 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,95 +3964,855 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -2824,7 +2825,7 @@ index a1e049d..cc14347 100644
  	 * instead of the XF86Switch_VT_* keysyms. Handle that scenario here so VT
  	 * switching works regardless of the specific keysym produced.
  	 */
-@@ -4043,6 +5180,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+@@ -4043,6 +5181,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  		/* If compositor entered screenshot-grab mode, forward motion only to the
  		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
  		if (screenshot_mode) {
@@ -2837,7 +2838,7 @@ index a1e049d..cc14347 100644
  			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
  			if (cursor && cursor_mgr)
  				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
-@@ -4075,6 +5218,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
+@@ -4075,6 +5219,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
  				}
  			}
  		}
@@ -2867,7 +2868,7 @@ index a1e049d..cc14347 100644
  	}
  
  	/* Update drag icon's position */
-@@ -4609,6 +5775,17 @@ run(char *startup_cmd)
+@@ -4609,6 +5776,17 @@ run(char *startup_cmd)
  	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
  	wl_event_source_timer_update(timing_timer, 500);
  
@@ -2885,7 +2886,7 @@ index a1e049d..cc14347 100644
  	/* Run on-startup commands from config */
  	run_startup_commands();
  
-@@ -5530,6 +6707,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
+@@ -5530,6 +6708,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
  	repl_add_line("(tag-window N)     - move window to tag N");
  	repl_add_line("(reload-config)    - reload config.scm");
  	repl_add_line("(bind-key K F)     - bind key to function");
@@ -2893,7 +2894,7 @@ index a1e049d..cc14347 100644
  	repl_add_line("=== Appearance ===");
  	repl_add_line("(set-background-color C) - highlight/bg color");
  	repl_add_line("(set-border-line-color C)- box-drawing color");
-@@ -5846,6 +7024,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
+@@ -5846,6 +7025,20 @@ static s7_pointer scm_toggle_appmenu(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -2914,7 +2915,7 @@ index a1e049d..cc14347 100644
  /* Scheme: (set-menu-button "text") - set the app menu button label */
  static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-@@ -5855,8 +7047,17 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
+@@ -5855,8 +7048,17 @@ static s7_pointer scm_set_menu_button(s7_scheme *sc, s7_pointer args) {
  	return s7_t(sc);
  }
  
@@ -2934,7 +2935,7 @@ index a1e049d..cc14347 100644
  /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
  static s7_pointer scm_set_tag_count(s7_scheme *sc, s7_pointer args) {
  	int n;
-@@ -6209,7 +7410,11 @@ setup_scheme(void)
+@@ -6209,7 +7411,11 @@ setup_scheme(void)
  	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB\") set app menu background color");
  	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB\") set app menu text color");
  	s7_define_function(sc, "set-menu-button", scm_set_menu_button, 1, 0, false, "(set-menu-button \"text\") set app menu button label in bar");
@@ -2946,7 +2947,7 @@ index a1e049d..cc14347 100644
  	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
  	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
  	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
-@@ -6392,6 +7597,11 @@ static const char *default_config_parts[] = {
+@@ -6392,6 +7598,11 @@ static const char *default_config_parts[] = {
  "(bind-key \"Print\" (lambda () (spawn-grab \"sh -c 'grim - | wl-copy'\")))\n"
  "(bind-key \"S-Print\" (lambda () (spawn-grab \"sh -c 'grim -g \\\"$(slurp)\\\" - | wl-copy'\")))\n"
  "\n"
@@ -2958,7 +2959,7 @@ index a1e049d..cc14347 100644
  ";; Volume control (requires wpctl/wireplumber)\n"
  "(bind-key \"XF86AudioRaiseVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\")))\n"
  "(bind-key \"XF86AudioLowerVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-\")))\n"
-@@ -6416,62 +7626,7 @@ static const char *default_config_parts[] = {
+@@ -6416,62 +7627,7 @@ static const char *default_config_parts[] = {
  "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
  "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
  "\n"
@@ -3022,7 +3023,26 @@ index a1e049d..cc14347 100644
  "\n"
  ";; Advanced setters (examples - not necessarily key bound):\n"
  ";; (set-border-width 2)\n"
-@@ -6664,69 +7819,151 @@ setup_foot_config(void)
+@@ -6543,6 +7699,18 @@ load_config(void)
+ 		unbind_all_scheme_bindings();
+ 		clear_mouse_bindings_internal();
+ 		s7_load(sc, path);
++		/* Apply saved theme colors (from M-t menu) after the main config */
++		{
++			char tpath[1024];
++			FILE *tf;
++			snprintf(tpath, sizeof(tpath), "%s/theme.scm", dir);
++			tf = fopen(tpath, "r");
++			if (tf) {
++				fclose(tf);
++				tbwm_log(TBWM_LOG_INFO, "tbwm: applying saved theme from %s\n", tpath);
++				s7_load(sc, tpath);
++			}
++		}
+ 		/* Ensure arrow swap bindings exist (guard against config truncation/parsing issues) */
+ 		file_debug_log("tbwm-scm: ensuring M-S-Left/Right/Up/Down are bound\n");
+ 		s7_eval_c_string(sc, "(bind-key \"M-S-Left\" (lambda () (swap-dir DIR-LEFT)))");
+@@ -6664,69 +7832,151 @@ setup_foot_config(void)
  static int
  app_compare(const void *a, const void *b)
  {
@@ -3221,7 +3241,7 @@ index a1e049d..cc14347 100644
  	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
  }
  
-@@ -6891,6 +8128,7 @@ void
+@@ -6891,6 +8141,7 @@ void
  togglerepl(const Arg *arg)
  {
  	repl_input_active = !repl_input_active;
@@ -3229,7 +3249,7 @@ index a1e049d..cc14347 100644
  	repl_input[0] = '\0';
  	repl_input_len = 0;
  	updatebars();
-@@ -7068,12 +8306,20 @@ load_applications(void)
+@@ -7068,12 +8319,20 @@ load_applications(void)
  	/* Scan system applications */
  	scan_desktop_dir("/usr/share/applications");
  	scan_desktop_dir("/usr/local/share/applications");
@@ -3250,27 +3270,13 @@ index a1e049d..cc14347 100644
  	}
  	
  	/* Sort apps and categories */
-@@ -7225,31 +8471,485 @@ updateappmenu(void)
- 							pixels[py * menu_width + px] = highlight_bg;
- 						}
- 					}
--				}
--				
--				/* Draw category name */
--				for (ci = 0; cat_name[ci] && ci < max_text_len; ci++) {
--					render_char_to_buffer(pixels, menu_width, menu_height,
--						text_x + ci * cell_width, text_y,
--						cat_name[ci], row_fg);
-+				}
-+				
-+				/* Draw category name */
-+				for (ci = 0; cat_name[ci] && ci < max_text_len; ci++) {
-+					render_char_to_buffer(pixels, menu_width, menu_height,
-+						text_x + ci * cell_width, text_y,
-+						cat_name[ci], row_fg);
-+				}
-+			}
-+		} else {
+@@ -7235,21 +8494,475 @@ updateappmenu(void)
+ 				}
+ 			}
+ 		} else {
+-			/* Show apps in selected category */
+-			const char *selected_cat = categories[menu_current_category].name;
+-			int app_idx = 0;
 +			/* Show apps in selected category */
 +			const char *selected_cat = categories[menu_current_category].name;
 +			int app_idx = 0;
@@ -3719,12 +3725,9 @@ index a1e049d..cc14347 100644
 +							(unsigned char)sn[ni2], row_fg);
 +					}
 +					displayed++;
- 				}
- 			}
- 		} else {
--			/* Show apps in selected category */
--			const char *selected_cat = categories[menu_current_category].name;
--			int app_idx = 0;
++				}
++			}
++		} else {
 +			/* Show actions of the selected sub-topic (direct) or of a specific
 +			 * entity. The < Back> row returns to the appropriate upper level. */
 +			const char *cat = net_categories[net_current_category];
@@ -3749,7 +3752,7 @@ index a1e049d..cc14347 100644
  				if (is_selected) {
  					int px, py;
  					for (py = text_y; py < text_y + cell_height; py++) {
-@@ -7258,26 +8958,27 @@ updateappmenu(void)
+@@ -7258,26 +8971,27 @@ updateappmenu(void)
  						}
  					}
  				}
@@ -3790,7 +3793,7 @@ index a1e049d..cc14347 100644
  						if (is_selected) {
  							int px, py;
  							for (py = text_y; py < text_y + cell_height; py++) {
-@@ -7286,35 +8987,445 @@ updateappmenu(void)
+@@ -7286,35 +9000,478 @@ updateappmenu(void)
  								}
  							}
  						}
@@ -3848,12 +3851,12 @@ index a1e049d..cc14347 100644
 +#define THEME_PALETTE_COUNT 12
 +
 +static const char *const themetarget_names[THEME_TARGET_COUNT] = {
-+	"Marco (fondo)", "Marco (lineas)", "Barra (fondo)",
-+	"Barra (texto)", "Fondo general", "Texto general"
++	"Marco", "Lineas", "Barra",
++	"BarraTxt", "Fondo", "Texto"
 +};
 +static const char *const themepalette_names[THEME_PALETTE_COUNT] = {
 +	"Rojo", "Verde", "Azul", "Amarillo", "Cian", "Magenta",
-+	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Gris oscuro"
++	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Oscuro"
 +};
 +static const uint32_t themepalette_rgb[THEME_PALETTE_COUNT] = {
 +	0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff,
@@ -3889,6 +3892,7 @@ index a1e049d..cc14347 100644
 +	case TT_BG_TEXT:     cfg_bg_text_color = rgb;     updaterepl(); break;
 +	}
 +	updatebars();
++	theme_persist();
 +	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: %s -> #%06x\n",
 +		themetarget_names[thememenu_target], rgb);
 +}
@@ -3898,6 +3902,39 @@ index a1e049d..cc14347 100644
 +thememenu_apply_hex(const char *hexstr)
 +{
 +	thememenu_apply_rgb(parse_color_rgb(hexstr));
++}
++
++/* Persist the six theme colors to ~/.config/tbwm/theme.scm so they survive a
++ * session restart. The file is plain Scheme, evaluated after config.scm. */
++static void
++theme_persist(void)
++{
++	char path[1024], dir[512];
++	const char *home = getenv("HOME");
++	FILE *f;
++
++	if (!home)
++		return;
++
++	snprintf(dir, sizeof(dir), "%s/.config/tbwm", home);
++	snprintf(path, sizeof(path), "%s/theme.scm", dir);
++	mkdir(dir, 0755);
++
++	f = fopen(path, "w");
++	if (!f) {
++		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
++		return;
++	}
++	fprintf(f, ";;; Theme colors picked with the in-WM theme menu (M-t).\n");
++	fprintf(f, ";;; Editable by hand; reloaded with (reload-config).\n");
++	fprintf(f, "(set-bg-color \"#%06x\")\n", cfg_bg_color);
++	fprintf(f, "(set-bg-text-color \"#%06x\")\n", cfg_bg_text_color);
++	fprintf(f, "(set-border-color \"#%06x\")\n", cfg_border_color);
++	fprintf(f, "(set-border-line-color \"#%06x\")\n", cfg_border_line_color);
++	fprintf(f, "(set-bar-color \"#%06x\")\n", cfg_bar_color);
++	fprintf(f, "(set-bar-text-color \"#%06x\")\n", cfg_bar_text_color);
++	fclose(f);
++	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: persisted theme to %s\n", path);
 +}
 +
 +/* Draw one content row. `row` is 0-based content line under the title bar.
@@ -3911,12 +3948,16 @@ index a1e049d..cc14347 100644
 +	int text_y = (row + 1) * cell_height;
 +	int limit = menu_width / cell_width - 2;
 +	int ci, px, py;
++	int swatch_cells = 3;
 +
 +	if (is_selected)
 +		for (py = text_y; py < text_y + cell_height; py++)
 +			for (px = cell_width; px < menu_width - cell_width; px++)
 +				pixels[py * menu_width + px] = hi_bg;
 +
++	/* clamp text so it never runs under the swatch */
++	if (swatch)
++		limit -= swatch_cells;
 +	for (ci = 0; text[ci] && ci < limit; ci++)
 +		render_char_to_buffer(pixels, menu_width, menu_height,
 +			cell_width + ci * cell_width, text_y,
@@ -3924,7 +3965,7 @@ index a1e049d..cc14347 100644
 +
 +	if (swatch) {
 +		uint32_t sc = RGB_TO_ARGB(*swatch);
-+		int sx = menu_width - cell_width * 5;
++		int sx = menu_width - cell_width * (swatch_cells + 1);
 +		int ex = menu_width - cell_width;
 +		for (py = text_y; py < text_y + cell_height; py++)
 +			for (px = sx; px < ex; px++)
@@ -3938,7 +3979,7 @@ index a1e049d..cc14347 100644
 +{
 +	struct TitleBuffer *tb;
 +	uint32_t *pixels;
-+	int menu_cells_w = 25;
++	int menu_cells_w = 13;
 +	int menu_cells_h = 25;
 +	int menu_width, menu_height;
 +	int i, x, y, col, row, cur_row = 0, ci;
@@ -3996,7 +4037,7 @@ index a1e049d..cc14347 100644
 +	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
 +
 +	snprintf(title, sizeof(title), "%s",
-+		thememenu_palette_mode ? "Color: elige / Custom" : "Tema: que cambiar");
++		thememenu_palette_mode ? "Color" : "Tema");
 +	{
 +		int tl = (int)strlen(title);
 +		int ts = 2;
@@ -4037,17 +4078,12 @@ index a1e049d..cc14347 100644
 +			int is_sel = (row == thememenu_selected_row);
 +			if (item < THEME_PALETTE_COUNT) {
 +				uint32_t rgb = themepalette_rgb[item];
-+				char buf[28];
-+				snprintf(buf, sizeof(buf), "%s #%06x",
-+					themepalette_names[item], rgb);
 +				thememenu_row(pixels, menu_width, menu_height, cur_row,
-+					buf, is_sel, text_color, hi_bg, hi_fg, &rgb);
++					themepalette_names[item], is_sel, text_color, hi_bg, hi_fg, &rgb);
 +			} else {
 +				uint32_t cur = thememenu_target_color(thememenu_target);
-+				char buf[36];
-+				snprintf(buf, sizeof(buf), "Custom... (#%06x)", cur);
 +				thememenu_row(pixels, menu_width, menu_height, cur_row,
-+					buf, is_sel, text_color, hi_bg, hi_fg, NULL);
++					"Custom", is_sel, text_color, hi_bg, hi_fg, &cur);
 +			}
 +			cur_row++;
 +		}
@@ -4058,9 +4094,9 @@ index a1e049d..cc14347 100644
 +			int limit = menu_width / cell_width - 2;
 +			int ci;
 +			if (thememenu_hex_len > 0)
-+				snprintf(hint, sizeof(hint), "  > #%s_", thememenu_hex);
++				snprintf(hint, sizeof(hint), "#%s_", thememenu_hex);
 +			else
-+				snprintf(hint, sizeof(hint), "  Enter aplica | escribe hex");
++				snprintf(hint, sizeof(hint), "hex+Enter");
 +			for (ci = 0; hint[ci] && ci < limit; ci++)
 +				render_char_to_buffer(pixels, menu_width, menu_height,
 +					cell_width + ci * cell_width, text_y,
@@ -4251,7 +4287,7 @@ index a1e049d..cc14347 100644
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
  void
  reload_config_key(const Arg *arg)
-@@ -7412,9 +9523,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +9569,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -4263,7 +4299,7 @@ index a1e049d..cc14347 100644
  		return 1;
  	}
  
-@@ -7643,37 +9756,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +9802,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -4326,7 +4362,7 @@ index a1e049d..cc14347 100644
  			}
  		}
  	} else {
-@@ -7884,66 +9997,98 @@ render_tabs:
+@@ -7884,66 +10043,98 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -4470,7 +4506,7 @@ index a1e049d..cc14347 100644
  				}
  			}
  		}
-@@ -9561,6 +11706,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +11752,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  

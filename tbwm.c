@@ -455,6 +455,7 @@ static int netmenukey(xkb_keysym_t sym);
 static void togglethememenu(const Arg *arg);
 static int thememenu_key(xkb_keysym_t sym);
 static void updatethememenu(void);
+static void theme_persist(void);
 static s7_pointer scm_toggle_thememenu(s7_scheme *sc, s7_pointer args);
 static int netmenu_scan_keepalive(void *data);
 static int netmenu_scan_is_active(void);
@@ -7698,6 +7699,18 @@ load_config(void)
 		unbind_all_scheme_bindings();
 		clear_mouse_bindings_internal();
 		s7_load(sc, path);
+		/* Apply saved theme colors (from M-t menu) after the main config */
+		{
+			char tpath[1024];
+			FILE *tf;
+			snprintf(tpath, sizeof(tpath), "%s/theme.scm", dir);
+			tf = fopen(tpath, "r");
+			if (tf) {
+				fclose(tf);
+				tbwm_log(TBWM_LOG_INFO, "tbwm: applying saved theme from %s\n", tpath);
+				s7_load(sc, tpath);
+			}
+		}
 		/* Ensure arrow swap bindings exist (guard against config truncation/parsing issues) */
 		file_debug_log("tbwm-scm: ensuring M-S-Left/Right/Up/Down are bound\n");
 		s7_eval_c_string(sc, "(bind-key \"M-S-Left\" (lambda () (swap-dir DIR-LEFT)))");
@@ -9026,12 +9039,12 @@ enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT };
 #define THEME_PALETTE_COUNT 12
 
 static const char *const themetarget_names[THEME_TARGET_COUNT] = {
-	"Marco (fondo)", "Marco (lineas)", "Barra (fondo)",
-	"Barra (texto)", "Fondo general", "Texto general"
+	"Marco", "Lineas", "Barra",
+	"BarraTxt", "Fondo", "Texto"
 };
 static const char *const themepalette_names[THEME_PALETTE_COUNT] = {
 	"Rojo", "Verde", "Azul", "Amarillo", "Cian", "Magenta",
-	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Gris oscuro"
+	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Oscuro"
 };
 static const uint32_t themepalette_rgb[THEME_PALETTE_COUNT] = {
 	0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff,
@@ -9067,6 +9080,7 @@ thememenu_apply_rgb(uint32_t rgb)
 	case TT_BG_TEXT:     cfg_bg_text_color = rgb;     updaterepl(); break;
 	}
 	updatebars();
+	theme_persist();
 	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: %s -> #%06x\n",
 		themetarget_names[thememenu_target], rgb);
 }
@@ -9076,6 +9090,39 @@ static void
 thememenu_apply_hex(const char *hexstr)
 {
 	thememenu_apply_rgb(parse_color_rgb(hexstr));
+}
+
+/* Persist the six theme colors to ~/.config/tbwm/theme.scm so they survive a
+ * session restart. The file is plain Scheme, evaluated after config.scm. */
+static void
+theme_persist(void)
+{
+	char path[1024], dir[512];
+	const char *home = getenv("HOME");
+	FILE *f;
+
+	if (!home)
+		return;
+
+	snprintf(dir, sizeof(dir), "%s/.config/tbwm", home);
+	snprintf(path, sizeof(path), "%s/theme.scm", dir);
+	mkdir(dir, 0755);
+
+	f = fopen(path, "w");
+	if (!f) {
+		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
+		return;
+	}
+	fprintf(f, ";;; Theme colors picked with the in-WM theme menu (M-t).\n");
+	fprintf(f, ";;; Editable by hand; reloaded with (reload-config).\n");
+	fprintf(f, "(set-bg-color \"#%06x\")\n", cfg_bg_color);
+	fprintf(f, "(set-bg-text-color \"#%06x\")\n", cfg_bg_text_color);
+	fprintf(f, "(set-border-color \"#%06x\")\n", cfg_border_color);
+	fprintf(f, "(set-border-line-color \"#%06x\")\n", cfg_border_line_color);
+	fprintf(f, "(set-bar-color \"#%06x\")\n", cfg_bar_color);
+	fprintf(f, "(set-bar-text-color \"#%06x\")\n", cfg_bar_text_color);
+	fclose(f);
+	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: persisted theme to %s\n", path);
 }
 
 /* Draw one content row. `row` is 0-based content line under the title bar.
@@ -9089,12 +9136,16 @@ thememenu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
 	int text_y = (row + 1) * cell_height;
 	int limit = menu_width / cell_width - 2;
 	int ci, px, py;
+	int swatch_cells = 3;
 
 	if (is_selected)
 		for (py = text_y; py < text_y + cell_height; py++)
 			for (px = cell_width; px < menu_width - cell_width; px++)
 				pixels[py * menu_width + px] = hi_bg;
 
+	/* clamp text so it never runs under the swatch */
+	if (swatch)
+		limit -= swatch_cells;
 	for (ci = 0; text[ci] && ci < limit; ci++)
 		render_char_to_buffer(pixels, menu_width, menu_height,
 			cell_width + ci * cell_width, text_y,
@@ -9102,7 +9153,7 @@ thememenu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
 
 	if (swatch) {
 		uint32_t sc = RGB_TO_ARGB(*swatch);
-		int sx = menu_width - cell_width * 5;
+		int sx = menu_width - cell_width * (swatch_cells + 1);
 		int ex = menu_width - cell_width;
 		for (py = text_y; py < text_y + cell_height; py++)
 			for (px = sx; px < ex; px++)
@@ -9116,7 +9167,7 @@ updatethememenu(void)
 {
 	struct TitleBuffer *tb;
 	uint32_t *pixels;
-	int menu_cells_w = 25;
+	int menu_cells_w = 13;
 	int menu_cells_h = 25;
 	int menu_width, menu_height;
 	int i, x, y, col, row, cur_row = 0, ci;
@@ -9174,7 +9225,7 @@ updatethememenu(void)
 	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
 
 	snprintf(title, sizeof(title), "%s",
-		thememenu_palette_mode ? "Color: elige / Custom" : "Tema: que cambiar");
+		thememenu_palette_mode ? "Color" : "Tema");
 	{
 		int tl = (int)strlen(title);
 		int ts = 2;
@@ -9215,17 +9266,12 @@ updatethememenu(void)
 			int is_sel = (row == thememenu_selected_row);
 			if (item < THEME_PALETTE_COUNT) {
 				uint32_t rgb = themepalette_rgb[item];
-				char buf[28];
-				snprintf(buf, sizeof(buf), "%s #%06x",
-					themepalette_names[item], rgb);
 				thememenu_row(pixels, menu_width, menu_height, cur_row,
-					buf, is_sel, text_color, hi_bg, hi_fg, &rgb);
+					themepalette_names[item], is_sel, text_color, hi_bg, hi_fg, &rgb);
 			} else {
 				uint32_t cur = thememenu_target_color(thememenu_target);
-				char buf[36];
-				snprintf(buf, sizeof(buf), "Custom... (#%06x)", cur);
 				thememenu_row(pixels, menu_width, menu_height, cur_row,
-					buf, is_sel, text_color, hi_bg, hi_fg, NULL);
+					"Custom", is_sel, text_color, hi_bg, hi_fg, &cur);
 			}
 			cur_row++;
 		}
@@ -9236,9 +9282,9 @@ updatethememenu(void)
 			int limit = menu_width / cell_width - 2;
 			int ci;
 			if (thememenu_hex_len > 0)
-				snprintf(hint, sizeof(hint), "  > #%s_", thememenu_hex);
+				snprintf(hint, sizeof(hint), "#%s_", thememenu_hex);
 			else
-				snprintf(hint, sizeof(hint), "  Enter aplica | escribe hex");
+				snprintf(hint, sizeof(hint), "hex+Enter");
 			for (ci = 0; hint[ci] && ci < limit; ci++)
 				render_char_to_buffer(pixels, menu_width, menu_height,
 					cell_width + ci * cell_width, text_y,
