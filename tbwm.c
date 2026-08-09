@@ -9168,7 +9168,7 @@ updatethememenu(void)
 	struct TitleBuffer *tb;
 	uint32_t *pixels;
 	int menu_cells_w = 13;
-	int menu_cells_h = 25;
+	int menu_cells_h = thememenu_palette_mode ? 16 : 8;
 	int menu_width, menu_height;
 	int i, x, y, col, row, cur_row = 0, ci;
 	uint32_t frame_bg, line_color, content_bg, text_color, hi_bg, hi_fg;
@@ -9195,6 +9195,17 @@ updatethememenu(void)
 	hi_fg      = line_color;
 
 	if (!thememenu_tb) {
+		thememenu_tb = ecalloc(1, sizeof(*thememenu_tb));
+		thememenu_tb->stride = menu_width * 4;
+		thememenu_tb->data = ecalloc(1, thememenu_tb->stride * menu_height);
+		wlr_buffer_init(&thememenu_tb->base, &titlebuf_impl, menu_width, menu_height);
+		titlebuf_alloc_count++;
+	} else if (thememenu_tb->base.width != (size_t)menu_width ||
+	           thememenu_tb->base.height != (size_t)menu_height) {
+		/* Height differs between the two menu levels: rebuild the cached buffer */
+		if (thememenu_buffer)
+			wlr_scene_buffer_set_buffer(thememenu_buffer, NULL);
+		wlr_buffer_drop(&thememenu_tb->base);
 		thememenu_tb = ecalloc(1, sizeof(*thememenu_tb));
 		thememenu_tb->stride = menu_width * 4;
 		thememenu_tb->data = ecalloc(1, thememenu_tb->stride * menu_height);
