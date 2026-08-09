@@ -165,6 +165,7 @@ if command -v bluetoothctl >/dev/null 2>&1; then
     paired="$(bluetoothctl devices Paired 2>/dev/null)"
     connected="$(bluetoothctl devices Connected 2>/dev/null)"
     devices="$(mktemp)"
+    scanmacs="$(mktemp)"
     bluetoothctl devices 2>/dev/null > "$devices"
 
     # Merge newly discovered devices (from the scan output) into the list so
@@ -188,6 +189,7 @@ if command -v bluetoothctl >/dev/null 2>&1; then
                 *RSSI:*|*\[CHG\]*|Device*) continue;;
             esac
             [ -n "$name" ] || continue
+            printf '%s\n' "$mac" >> "$scanmacs"
             if ! grep -q " $mac " "$devices"; then
                 printf 'Device %s %s\n' "$mac" "$name" >> "$devices"
             fi
@@ -229,6 +231,12 @@ $mac"
                 printf 'Bluetooth\tEmparejados\t%s\tConectar\tbluetoothctl connect %s\n' "$nq" "$mac"
                 printf 'Bluetooth\tEmparejados\t%s\tOlvidar\tbluetoothctl remove %s\n' "$nq" "$mac"
             else
+                # Only show "Buscar dispositivos" for devices seen in the
+                # CURRENT scan; stale remembered devices that are no longer in
+                # range (or no longer visible) would stay forever in the list.
+                if ! grep -qxF "$mac" "$scanmacs"; then
+                    continue
+                fi
                 has_discovered=1
                 printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
             fi
@@ -239,7 +247,7 @@ $mac"
     else
         printf 'Bluetooth\t\t\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
     fi
-rm -f "$devices" "$btout"
+rm -f "$devices" "$btout" "$scanmacs"
 else
     printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 fi
