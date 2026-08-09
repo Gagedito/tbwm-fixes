@@ -7264,17 +7264,12 @@ static s7_pointer scm_set_bar_autohide(s7_scheme *sc, s7_pointer args) {
 	return s7_t(sc);
 }
 
-/* Scheme: (on-startup cmd1 cmd2 ...) - register commands to run on startup */
+/* Scheme: (on-startup cmd1 cmd2 ...) - register commands to run on startup.
+ * Each call APPENDS to the list so multiple (on-startup ...) forms in the
+ * config all take effect (previously a later form cleared the earlier ones). */
 static s7_pointer scm_on_startup(s7_scheme *sc, s7_pointer args) {
 	s7_pointer arg;
-	/* Clear existing startup commands */
-	for (int i = 0; i < cfg_startup_cmd_count; i++) {
-		free(cfg_startup_cmds[i]);
-		cfg_startup_cmds[i] = NULL;
-	}
-	cfg_startup_cmd_count = 0;
-	
-	/* Collect all string arguments */
+	/* Collect all string arguments, appending up to the cap */
 	for (arg = args; s7_is_pair(arg) && cfg_startup_cmd_count < MAX_STARTUP_CMDS; arg = s7_cdr(arg)) {
 		if (s7_is_string(s7_car(arg))) {
 			cfg_startup_cmds[cfg_startup_cmd_count] = strdup(s7_string(s7_car(arg)));
@@ -7649,8 +7644,7 @@ static const char *default_config_parts[] = {
 "\n"
 ";; Start the PipeWire audio stack and the dynamic wallpaper (scripts\n"
 ";; installed into PATH by install.sh: tbwm-audio, tbwm-wallpaper)\n"
-"(on-startup \"tbwm-audio\")\n"
-"(on-startup \"tbwm-wallpaper\")\n"
+"(on-startup \"tbwm-audio\" \"tbwm-wallpaper\")\n"
 "\n"
 ";;;; ==================== STATUS BAR ====================\n"
 "\n"
@@ -7873,6 +7867,12 @@ load_config(void)
 		tbwm_log(TBWM_LOG_INFO, "tbwm: clearing %d scheme bindings and %d mouse bindings before loading config\n", scheme_binding_count, cfg_mouse_binding_count);
 		unbind_all_scheme_bindings();
 		clear_mouse_bindings_internal();
+		/* Reset startup command list so a (reload-config) does not accumulate */
+		for (int i = 0; i < cfg_startup_cmd_count; i++) {
+			free(cfg_startup_cmds[i]);
+			cfg_startup_cmds[i] = NULL;
+		}
+		cfg_startup_cmd_count = 0;
 		s7_load(sc, path);
 		/* Apply saved theme colors (from M-t menu) after the main config */
 		{

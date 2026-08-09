@@ -1436,7 +1436,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..4a54961 100644
+index a1e049d..65a1473 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -17,8 +17,10 @@
@@ -3157,7 +3157,29 @@ index a1e049d..4a54961 100644
  /* ========== END COLOR CONFIG API ========== */
  
  /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
-@@ -6209,7 +7574,11 @@ setup_scheme(void)
+@@ -5899,17 +7264,12 @@ static s7_pointer scm_set_bar_autohide(s7_scheme *sc, s7_pointer args) {
+ 	return s7_t(sc);
+ }
+ 
+-/* Scheme: (on-startup cmd1 cmd2 ...) - register commands to run on startup */
++/* Scheme: (on-startup cmd1 cmd2 ...) - register commands to run on startup.
++ * Each call APPENDS to the list so multiple (on-startup ...) forms in the
++ * config all take effect (previously a later form cleared the earlier ones). */
+ static s7_pointer scm_on_startup(s7_scheme *sc, s7_pointer args) {
+ 	s7_pointer arg;
+-	/* Clear existing startup commands */
+-	for (int i = 0; i < cfg_startup_cmd_count; i++) {
+-		free(cfg_startup_cmds[i]);
+-		cfg_startup_cmds[i] = NULL;
+-	}
+-	cfg_startup_cmd_count = 0;
+-	
+-	/* Collect all string arguments */
++	/* Collect all string arguments, appending up to the cap */
+ 	for (arg = args; s7_is_pair(arg) && cfg_startup_cmd_count < MAX_STARTUP_CMDS; arg = s7_cdr(arg)) {
+ 		if (s7_is_string(s7_car(arg))) {
+ 			cfg_startup_cmds[cfg_startup_cmd_count] = strdup(s7_string(s7_car(arg)));
+@@ -6209,7 +7569,11 @@ setup_scheme(void)
  	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB\") set app menu background color");
  	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB\") set app menu text color");
  	s7_define_function(sc, "set-menu-button", scm_set_menu_button, 1, 0, false, "(set-menu-button \"text\") set app menu button label in bar");
@@ -3169,19 +3191,18 @@ index a1e049d..4a54961 100644
  	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
  	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
  	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
-@@ -6278,6 +7647,11 @@ static const char *default_config_parts[] = {
+@@ -6278,6 +7642,10 @@ static const char *default_config_parts[] = {
  ";; Uncomment and customize as needed:\n"
  ";; (on-startup \"waybar\" \"mako\" \"foot --server\")\n"
  "\n"
 +";; Start the PipeWire audio stack and the dynamic wallpaper (scripts\n"
 +";; installed into PATH by install.sh: tbwm-audio, tbwm-wallpaper)\n"
-+"(on-startup \"tbwm-audio\")\n"
-+"(on-startup \"tbwm-wallpaper\")\n"
++"(on-startup \"tbwm-audio\" \"tbwm-wallpaper\")\n"
 +"\n"
  ";;;; ==================== STATUS BAR ====================\n"
  "\n"
  ";; Show date and time in status bar\n"
-@@ -6328,6 +7702,9 @@ static const char *default_config_parts[] = {
+@@ -6328,6 +7696,9 @@ static const char *default_config_parts[] = {
  ";; App menu\n"
  "(bind-key \"M-x\" (lambda () (toggle-appmenu)))\n"
  "\n"
@@ -3191,7 +3212,7 @@ index a1e049d..4a54961 100644
  ";; Close window\n"
  "(bind-key \"M-q\" (lambda () (kill-client)))\n"
  "\n"
-@@ -6392,12 +7769,21 @@ static const char *default_config_parts[] = {
+@@ -6392,12 +7763,21 @@ static const char *default_config_parts[] = {
  "(bind-key \"Print\" (lambda () (spawn-grab \"sh -c 'grim - | wl-copy'\")))\n"
  "(bind-key \"S-Print\" (lambda () (spawn-grab \"sh -c 'grim -g \\\"$(slurp)\\\" - | wl-copy'\")))\n"
  "\n"
@@ -3213,7 +3234,7 @@ index a1e049d..4a54961 100644
  ";; REPL - Scheme console on the desktop\n"
  ";; Super+Shift+; (Win+:) to open, Escape to close\n"
  "(bind-key \"M-S-colon\" (lambda () (toggle-repl)))\n"
-@@ -6416,62 +7802,7 @@ static const char *default_config_parts[] = {
+@@ -6416,62 +7796,7 @@ static const char *default_config_parts[] = {
  "(bind-key \"C-A-F11\" (lambda () (chvt 11)))\n"
  "(bind-key \"C-A-F12\" (lambda () (chvt 12)))\n"
  "\n"
@@ -3277,9 +3298,16 @@ index a1e049d..4a54961 100644
  "\n"
  ";; Advanced setters (examples - not necessarily key bound):\n"
  ";; (set-border-width 2)\n"
-@@ -6543,6 +7874,18 @@ load_config(void)
+@@ -6542,7 +7867,25 @@ load_config(void)
+ 		tbwm_log(TBWM_LOG_INFO, "tbwm: clearing %d scheme bindings and %d mouse bindings before loading config\n", scheme_binding_count, cfg_mouse_binding_count);
  		unbind_all_scheme_bindings();
  		clear_mouse_bindings_internal();
++		/* Reset startup command list so a (reload-config) does not accumulate */
++		for (int i = 0; i < cfg_startup_cmd_count; i++) {
++			free(cfg_startup_cmds[i]);
++			cfg_startup_cmds[i] = NULL;
++		}
++		cfg_startup_cmd_count = 0;
  		s7_load(sc, path);
 +		/* Apply saved theme colors (from M-t menu) after the main config */
 +		{

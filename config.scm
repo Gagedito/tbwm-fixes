@@ -33,8 +33,7 @@
 
 ;; Start the PipeWire audio stack and the dynamic wallpaper (scripts
 ;; installed into PATH by install.sh: tbwm-audio, tbwm-wallpaper)
-(on-startup "tbwm-audio")
-(on-startup "tbwm-wallpaper")
+(on-startup "tbwm-audio" "tbwm-wallpaper")
 
 ;;;; ==================== STATUS BAR ====================
 
