@@ -28,13 +28,13 @@
 ;;;; ==================== STARTUP COMMANDS ====================
 
 ;; Commands to run when the compositor starts
-;; Start the PipeWire audio stack (tbwm doesn't process XDG autostart)
-;; $HOME is expanded (on-startup runs via /bin/sh -c)
-(on-startup "$HOME/.local/bin/tbwm-audio")
+;; Start the PipeWire audio stack (tbwm doesn't process XDG autostart).
+;; Scripts are installed into PATH (/usr/local/bin) by install.sh.
+(on-startup "tbwm-audio")
 
 ;; Dynamic wallpaper (waywallen: Flatpak + layer-shell presenter)
 ;; Alternative: install swaybg and use (on-startup "swaybg -i /ruta/fondo.png -m fill")
-(on-startup "$HOME/.local/bin/tbwm-wallpaper")
+(on-startup "tbwm-wallpaper")
 
 ;; Uncomment and customize as needed:
 ;; (on-startup "waybar" "mako" "foot --server")
@@ -92,8 +92,8 @@
 ;; Theme menu (integrated in the WM): frame/bar/background colors, palette or custom
 (bind-key "M-t" (lambda () (toggle-thememenu)))
 
-;; Network menu (WiFi + Bluetooth) - see tbwm-network script
-(set-net-menu-cmd "$HOME/.local/bin/tbwm-network")
+;; Network menu (WiFi + Bluetooth) - see tbwm-network script (installed in PATH)
+(set-net-menu-cmd "tbwm-network")
 (bind-key "M-n" (lambda () (toggle-net-menu)))
 
 ;; Close window
