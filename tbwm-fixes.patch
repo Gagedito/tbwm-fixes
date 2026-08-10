@@ -1118,11 +1118,13 @@ index 8a401bc..dd81449 100755
 
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..05e09fb
+index 0000000..304e307
 --- /dev/null
 +++ b/tbwm-network
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,370 @@
 +#!/bin/sh
++# tbwm-network — ver. sincronizada con Gagedito/tbwm-network @ 9a7c8c7 (2026-08-10).
++# Si editás este archivo, replicá el cambio en los otros repos y regenerá el patch.
 +# List WiFi networks and Bluetooth devices for tbwm's network menu.
 +# Output: Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>command[<TAB>needspass], one per line.
 +# Hierarchy: Category -> Group (fixed sub-topic) -> Subgroup (each network/device)
@@ -1130,6 +1132,42 @@ index 0000000..05e09fb
 +# Empty groups get an "Info" placeholder so every sub-topic stays visible.
 +# WiFi: detects the active network manager (connman or NetworkManager).
 +# Bluetooth: powered on + brief scan; connect/disconnect/forget by MAC.
++#
++# Subcommands (the WM picks these when the menu is focused on a search
++# sub-topic so it only rescans the section the user is looking at):
++#   tbwm-network        list everything (WiFi + Bluetooth)
++#   tbwm-network wifi   only the WiFi category (fast, no BT scan)
++#   tbwm-network bt     only the Bluetooth category (brief scan)
++# A subcommand exits right after its section, so the WM gets a short,
++# focused stream it can render incrementally while scanning.
++
++mode="${1:-all}"
++[ "$mode" = "bt" ] || [ "$mode" = "wifi" ] || [ "$mode" = "all" ] || mode=all
++
++# Emit the WiFi group placeholders before anything else (except in "bt" mode)
++# so the Wifi category and its sub-topics exist from the very first render
++# (no "Loading..." wait) and stay first in the menu's category list. Real
++# entries stream in later and hide the placeholders. Skipped in "bt" mode,
++# which only lists the Bluetooth category.
++if [ "$mode" != "bt" ]; then
++    if pgrep -x connmand >/dev/null 2>&1; then
++        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
++        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
++    elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
++        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
++        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
++        printf 'Wifi\tBuscar red\t\tInfo\t[sin redes visibles]\tsh -c true\n'
++    fi
++fi
++
++# Then the Bluetooth group placeholders so both categories and all their
++# sub-topics exist from the first render. Skipped in "wifi" mode, which only
++# lists the WiFi category.
++if [ "$mode" != "wifi" ] && command -v bluetoothctl >/dev/null 2>&1; then
++    printf 'Bluetooth\tConectado\t\tInfo\t[sin conectados]\tsh -c true\n'
++    printf 'Bluetooth\tEmparejados\t\tInfo\t[sin emparejados]\tsh -c true\n'
++    printf 'Bluetooth\tBuscar dispositivos\t\tInfo\t[sin dispositivos]\tsh -c true\n'
++fi
 +
 +# Quote a string for use inside single quotes in a shell command.
 +q() {
@@ -1137,6 +1175,7 @@ index 0000000..05e09fb
 +}
 +
 +# --- WiFi (category: Wifi) ---
++if [ "$mode" != "bt" ]; then
 +if pgrep -x connmand >/dev/null 2>&1; then
 +    connmanctl enable wifi >/dev/null 2>&1
 +    connmanctl scan wifi >/dev/null 2>&1
@@ -1181,8 +1220,6 @@ index 0000000..05e09fb
 +        fi
 +    done < "$services"
 +    rm -f "$services"
-+    [ "$has_conn" = 1 ] || printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-+    [ "$has_saved" = 1 ] || printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
 +elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
 +    savedw=""
 +    while IFS=: read -r prof type; do
@@ -1204,17 +1241,6 @@ index 0000000..05e09fb
 +    done <<EOF
 +$(nmcli -t -f IN-USE,SSID,SIGNAL dev wifi list 2>/dev/null)
 +EOF
-+
-+    # Trigger a fresh scan and wait for results (without it nmcli returns the
-+    # stale cache and "Buscar red" only shows a handful of networks).
-+    nmcli dev wifi rescan >/dev/null 2>&1
-+    nscan=0
-+    while [ "$nscan" -lt 20 ]; do
-+        n=$(nmcli -t -f SSID dev wifi list 2>/dev/null | grep -c .)
-+        [ "$n" -ge 3 ] && break
-+        sleep 1
-+        nscan=$((nscan + 1))
-+    done
 +
 +    # 1) Connected
 +    has_conn=0
@@ -1250,7 +1276,19 @@ index 0000000..05e09fb
 +$savedw
 +EOF
 +
-+    # 3) Search: available, not saved
++    # 3) Search: available, not saved. Trigger a fresh scan and wait for
++    # results first (without it nmcli returns the stale cache and "Buscar red"
++    # only shows a handful of networks). This runs after Conectado/Guardadas
++    # streamed from the cache, so it never blocks the first render.
++    nmcli dev wifi rescan >/dev/null 2>&1
++    nscan=0
++    while [ "$nscan" -lt 20 ]; do
++        n=$(nmcli -t -f SSID dev wifi list 2>/dev/null | grep -c .)
++        [ "$n" -ge 3 ] && break
++        sleep 1
++        nscan=$((nscan + 1))
++    done
++
 +    has_search=0
 +    seen="$savedw"
 +    while IFS=: read -r inuse ssid sig sec; do
@@ -1268,16 +1306,13 @@ index 0000000..05e09fb
 +    done <<EOF
 +$(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r)
 +EOF
-+
-+    [ "$has_conn" = 1 ] || printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-+    [ "$has_saved" = 1 ] || printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
-+    [ "$has_search" = 1 ] || printf 'Wifi\tBuscar red\t\tInfo\t[sin redes visibles]\tsh -c true\n'
 +else
 +    printf 'Wifi\t\t\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
 +fi
++fi
 +
 +# --- Bluetooth (category: Bluetooth) ---
-+if command -v bluetoothctl >/dev/null 2>&1; then
++if [ "$mode" != "wifi" ] && command -v bluetoothctl >/dev/null 2>&1; then
 +    # Some laptops (e.g. Lenovo ideapad) leave the radio soft-blocked via
 +    # rfkill, which makes "power on" fail with org.bluez.Error.Failed and the
 +    # scan with "NotReady". Unblock first so the menu can actually scan. No
@@ -1286,21 +1321,28 @@ index 0000000..05e09fb
 +    sleep 0.5
 +    bluetoothctl power on >/dev/null 2>&1
 +    btout="$(mktemp)"
++    paired="$(bluetoothctl devices Paired 2>/dev/null)"
++    connected="$(bluetoothctl devices Connected 2>/dev/null)"
++    devices="$(mktemp)"
++    scanmacs="$(mktemp)"
++    emitted="$(mktemp)"
++    bluetoothctl devices 2>/dev/null > "$devices"
++
 +    # Keep the scan alive while we inspect devices below: bluetoothctl info
 +    # only reports RSSI while a discovery is running. Devices the daemon
 +    # merely remembers but are NOT in range anymore never get a fresh RSSI.
 +    # bluetoothctl reads commands from stdin, so a bare "scan on" launched from
 +    # a menu (stdin at EOF) would start the scan and exit immediately, never
 +    # really discovering anything. Feed the commands through a pipe so the
-+    # session stays alive for the whole discovery window.
-+    ( echo "scan on"; sleep 16; echo "scan off" ) | bluetoothctl > "$btout" 2>&1 &
-+    sleep 13
-+
-+    paired="$(bluetoothctl devices Paired 2>/dev/null)"
-+    connected="$(bluetoothctl devices Connected 2>/dev/null)"
-+    devices="$(mktemp)"
-+    scanmacs="$(mktemp)"
-+    bluetoothctl devices 2>/dev/null > "$devices"
++    # session stays alive for the whole discovery window. In "bt" mode (the
++    # live "Buscar dispositivos" view) keep the window short so results stream
++    # in quickly; in "all" mode use a longer one since this is the one-shot
++    # initial load.
++    if [ "$mode" = "bt" ]; then
++        ( echo "scan on"; sleep 8; echo "scan off" ) | bluetoothctl > "$btout" 2>&1 &
++    else
++        ( echo "scan on"; sleep 16; echo "scan off" ) | bluetoothctl > "$btout" 2>&1 &
++    fi
 +
 +    # Controller D-Bus root, used to read the live RSSI of each known device
 +    # below. The daemon updates RSSI while discovery is running, so a non-empty
@@ -1318,7 +1360,8 @@ index 0000000..05e09fb
 +    # AA:BB:.. NAME" for devices seen for the first time and "[CHG] Device
 +    # AA:BB:.. RSSI: ..." for updates to known ones — both prove the device was
 +    # seen in the current scan.
-+    if [ -s "$btout" ]; then
++    merge_scan() {
++        [ -s "$btout" ] || return 0
 +        while IFS= read -r line; do
 +            [ -n "$line" ] || continue
 +            case "$line" in
@@ -1327,20 +1370,74 @@ index 0000000..05e09fb
 +            esac
 +            mac=$(printf '%s\n' "$line" | sed -n 's/.*Device \(\([0-9A-Fa-f][0-9A-Fa-f]:\)\{5\}[0-9A-Fa-f][0-9A-Fa-f]\).*/\1/p')
 +            [ -n "$mac" ] || continue
-+            printf '%s\n' "$mac" >> "$scanmacs"
++            if ! grep -qxF "$mac" "$scanmacs"; then
++                printf '%s\n' "$mac" >> "$scanmacs"
++            fi
 +            if ! grep -q " $mac " "$devices"; then
 +                name=$(printf '%s\n' "$line" | sed -n "s/.*Device $mac[^ ]* \([^[:cntrl:]]*\).*/\1/p")
 +                name=$(printf '%s' "$name" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g')
 +                printf 'Device %s %s\n' "$mac" "$name" >> "$devices"
 +            fi
 +        done < "$btout"
-+    fi
++    }
 +
++    # A device counts as in range either if the scan output mentioned it
++    # ([NEW]/[CHG]) or if the daemon reports a live RSSI for it right now
++    # (bluetoothctl does not always emit [CHG] lines for known devices even
++    # though the daemon is picking them up).
++    device_in_range() {
++        mac="$1"
++        if grep -qxF "$mac" "$scanmacs"; then
++            return 0
++        fi
++        if [ -n "$btroot" ]; then
++            devpath="${btroot}/dev_$(printf '%s' "$mac" | tr ':' '_')"
++            rssi=$(busctl --system get-property org.bluez "$devpath" org.bluez.Device1 RSSI 2>/dev/null | sed -n 's/^n //p')
++            [ -n "$rssi" ] && return 0
++        fi
++        return 1
++    }
++
++    # Emit a "Buscar dispositivos" line for every in-range, unpaired,
++    # unconnected device not yet printed (tracked in "$emitted" so each one
++    # appears exactly once as the scan streams in).
++    emit_discovered() {
++        if [ -s "$devices" ]; then
++            while IFS= read -r line; do
++                [ -n "$line" ] || continue
++                set -- $line
++                [ "$1" = "Device" ] || continue
++                [ $# -ge 3 ] || continue
++                mac=$2
++                case "$mac" in
++                    [0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]:[0-9A-Fa-f][0-9A-Fa-f]) ;;
++                    *) continue;;
++                esac
++                if printf '%s\n' "$connected" | grep -qF "$mac"; then continue; fi
++                if printf '%s\n' "$paired" | grep -qF "$mac"; then continue; fi
++                if grep -qxF "$mac" "$emitted"; then continue; fi
++                if device_in_range "$mac"; then
++                    name=$(printf '%s' "$line" | sed "s/^Device $mac //" | sed -r 's/\x1B\[[0-9;]*[a-zA-Z]//g' | sed -r 's/[[:space:]]*\([0-9]+\)$//')
++                    case "$name" in
++                        *RSSI:*|*\[CHG\]*|Device*) name="";;
++                    esac
++                    [ -n "$name" ] || name="(sin nombre)"
++                    printf '%s\n' "$mac" >> "$emitted"
++                    has_discovered=1
++                    nq=$(q "$name")
++                    printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
++                fi
++            done < "$devices"
++        fi
++    }
++
++    has_connected=0
++    has_paired=0
++    has_discovered=0
 +    if [ -s "$devices" ]; then
++        # Conectado/Emparejados come straight from the daemon cache, so emit
++        # them right away while the scan is still warming up.
 +        seen=""
-+        has_connected=0
-+        has_paired=0
-+        has_discovered=0
 +        while IFS= read -r line; do
 +            [ -n "$line" ] || continue
 +            set -- $line
@@ -1370,38 +1467,33 @@ index 0000000..05e09fb
 +                has_paired=1
 +                printf 'Bluetooth\tEmparejados\t%s\tConectar\tbluetoothctl connect %s\n' "$nq" "$mac"
 +                printf 'Bluetooth\tEmparejados\t%s\tOlvidar\tbluetoothctl remove %s\n' "$nq" "$mac"
-+            else
-+                # Only show "Buscar dispositivos" for devices seen in the
-+                # CURRENT scan; stale remembered devices that are no longer in
-+                # range (or no longer visible) would stay forever in the list.
-+                # A device counts as seen either if the scan output mentioned it
-+                # ([NEW]/[CHG]) or if the daemon reports a live RSSI for it
-+                # right now (bluetoothctl does not always emit [CHG] lines for
-+                # known devices even though the daemon is picking them up).
-+                inrange=0
-+                if grep -qxF "$mac" "$scanmacs"; then
-+                    inrange=1
-+                elif [ -n "$btroot" ]; then
-+                    devpath="${btroot}/dev_$(printf '%s' "$mac" | tr ':' '_')"
-+                    rssi=$(busctl --system get-property org.bluez "$devpath" org.bluez.Device1 RSSI 2>/dev/null | sed -n 's/^n //p')
-+                    [ -n "$rssi" ] && inrange=1
-+                fi
-+                [ "$inrange" = 1 ] || continue
-+                has_discovered=1
-+                printf 'Bluetooth\tBuscar dispositivos\t%s\tConectar\t%s\tBTPAIR\n' "$nq" "$mac"
 +            fi
 +        done < "$devices"
-+        [ "$has_connected" = 1 ] || printf 'Bluetooth\tConectado\t\tInfo\t[sin conectados]\tsh -c true\n'
-+        [ "$has_paired" = 1 ] || printf 'Bluetooth\tEmparejados\t\tInfo\t[sin emparejados]\tsh -c true\n'
-+        [ "$has_discovered" = 1 ] || printf 'Bluetooth\tBuscar dispositivos\t\tInfo\t[sin dispositivos]\tsh -c true\n'
-+    else
-+        printf 'Bluetooth\t\t\tInfo\t[BT] Sin dispositivos cerca (reintenta)\tsh -c '\''echo escanea con: bluetoothctl scan on'\''\n'
 +    fi
-+rm -f "$devices" "$btout" "$scanmacs"
++
++    # Stream the scan: in "bt" mode (the live "Buscar dispositivos" view) poll
++    # the scan output every second and emit each newly found device as it shows
++    # up, so the menu grows item by item. In "all" mode this is the one-shot
++    # initial load, so just wait out the window and emit everything at once.
++    if [ "$mode" = "bt" ]; then
++        i=0
++        while [ "$i" -lt 7 ]; do
++            sleep 1
++            merge_scan
++            emit_discovered
++            i=$((i+1))
++        done
++    else
++        sleep 13
++        merge_scan
++        emit_discovered
++    fi
++rm -f "$devices" "$btout" "$scanmacs" "$emitted"
 +else
 +    printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 +fi
 \ No newline at end of file
+
 diff --git a/tbwm-wallpaper b/tbwm-wallpaper
 new file mode 100755
 index 0000000..9687ac7

@@ -1,4 +1,6 @@
 #!/bin/sh
+# tbwm-network — ver. sincronizada con Gagedito/tbwm-network @ 9a7c8c7 (2026-08-10).
+# Si editás este archivo, replicá el cambio en los otros repos y regenerá el patch.
 # List WiFi networks and Bluetooth devices for tbwm's network menu.
 # Output: Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>command[<TAB>needspass], one per line.
 # Hierarchy: Category -> Group (fixed sub-topic) -> Subgroup (each network/device)

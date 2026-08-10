@@ -252,8 +252,12 @@ El menú de red ahora soporta **jerarquía de 4 niveles** en `tbwm.c`:
 
 `Categoría → Sub-apartado → Red/Dispositivo → Acción`
 
-- `tbwm-network` emite `Category<TAB>Group<TAB>Subgroup<TAB>Name<TAB>exec` (5
+- `tbwm-network` emite
+  `Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>command[<TAB>flag]` (5-6
   columnas; el parser de `tbwm.c` también acepta el formato viejo de 4).
+  El flag opcional de la 6ª columna es `1` (la red pide contraseña; tbwm abre el
+  diálogo) o `BTPAIR` (dispositivo Bluetooth sin emparejar; tbwm inicia el
+  diálogo de PIN, ver fix 20).
 - Ejemplo: `Wifi → Guardadas → AndroidAP_2708 → Conectar` / `Olvidar`, y
   `Wifi → Conectado → Wifi-Claro (83%) → Desconectar` / `Olvidar`.
 - La red conectada se muestra con nombre + % de señal en el sub-tema: entrar en
