@@ -444,6 +444,7 @@ static void updateappmenu(void);
 static int appmenu_item_count(void);
 static void updatenetmenu(void);
 static int netmenu_item_count(void);
+static int netmenu_cells_h(void);
 static void netmenu_refresh(void);
 static void netmenu_build_groups(void);
 static void netmenu_build_subgroups(void);
@@ -1623,7 +1624,7 @@ buttonpress(struct wl_listener *listener, void *data)
 			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
 			int menu_y = selmon->m.y + cell_height;
 			int menu_w = 25 * cell_width;
-			int menu_h = 25 * cell_height;
+			int menu_h = netmenu_cells_h() * cell_height;
 			
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
@@ -1635,8 +1636,8 @@ buttonpress(struct wl_listener *listener, void *data)
 				if (net_password_mode)
 					return; /* Consume the click */
 				
-				/* Row 0 is title bar, rows 1-23 are content, row 24 is bottom */
-				if (clicked_row >= 1 && clicked_row <= 23) {
+				/* Row 0 is title bar, rows 1+ are content */
+				if (clicked_row >= 1 && clicked_row <= netmenu_cells_h() - 2) {
 					int content_row = clicked_row - 1;
 					
 					if (net_current_category < 0) {
@@ -4243,6 +4244,21 @@ netmenu_item_count(void)
 	}
 }
 
+/* Height of the network menu in cells, fitted to its current content so there
+ * is no empty vertical space below the items. Min 3 cells (frame + 1 row),
+ * max 25 cells (23 content rows, the old fixed size). */
+static int
+netmenu_cells_h(void)
+{
+	int need_rows = netmenu_item_count();
+
+	if (need_rows < 1)
+		need_rows = 1;
+	if (need_rows > 23)
+		need_rows = 23;
+	return need_rows + 2;
+}
+
 /* Parse a NUL-terminated netmenu payload into dst[] and return the entry
  * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Name<TAB>exec[<TAB>needspass]".
  * Legacy format "Category<TAB>Group<TAB>Name<TAB>exec[<TAB>needspass]" is still
@@ -4856,7 +4872,7 @@ static int
 netmenukey(xkb_keysym_t sym)
 {
 	int item_count;
-	int content_rows = 23; /* menu_cells_h - 2 */
+	int content_rows = netmenu_cells_h() - 2;
 
 	/* Bluetooth pairing dialog: the session lives in bluetooth.c; it tells us
 	 * whether the key was consumed and whether a finished menu-initiated
@@ -6834,15 +6850,15 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
 			int menu_y = selmon->m.y + cell_height;
 			int menu_w = 25 * cell_width;
-			int menu_h = 25 * cell_height;
+			int menu_h = netmenu_cells_h() * cell_height;
 
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
 				int rel_y = (int)(cursor->y - menu_y);
 				int hovered_row = rel_y / cell_height;
 
-				/* Row 0 is title bar, rows 1-23 are content */
-				if (hovered_row >= 1 && hovered_row <= 23) {
+				/* Row 0 is title bar, rows 1+ are content */
+				if (hovered_row >= 1 && hovered_row <= netmenu_cells_h() - 2) {
 					int new_selected = hovered_row - 1; /* 0-indexed content row */
 					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
 						net_selected_row = new_selected;
@@ -10308,7 +10324,7 @@ updatenetmenu(void)
 	struct TitleBuffer *tb;
 	uint32_t *pixels;
 	int menu_cells_w = 25;
-	int menu_cells_h = 25;
+	int menu_cells_h = netmenu_cells_h();
 	int menu_width = menu_cells_w * cell_width;
 	int menu_height = menu_cells_h * cell_height;
 	int i, x, y, row, col;
@@ -10327,6 +10343,15 @@ updatenetmenu(void)
 		netmenu_marquee_needed = 0;
 		netmenu_marquee_px = 0;
 		return;
+	}
+
+	/* The height is content-fitted, so recreate the cached buffer when the
+	 * number of rows changed (mirrors the shutdown cleanup). */
+	if (netmenu_tb && netmenu_tb->base.height != menu_height) {
+		if (netmenu_buffer)
+			wlr_scene_buffer_set_buffer(netmenu_buffer, NULL);
+		wlr_buffer_drop(&netmenu_tb->base);
+		netmenu_tb = NULL;
 	}
 
 	/* Auto-rescan while focused on a search sub-topic (start/stop) */
@@ -10361,7 +10386,9 @@ updatenetmenu(void)
 		((net_current_group + 3) * 1000) +
 		((net_current_subgroup + 3) * 10) + net_selected_row +
 		(net_password_mode ? 1000000 : 0) +
-		(blt_dialog() ? 2000000 : 0));
+		(blt_dialog() ? 2000000 : 0) +
+		(blt_prompt() ? 4000000 : 0) +
+		(blt_done() ? 8000000 : 0));
 
 	/* Fill entire background with content color first */
 	for (i = 0; i < menu_width * menu_height; i++) {
@@ -10429,15 +10456,13 @@ updatenetmenu(void)
 		const char *pin_label = blt_pin()[0] ? blt_pin() : "---";
 		const char *status;
 		const char *keys;
-		int pi;
 		char dlg[NET_NAME_LEN + 48];
 
 		/* Row 1: device name */
 		row_y = cell_height;
 		snprintf(dlg, sizeof(dlg), "Conectar a %s", blt_name());
-		for (pi = 0; dlg[pi] && pi < mtext; pi++)
-			render_char_to_buffer(pixels, menu_width, menu_height,
-				cell_width + pi * cell_width, row_y, dlg[pi], text_color);
+		render_row_text(pixels, menu_width, menu_height, row_y, dlg,
+			text_color, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 
 		/* Row 2: PIN / passkey, highlighted */
 		row_y = 2 * cell_height;
@@ -10449,12 +10474,11 @@ updatenetmenu(void)
 					pixels[py * menu_width + px] = highlight_bg;
 				}
 			}
-			for (pi = 0; dlg[pi] && pi < mtext; pi++)
-				render_char_to_buffer(pixels, menu_width, menu_height,
-					cell_width + pi * cell_width, row_y, dlg[pi], highlight_fg);
+			render_row_text(pixels, menu_width, menu_height, row_y, dlg,
+				highlight_fg, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 		}
 
-		/* Row 3: status + keys */
+		/* Row 3: status */
 		row_y = 3 * cell_height;
 		if (blt_done())
 			status = blt_ok() ? "Emparejado correctamente" : "Emparejamiento fallido";
@@ -10462,9 +10486,8 @@ updatenetmenu(void)
 			status = "Confirmar PIN en el dispositivo";
 		else
 			status = "Buscando dispositivo...";
-		for (pi = 0; status[pi] && pi < mtext; pi++)
-			render_char_to_buffer(pixels, menu_width, menu_height,
-				cell_width + pi * cell_width, row_y, status[pi], text_color);
+		render_row_text(pixels, menu_width, menu_height, row_y, status,
+			text_color, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 
 		/* Row 4: key hints */
 		row_y = 4 * cell_height;
@@ -10474,9 +10497,8 @@ updatenetmenu(void)
 			keys = "Enter = cerrar";
 		else
 			keys = "Esperando al dispositivo...";
-		for (pi = 0; keys[pi] && pi < mtext; pi++)
-			render_char_to_buffer(pixels, menu_width, menu_height,
-				cell_width + pi * cell_width, row_y, keys[pi], text_color);
+		render_row_text(pixels, menu_width, menu_height, row_y, keys,
+			text_color, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 	} else
 	/* Password entry view */
 	if (net_password_mode) {
@@ -10500,16 +10522,17 @@ updatenetmenu(void)
 		/* Row 1: "Password for <label>:" */
 		row_y = cell_height;
 		{
+			char pw[NET_NAME_LEN + 32];
 			int col = 0;
-			for (pi = 0; prompt[pi] && col < mtext; pi++)
-				render_char_to_buffer(pixels, menu_width, menu_height,
-					cell_width + col++ * cell_width, row_y, prompt[pi], text_color);
-			for (pi = 0; label[pi] && col < mtext; pi++)
-				render_char_to_buffer(pixels, menu_width, menu_height,
-					cell_width + col++ * cell_width, row_y, label[pi], text_color);
-			if (col < mtext)
-				render_char_to_buffer(pixels, menu_width, menu_height,
-					cell_width + col * cell_width, row_y, ':', text_color);
+			for (pi = 0; prompt[pi] && col < (int)sizeof(pw) - 1; pi++)
+				pw[col++] = prompt[pi];
+			for (pi = 0; label[pi] && col < (int)sizeof(pw) - 1; pi++)
+				pw[col++] = label[pi];
+			if (col < (int)sizeof(pw) - 1)
+				pw[col++] = ':';
+			pw[col] = '\0';
+			render_row_text(pixels, menu_width, menu_height, row_y, pw,
+				text_color, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 		}
 
 		/* Row 2: masked password field, highlighted */
@@ -10529,10 +10552,8 @@ updatenetmenu(void)
 
 		/* Row 3: hint */
 		row_y = 3 * cell_height;
-		for (pi = 0; hint[pi] && pi < mtext; pi++) {
-			render_char_to_buffer(pixels, menu_width, menu_height,
-				cell_width + pi * cell_width, row_y, hint[pi], text_color);
-		}
+		render_row_text(pixels, menu_width, menu_height, row_y, hint,
+			text_color, mtext, 1, netmenu_marquee_px, &netmenu_marquee_needed);
 	} else {
 	/* Draw content: categories, sub-topics or entries */
 	{
