@@ -1,0 +1,126 @@
+#!/bin/sh
+# tbwm-audio-menu — list audio controls and sinks/sources for tbwm's audio menu.
+# Output: Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>command, one per line.
+# Hierarchy: Category -> Group (fixed sub-topic) -> Subgroup (each sink/source)
+#           -> Action (Elegir/Subir/Bajar/Silenciar/Mutear).
+# The Volumen category carries status rows (4-column legacy lines, rendered as
+# read-only labels) plus the master volume actions. Every action keeps the
+# menu open: tbwm re-runs this script to refresh the values.
+#
+# Depends on wpctl (wireplumber/PipeWire). tbwm's audio menu command default:
+#   (set-audio-menu-cmd "tbwm-audio-menu")
+
+mode="${1:-all}"
+[ "$mode" = "all" ] || mode=all
+
+# Quote a string for use inside single quotes in a shell command.
+q() {
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+}
+
+# Emit the Salidas/Entradas placeholders first so the categories and their
+# sub-topics exist from the very first render (no "Loading..." wait). They use
+# the legacy 4-column layout (category/group/name/exec) so they render as
+# read-only labels like the Volumen status row, and are hidden automatically
+# once real sinks/sources stream in as sub-topics.
+printf 'Salidas\tSalidas\t[sin salidas]\tsh -c true\n'
+printf 'Entradas\tEntradas\t[sin entradas]\tsh -c true\n'
+
+if ! command -v wpctl >/dev/null 2>&1; then
+    printf 'Volumen\tControles\t[falta wpctl: instala wireplumber]\tsh -c '\''echo instala: sudo pacman -S wireplumber'\''\n'
+    exit 0
+fi
+
+# Current master volume state (default sink) for the status row.
+gv=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null)
+pct=$(printf '%s\n' "$gv" | sed -n 's/^Volume: \([0-9.]*\).*/\1/p')
+[ -n "$pct" ] && pct=$(awk -v v="$pct" 'BEGIN{printf "%d", v*100}') || pct="?"
+case "$gv" in
+    *MUTED*) mutes=" | mudo";;
+    *) mutes="";;
+esac
+
+# Default microphone mute state for the indicator row.
+gsv=$(wpctl get-volume @DEFAULT_AUDIO_SOURCE@ 2>/dev/null)
+case "$gsv" in
+    *MUTED*) micmute="mudo";;
+    *) micmute="activo";;
+esac
+
+# Parse wpctl status: id, default marker and friendly name for every sink and
+# source in the Audio section (the part before the Video section).
+ws=$(wpctl status 2>/dev/null)
+audio_part=$(printf '%s\n' "$ws" | sed '/Video/,$d')
+lines="$(mktemp)"
+printf '%s\n' "$audio_part" | awk '
+    /Sinks:/{sec="sink"; next}
+    /Sources:/{sec="src"; next}
+    /Filters:/{sec=""; next}
+    sec == "sink" || sec == "src" {
+        line=$0
+        sub(/^.*│/, "", line)
+        isdef=0
+        sub(/^[ \t]+/, "", line)
+        if (sub(/^\*/, "", line)) isdef=1
+        sub(/^[ \t]+/, "", line)
+        if (match(line, /^[0-9]+\./)) {
+            id=substr(line, 1, RLENGTH-1)
+            rest=substr(line, RLENGTH+1)
+            sub(/^[ \t]+/, "", rest)
+            pcti=""
+            if (rest ~ /\[vol: /) {
+                vv=rest
+                sub(/.*\[vol: /, "", vv)
+                sub(/\].*/, "", vv)
+                muted=(vv ~ /MUTED/)
+                gsub(/ MUTED/, "", vv)
+                pctv=int(vv*100+0.5)
+                pcti=sprintf("%d%s", pctv, muted ? " mudo" : "")
+                sub(/[ \t]*\[vol: .*$/, "", rest)
+            }
+            gsub(/[ \t]+$/, "", rest)
+            printf "%s|%d|%s|%s|%s\n", sec, isdef, id, rest, pcti
+        }
+    }
+' > "$lines"
+
+# First pass: remember the default sink name for the status row.
+defsinkname=""
+while IFS='|' read -r sec isdef id name pcti; do
+    [ "$sec" = "sink" ] && [ "$isdef" = "1" ] && [ -n "$name" ] && defsinkname=$name
+done < "$lines"
+
+# Volumen: status rows (read-only labels, one per value so each stays readable)
+# + master volume actions.
+printf 'Volumen\tControles\t[vol %s%%%s]\tsh -c true\n' "$pct" "$mutes"
+printf 'Volumen\tControles\t[salida: %s]\tsh -c true\n' "$defsinkname"
+printf 'Volumen\tControles\t[mic: %s]\tsh -c true\n' "$micmute"
+if [ "$pct" != "?" ]; then
+    printf 'Volumen\tControles\t\tSubir 5%%\twpctl set-volume @DEFAULT_AUDIO_SINK@ 5%%+\n'
+    printf 'Volumen\tControles\t\tBajar 5%%\twpctl set-volume @DEFAULT_AUDIO_SINK@ 5%%-\n'
+    printf 'Volumen\tControles\t\tSilenciar\twpctl set-mute @DEFAULT_AUDIO_SINK@ toggle\n'
+fi
+printf 'Volumen\tControles\t\tMic silencio\twpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle\n'
+
+# Salidas / Entradas: each sink/source is a sub-topic with its own actions.
+# Sub-topic names are kept stable (no live volume suffix) so tbwm can preserve
+# the user's position when it re-runs this script after an action.
+while IFS='|' read -r sec isdef id name pcti; do
+    [ -n "$id" ] || continue
+    [ -n "$name" ] || name="(sin nombre)"
+    star=""; [ "$isdef" = "1" ] && star="*"
+    nq=$(q "${star}${name}")
+    if [ "$sec" = "sink" ]; then
+        printf 'Salidas\tSalidas\t%s\tElegir\twpctl set-default %s\n' "$nq" "$id"
+        printf 'Salidas\tSalidas\t%s\tSubir\twpctl set-volume %s 5%%+\n' "$nq" "$id"
+        printf 'Salidas\tSalidas\t%s\tBajar\twpctl set-volume %s 5%%-\n' "$nq" "$id"
+        printf 'Salidas\tSalidas\t%s\tSilenciar\twpctl set-mute %s toggle\n' "$nq" "$id"
+    else
+        printf 'Entradas\tEntradas\t%s\tElegir\twpctl set-default %s\n' "$nq" "$id"
+        printf 'Entradas\tEntradas\t%s\tMutear\twpctl set-mute %s toggle\n' "$nq" "$id"
+        printf 'Entradas\tEntradas\t%s\tSubir\twpctl set-volume %s 5%%+\n' "$nq" "$id"
+        printf 'Entradas\tEntradas\t%s\tBajar\twpctl set-volume %s 5%%-\n' "$nq" "$id"
+    fi
+done < "$lines"
+rm -f "$lines"
+exit 0

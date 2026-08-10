@@ -425,7 +425,16 @@ install_tbwm() {
     else
         warn "tbwm-audio not found; add (on-startup \"tbwm-audio\") to config.scm after installing it"
     fi
-    
+
+    # tbwm-audio-menu helper for the audio menu (volume / outputs / mics)
+    if [ -f "$SCRIPT_DIR/tbwm-audio-menu" ]; then
+        sudo cp "$SCRIPT_DIR/tbwm-audio-menu" /usr/local/bin/tbwm-audio-menu
+        sudo chmod 755 /usr/local/bin/tbwm-audio-menu
+        success "Installed /usr/local/bin/tbwm-audio-menu"
+    else
+        warn "tbwm-audio-menu not found; the audio menu (volume/outputs/mics) will be empty"
+    fi
+
     # tbwm-session launcher (starts a session D-Bus bus so Flatpak apps and
     # the XDG desktop portals can connect)
     if [ -f "$SCRIPT_DIR/tbwm-session" ]; then

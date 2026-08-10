@@ -155,6 +155,11 @@
 (set-net-menu-cmd "tbwm-network")
 (bind-key "M-n" (lambda () (toggle-net-menu)))
 
+;; Audio menu (volume / outputs / microphones) - requires wpctl (pipewire)
+;; and the tbwm-audio-menu helper (installed by install.sh)
+(set-audio-menu-cmd "tbwm-audio-menu")
+(bind-key "M-a" (lambda () (toggle-audio-menu)))
+
 ;; Volume control (requires wpctl/wireplumber)
 (bind-key "XF86AudioRaiseVolume" (lambda () (spawn "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+")))
 (bind-key "XF86AudioLowerVolume" (lambda () (spawn "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-")))

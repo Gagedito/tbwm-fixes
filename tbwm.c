@@ -452,6 +452,17 @@ static void netmenu_reparse(void);
 static int netmenu_read_cb(int fd, uint32_t mask, void *data);
 static void togglenetmenu(const Arg *arg);
 static int netmenukey(xkb_keysym_t sym);
+static void updatemenuaudio(void);
+static int audiomenu_item_count(void);
+static int audiomenu_cells_h(void);
+static void audio_refresh(void);
+static void audiomenu_build_groups(void);
+static void audiomenu_build_subgroups(void);
+static void audiomenu_cancel_load(void);
+static void audiomenu_reparse(void);
+static int audiomenu_read_cb(int fd, uint32_t mask, void *data);
+static void togglaudiomenu(const Arg *arg);
+static int audiomenukey(xkb_keysym_t sym);
 static void togglethememenu(const Arg *arg);
 static int thememenu_key(xkb_keysym_t sym);
 static void updatethememenu(void);
@@ -733,6 +744,7 @@ static uint32_t cfg_menu_color = 0xFFaaaaaa;         /* grey menu background */
 static uint32_t cfg_menu_text_color = 0xFF000000;    /* black menu text */
 static char cfg_menu_button[16] = "X";             /* app menu button label */
 static char cfg_net_menu_button[16] = "N";         /* network menu button label */
+static char cfg_audio_menu_button[16] = "A";       /* audio menu button label */
 
 /* App menu state */
 static int appmenu_active = 0;
@@ -816,6 +828,76 @@ static int netmenu_pipe_fd = -1;
 static struct wl_event_source *netmenu_source = NULL;
 static char netmenu_out[32768];
 static int netmenu_out_len = 0;
+
+/* Audio menu state (volume / sinks / sources). Mirrors the network menu but
+ * without passwords, pairing or live rescans: every action spawns its command
+ * and re-runs the helper to refresh, keeping the menu open. */
+#define MAX_AUDIO_ENTRIES 64
+#define MAX_AUDIO_CATEGORIES 8
+#define AUDIO_NAME_LEN 128
+#define AUDIO_EXEC_LEN 256
+#define AUDIO_CAT_LEN 32
+typedef struct {
+	char category[AUDIO_CAT_LEN];
+	char group[AUDIO_CAT_LEN];
+	char subgroup[AUDIO_CAT_LEN];
+	char name[AUDIO_NAME_LEN];
+	char exec[AUDIO_EXEC_LEN];
+} AudioEntry;
+static AudioEntry audio_entries[MAX_AUDIO_ENTRIES];
+static int audio_entry_count = 0;
+static char audiomenu_cmd[512] = ""; /* command that lists audio entries */
+static int audiomenu_active = 0;
+static struct wlr_scene_buffer *audiomenu_buffer = NULL;
+static struct TitleBuffer *audiomenu_tb = NULL;  /* cached buffer for reuse */
+static int audio_scroll_offset = 0;
+static int audio_selected_row = 0;
+static int audio_menu_marquee_px = 0;      /* pixel offset for scrolling a long selected label */
+static int audio_menu_marquee_needed = 0;  /* 1 = selected row overflows and is being scrolled */
+static int audio_menu_marquee_selkey = 0;  /* selection key; reset marquee when it changes */
+/* Marquee state for the app and network menus (same ticker as the audio menu) */
+static int appmenu_marquee_px = 0;
+static int appmenu_marquee_needed = 0;
+static int appmenu_marquee_selkey = 0;
+static int netmenu_marquee_px = 0;
+static int netmenu_marquee_needed = 0;
+static int netmenu_marquee_selkey = 0;
+
+/* True while any open menu is scrolling its selected label; keeps the scroll
+ * timer at 30fps instead of the idle 100/200ms rate. */
+#define MENU_MARQUEE_TICKING \
+	((audiomenu_active && audio_menu_marquee_needed) || \
+	 (netmenu_active && netmenu_marquee_needed) || \
+	 (appmenu_active && appmenu_marquee_needed))
+
+/* Restart a menu's marquee at position 0 whenever the selection moves. */
+static void
+menu_marquee_begin(int *px, int *selkey, int newkey)
+{
+	if (*selkey != newkey) {
+		*selkey = newkey;
+		*px = 0;
+	}
+}
+static char audio_categories[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
+static int audio_category_count = 0;
+static int audio_current_category = -1;  /* -1 = showing categories, >=0 = showing sub-topics of that category */
+static char audio_groups[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
+static int audio_group_count = 0;
+static int audio_current_group = -1;  /* -1 = showing sub-topics, >=0 = showing entries of that sub-topic */
+static char audio_subgroups[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
+static int audio_subgroup_count = 0;
+static int audio_current_subgroup = -1;  /* -1 = showing sub-topics' entities, >=0 = showing that entity's actions */
+static int audio_group_has_sub = 0;  /* 1 = the selected group has an entity level; 0 = show entries directly */
+static void audio_run(AudioEntry *e);
+static void audio_refresh(void);
+
+/* Asynchronous audio menu data loader (same mechanism as the network menu) */
+static pid_t audiomenu_child_pid = -1;
+static int audiomenu_pipe_fd = -1;
+static struct wl_event_source *audiomenu_source = NULL;
+static char audiomenu_out[32768];
+static int audiomenu_out_len = 0;
 
 /* App launcher data structures */
 #define MAX_APPS 512
@@ -1411,16 +1493,19 @@ buttonpress(struct wl_listener *listener, void *data)
 				return;
 			}
 
-			/* Network menu button [N] on the right, next to date/time */
+			/* Network menu button [N] on the right, next to date/time, with the
+			 * audio menu button [A] immediately to its left */
 			{
 				int nbtn_len = strlen(cfg_net_menu_button);
 				int nbtn_cells = nbtn_len + 2; /* [nbtn] */
+				int abtn_len = strlen(cfg_audio_menu_button);
+				int abtn_cells = abtn_len + 2; /* [abtn] */
 				int right_chars;
 				time_t nnow = time(NULL);
 				struct tm *ntm = localtime(&nnow);
 
 				if (cfg_status_text[0] != '\0') {
-					right_chars = nbtn_cells + 3 + (int)strlen(cfg_status_text);
+					right_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
 				} else if (cfg_show_date || cfg_show_time) {
 					char n_date[32] = "", n_time[32] = "";
 					int n_dl = 0, n_tl = 0;
@@ -1433,21 +1518,28 @@ buttonpress(struct wl_listener *listener, void *data)
 						n_tl = strlen(n_time);
 					}
 					if (cfg_show_date && cfg_show_time)
-						right_chars = nbtn_cells + 3 + n_dl + 3 + n_tl;
+						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
 					else if (cfg_show_date)
-						right_chars = nbtn_cells + 3 + n_dl;
+						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl;
 					else if (cfg_show_time)
-						right_chars = nbtn_cells + 3 + n_tl;
+						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_tl;
 					else
-						right_chars = nbtn_cells;
+						right_chars = abtn_cells + 1 + nbtn_cells;
 				} else {
-					right_chars = nbtn_cells;
+					right_chars = abtn_cells + 1 + nbtn_cells;
 				}
 
 				{
 					int right_start = selmon->m.width - right_chars * cell_width;
-					int net_start = right_start;
+					int audio_start = right_start;
+					int audio_end = audio_start + abtn_cells * cell_width;
+					int net_start = audio_end + cell_width; /* 1-cell gap */
 					int net_end = net_start + nbtn_cells * cell_width;
+					if (bar_x >= audio_start && bar_x < audio_end) {
+						Arg a = {0};
+						togglaudiomenu(&a);
+						return;
+					}
 					if (bar_x >= net_start && bar_x < net_end) {
 						Arg a = {0};
 						togglenetmenu(&a);
@@ -1657,6 +1749,134 @@ buttonpress(struct wl_listener *listener, void *data)
 				/* Click outside menu - close it */
 				netmenu_active = 0;
 				updatenetmenu();
+				updatebars();
+			}
+		}
+
+		/* Handle audio menu clicks */
+		if (audiomenu_active && selmon) {
+			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
+			int menu_y = selmon->m.y + cell_height;
+			int menu_w = 25 * cell_width;
+			int menu_h = audiomenu_cells_h() * cell_height;
+
+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
+				/* Click is inside menu */
+				int rel_y = cursor->y - menu_y;
+				int clicked_row = rel_y / cell_height;
+
+				/* Row 0 is title bar, rows 1+ are content */
+				if (clicked_row >= 1 && clicked_row <= audiomenu_cells_h() - 2) {
+					int content_row = clicked_row - 1;
+
+					if (audio_current_category < 0) {
+						/* Clicked on a category */
+						int cat_idx = content_row + audio_scroll_offset;
+						if (cat_idx < audio_category_count) {
+							audio_current_category = cat_idx;
+							audio_current_group = -1;
+							audio_current_subgroup = -1;
+							audio_group_has_sub = 0;
+							audio_scroll_offset = 0;
+							audio_selected_row = 0;
+							audiomenu_build_groups();
+							if (audio_group_count == 0)
+								audio_current_group = 0; /* show direct entries */
+							updatemenuaudio();
+						}
+					} else if (audio_current_group < 0) {
+						/* In sub-topics view */
+						if (content_row == 0) {
+							/* Clicked "Back" - to categories */
+							audio_current_category = -1;
+							audio_current_group = -1;
+							audio_current_subgroup = -1;
+							audio_group_has_sub = 0;
+							audio_scroll_offset = 0;
+							audio_selected_row = 0;
+							updatemenuaudio();
+						} else {
+							/* Clicked on a sub-topic */
+							int target = content_row - 1; /* -1 for Back row */
+							if (target < audio_group_count) {
+								audio_current_group = target;
+								audio_current_subgroup = -1;
+								audio_scroll_offset = 0;
+								audio_selected_row = 0;
+								audiomenu_build_subgroups();
+								audio_group_has_sub = (audio_subgroup_count > 0);
+								updatemenuaudio();
+							}
+						}
+					} else if (audio_group_has_sub && audio_current_subgroup < 0) {
+						/* In entities (sinks/sources) view */
+						if (content_row == 0) {
+							/* Clicked "Back" - to sub-topics */
+							audio_current_group = -1;
+							audio_current_subgroup = -1;
+							audio_group_has_sub = 0;
+							audio_scroll_offset = 0;
+							audio_selected_row = 0;
+							updatemenuaudio();
+						} else {
+							/* Clicked on an entity */
+							int target = content_row - 1; /* -1 for Back row */
+							if (target < audio_subgroup_count) {
+								audio_current_subgroup = target;
+								audio_scroll_offset = 0;
+								audio_selected_row = 0;
+								updatemenuaudio();
+							}
+						}
+					} else {
+						/* In actions view */
+						if (content_row == 0) {
+							/* Clicked "Back" */
+							if (audio_current_subgroup >= 0) {
+								audio_current_subgroup = -1;
+							} else if (audio_group_count > 0) {
+								audio_current_group = -1;
+							} else {
+								audio_current_category = -1;
+								audio_current_group = -1;
+							}
+							audio_group_has_sub = 0;
+							audio_scroll_offset = 0;
+							audio_selected_row = 0;
+							updatemenuaudio();
+						} else {
+							/* Clicked on an action */
+							const char *cat = audio_categories[audio_current_category];
+							const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
+							const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
+							int e_idx = 0;
+							int display_row = 1;
+							int i;
+
+							for (i = 0; i < audio_entry_count; i++) {
+								if (strcmp(audio_entries[i].category, cat) == 0 &&
+								    strcmp(audio_entries[i].group, group) == 0 &&
+								    strcmp(audio_entries[i].subgroup, sub) == 0) {
+									if (e_idx >= audio_scroll_offset) {
+										if (display_row == content_row) {
+											/* Found the clicked entry - run it */
+											audio_run(&audio_entries[i]);
+											return;
+										}
+										display_row++;
+									}
+									e_idx++;
+								}
+							}
+						}
+					}
+				}
+				return; /* Consume the click */
+			} else {
+				/* Click outside menu - close it */
+				audiomenu_active = 0;
+				updatemenuaudio();
 				updatebars();
 			}
 		}
@@ -1999,6 +2219,17 @@ cleanup(void)
 	/* Clean up any in-flight network menu data load */
 	netmenu_cancel_load();
 	net_password_reset();
+
+	/* Clean up audio menu buffer */
+	if (audiomenu_buffer) {
+		wlr_scene_buffer_set_buffer(audiomenu_buffer, NULL);
+	}
+	if (audiomenu_tb) {
+		wlr_buffer_drop(&audiomenu_tb->base);
+		audiomenu_tb = NULL;
+	}
+	/* Clean up any in-flight audio menu data load */
+	audiomenu_cancel_load();
 
 	/* Clean up theme menu buffer */
 	if (thememenu_buffer) {
@@ -4528,6 +4759,12 @@ togglenetmenu(const Arg *arg)
 {
 	netmenu_active = !netmenu_active;
 	if (netmenu_active) {
+		/* Only one menu at a time: the audio and app menus share the screen
+		 * with this one, so close them to avoid overlap. */
+		audiomenu_active = 0;
+		appmenu_active = 0;
+		updatemenuaudio();
+		updateappmenu();
 		net_password_reset();
 		net_current_category = -1;
 		net_current_group = -1;
@@ -4889,6 +5126,1206 @@ netmenukey(xkb_keysym_t sym)
 	return 0;
 }
 
+/* ==================== AUDIO MENU ====================
+ * Volume / output selection / microphones, fed by audiomenu_cmd (default
+ * "tbwm-audio-menu"). Unlike the network menu, running an action keeps the
+ * menu open and re-runs the helper so the new state is shown immediately. */
+
+/* premul_argb / RGB_TO_ARGB are defined further down; declare them here so
+ * the audio menu render (defined before them) can use them. */
+static inline uint32_t premul_argb(uint32_t argb);
+#ifndef RGB_TO_ARGB
+#define RGB_TO_ARGB(rgb) (rgb)
+#endif
+
+static int
+audiomenu_item_count(void)
+{
+	if (audio_current_category < 0) {
+		return audio_category_count;
+	} else if (audio_current_group < 0) {
+		return audio_group_count + 1; /* +1 for "< Back" */
+	} else if (audio_group_has_sub && audio_current_subgroup < 0) {
+		return audio_subgroup_count + 1; /* +1 for "< Back" */
+	} else if (audio_current_subgroup < 0) {
+		const char *cat = audio_categories[audio_current_category];
+		const char *group = audio_groups[audio_current_group];
+		int count = 1; /* "< Back" item */
+		int i;
+		for (i = 0; i < audio_entry_count; i++) {
+			if (strcmp(audio_entries[i].category, cat) == 0 &&
+			    strcmp(audio_entries[i].group, group) == 0 &&
+			    audio_entries[i].subgroup[0] == '\0')
+				count++;
+		}
+		return count;
+	} else {
+		const char *cat = audio_categories[audio_current_category];
+		const char *group = audio_groups[audio_current_group];
+		const char *sub = audio_subgroups[audio_current_subgroup];
+		int count = 1; /* "< Back" item */
+		int i;
+		for (i = 0; i < audio_entry_count; i++) {
+			if (strcmp(audio_entries[i].category, cat) == 0 &&
+			    strcmp(audio_entries[i].group, group) == 0 &&
+			    strcmp(audio_entries[i].subgroup, sub) == 0)
+				count++;
+		}
+		return count;
+	}
+}
+
+/* Height of the audio menu in cells, fitted to its current content so there
+ * is no empty vertical space below the items. Min 3 cells (frame + 1 row),
+ * max 25 cells (23 content rows, the old fixed size). */
+static int
+audiomenu_cells_h(void)
+{
+	int need_rows = audiomenu_item_count();
+
+	if (need_rows < 1)
+		need_rows = 1;
+	if (need_rows > 23)
+		need_rows = 23;
+	return need_rows + 2;
+}
+
+/* Does `s` start with one of the audio action verbs? Action names can carry
+ * suffixes (e.g. "Subir 5%"), so this is a prefix match; the read-only status
+ * rows (legacy 4-column lines) start with '[' or a device name and never
+ * collide with these verbs. */
+static int
+audiomenu_is_action(const char *s)
+{
+	static const char *const verbs[] = {
+		"Subir", "Bajar", "Silenciar", "Elegir", "Mutear", "Info", "Mic silencio"
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
+		if (strncmp(s, verbs[i], strlen(verbs[i])) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* Parse a NUL-terminated audiomenu payload into dst[] and return the entry
+ * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>exec".
+ * The legacy format "Category<TAB>Group<TAB>Name<TAB>exec" is still detected
+ * (used for the read-only "Volumen" status label). */
+static int
+audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
+{
+	const char *p = out;
+	int n = 0;
+
+	while (n < max && *p) {
+		char line[512];
+		char *tok[6];
+		int nt = 0;
+
+		{
+			const char *eol = strchr(p, '\n');
+			size_t len = eol ? (size_t)(eol - p) : strlen(p);
+			if (len >= sizeof(line))
+				len = sizeof(line) - 1;
+			memcpy(line, p, len);
+			line[len] = '\0';
+			p = eol ? eol + 1 : p + len;
+		}
+
+		if (!line[0])
+			continue;
+
+		{
+			char *t = line;
+			while (nt < 6) {
+				tok[nt] = t;
+				nt++;
+				t = strchr(t, '\t');
+				if (!t)
+					break;
+				*t++ = '\0';
+			}
+		}
+
+		if (nt >= 5 && audiomenu_is_action(tok[3])) {
+			/* new: cat group subgroup action exec */
+			strncpy(dst[n].category, tok[0], AUDIO_CAT_LEN - 1);
+			strncpy(dst[n].group, tok[1], AUDIO_CAT_LEN - 1);
+			strncpy(dst[n].subgroup, tok[2], AUDIO_CAT_LEN - 1);
+			strncpy(dst[n].name, tok[3], AUDIO_NAME_LEN - 1);
+			strncpy(dst[n].exec, tok[4], AUDIO_EXEC_LEN - 1);
+		} else {
+			/* legacy: cat group name exec */
+			strncpy(dst[n].category, tok[0], AUDIO_CAT_LEN - 1);
+			strncpy(dst[n].group, tok[1], AUDIO_CAT_LEN - 1);
+			dst[n].subgroup[0] = '\0';
+			strncpy(dst[n].name, tok[2], AUDIO_NAME_LEN - 1);
+			strncpy(dst[n].exec, tok[3], AUDIO_EXEC_LEN - 1);
+		}
+		dst[n].category[AUDIO_CAT_LEN - 1] = '\0';
+		dst[n].group[AUDIO_CAT_LEN - 1] = '\0';
+		dst[n].subgroup[AUDIO_CAT_LEN - 1] = '\0';
+		dst[n].name[AUDIO_NAME_LEN - 1] = '\0';
+		dst[n].exec[AUDIO_EXEC_LEN - 1] = '\0';
+		n++;
+	}
+	return n;
+}
+
+/* Rebuild audio_categories from the current audio_entries, preserving the
+ * existing category order so the list never reorders between refreshes. */
+static void
+audiomenu_rebuild_categories(void)
+{
+	char old[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
+	int oldn = audio_category_count;
+	int i;
+	int ci;
+	int j;
+
+	for (i = 0; i < oldn; i++)
+		strcpy(old[i], audio_categories[i]);
+
+	audio_category_count = 0;
+
+	for (i = 0; i < oldn; i++) {
+		int has = 0;
+		for (ci = 0; ci < audio_entry_count; ci++) {
+			if (strcmp(audio_entries[ci].category, old[i]) == 0) {
+				has = 1;
+				break;
+			}
+		}
+		if (has && audio_category_count < MAX_AUDIO_CATEGORIES) {
+			strncpy(audio_categories[audio_category_count], old[i], AUDIO_CAT_LEN - 1);
+			audio_categories[audio_category_count][AUDIO_CAT_LEN - 1] = '\0';
+			audio_category_count++;
+		}
+	}
+	for (ci = 0; ci < audio_entry_count; ci++) {
+		for (j = 0; j < audio_category_count; j++) {
+			if (strcmp(audio_categories[j], audio_entries[ci].category) == 0)
+				break;
+		}
+		if (j >= audio_category_count && audio_category_count < MAX_AUDIO_CATEGORIES) {
+			strncpy(audio_categories[audio_category_count], audio_entries[ci].category, AUDIO_CAT_LEN - 1);
+			audio_categories[audio_category_count][AUDIO_CAT_LEN - 1] = '\0';
+			audio_category_count++;
+		}
+	}
+}
+
+/* Is `cat` present in the given category set? */
+static int
+audiomenu_cat_in_set(const char *cat, const char scats[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN], int n)
+{
+	int ci;
+	for (ci = 0; ci < n; ci++) {
+		if (strcmp(scats[ci], cat) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+/* Merge a freshly parsed stream (src) into the live menu data. Categories not
+ * covered by src keep their existing entries so a focused refresh never blanks
+ * the other category. When grow is set (child still streaming), covered
+ * entries not re-emitted yet are kept too; the final stream is authoritative
+ * for the categories it covers. */
+static void
+audiomenu_merge_parse(const AudioEntry *src, int src_count, int grow)
+{
+	char scats[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
+	int scatn = 0;
+	AudioEntry merged[MAX_AUDIO_ENTRIES];
+	int mc = 0;
+	int i;
+	int j;
+	int ci;
+
+	for (i = 0; i < src_count; i++) {
+		for (ci = 0; ci < scatn; ci++) {
+			if (strcmp(scats[ci], src[i].category) == 0)
+				break;
+		}
+		if (ci >= scatn && scatn < MAX_AUDIO_CATEGORIES) {
+			strncpy(scats[scatn], src[i].category, AUDIO_CAT_LEN - 1);
+			scats[scatn][AUDIO_CAT_LEN - 1] = '\0';
+			scatn++;
+		}
+	}
+
+	for (i = 0; i < audio_entry_count && mc < MAX_AUDIO_ENTRIES; i++) {
+		if (!audiomenu_cat_in_set(audio_entries[i].category, scats, scatn))
+			merged[mc++] = audio_entries[i];
+	}
+
+	if (grow) {
+		for (i = 0; i < audio_entry_count && mc < MAX_AUDIO_ENTRIES; i++) {
+			int dup = 0;
+			if (!audiomenu_cat_in_set(audio_entries[i].category, scats, scatn))
+				continue;
+			for (j = 0; j < src_count; j++) {
+				if (strcmp(src[j].category, audio_entries[i].category) == 0 &&
+				    strcmp(src[j].group, audio_entries[i].group) == 0 &&
+				    strcmp(src[j].subgroup, audio_entries[i].subgroup) == 0) {
+					dup = 1;
+					break;
+				}
+			}
+			if (!dup)
+				merged[mc++] = audio_entries[i];
+		}
+	}
+
+	for (i = 0; i < src_count && mc < MAX_AUDIO_ENTRIES; i++)
+		merged[mc++] = src[i];
+
+	for (i = 0; i < mc; i++)
+		audio_entries[i] = merged[i];
+	audio_entry_count = mc;
+	audiomenu_rebuild_categories();
+}
+
+/* Build the list of sub-topics (groups) for the currently selected category.
+ * Entries with an empty group are treated as direct entries of a single
+ * implicit group, so the group view is skipped. */
+static void
+audiomenu_build_groups(void)
+{
+	int gi;
+	int i;
+
+	audio_group_count = 0;
+	for (i = 0; i < audio_entry_count; i++) {
+		if (audio_current_category < 0 ||
+		    strcmp(audio_entries[i].category, audio_categories[audio_current_category]) != 0)
+			continue;
+		if (audio_entries[i].group[0] == '\0')
+			continue; /* direct entries: no sub-topic */
+		for (gi = 0; gi < audio_group_count; gi++) {
+			if (strcmp(audio_groups[gi], audio_entries[i].group) == 0)
+				break;
+		}
+		if (gi >= audio_group_count && audio_group_count < MAX_AUDIO_CATEGORIES) {
+			strncpy(audio_groups[audio_group_count], audio_entries[i].group, AUDIO_CAT_LEN - 1);
+			audio_groups[audio_group_count][AUDIO_CAT_LEN - 1] = '\0';
+			audio_group_count++;
+		}
+	}
+}
+
+/* Build the list of entity sub-levels (e.g. each sink/source) for the
+ * currently selected group. If the group has no sub-level entries,
+ * audio_group_has_sub is left 0 and the group's actions are shown directly. */
+static void
+audiomenu_build_subgroups(void)
+{
+	int gi;
+	int i;
+
+	audio_subgroup_count = 0;
+	for (i = 0; i < audio_entry_count; i++) {
+		if (audio_current_category < 0 ||
+		    strcmp(audio_entries[i].category, audio_categories[audio_current_category]) != 0)
+			continue;
+		if (audio_entries[i].group[0] == '\0' ||
+		    strcmp(audio_entries[i].group, audio_groups[audio_current_group]) != 0)
+			continue;
+		if (audio_entries[i].subgroup[0] == '\0')
+			continue;
+		for (gi = 0; gi < audio_subgroup_count; gi++) {
+			if (strcmp(audio_subgroups[gi], audio_entries[i].subgroup) == 0)
+				break;
+		}
+		if (gi >= audio_subgroup_count && audio_subgroup_count < MAX_AUDIO_CATEGORIES) {
+			strncpy(audio_subgroups[audio_subgroup_count], audio_entries[i].subgroup, AUDIO_CAT_LEN - 1);
+			audio_subgroups[audio_subgroup_count][AUDIO_CAT_LEN - 1] = '\0';
+			audio_subgroup_count++;
+		}
+	}
+}
+
+/* Stop an in-flight asynchronous load: remove the event source, close the
+ * pipe and kill/reap the child. */
+static void
+audiomenu_cancel_load(void)
+{
+	if (audiomenu_source) {
+		wl_event_source_remove(audiomenu_source);
+		audiomenu_source = NULL;
+	}
+	if (audiomenu_pipe_fd >= 0) {
+		close(audiomenu_pipe_fd);
+		audiomenu_pipe_fd = -1;
+	}
+	if (audiomenu_child_pid > 0) {
+		kill(audiomenu_child_pid, SIGTERM);
+		waitpid(audiomenu_child_pid, NULL, WNOHANG);
+		audiomenu_child_pid = -1;
+	}
+}
+
+/* Re-parse the accumulated audiomenu output and re-render, preserving the
+ * user's navigation position by name. Called while the child is streaming and
+ * once it exits. The stream is merged into the live data instead of replacing
+ * it, so a refresh never blanks categories the user is not looking at. */
+static void
+audiomenu_reparse(void)
+{
+	AudioEntry tmp[MAX_AUDIO_ENTRIES];
+	int tmp_count;
+	char saved_cat[AUDIO_CAT_LEN] = "";
+	char saved_group[AUDIO_CAT_LEN] = "";
+	char saved_subgroup[AUDIO_CAT_LEN] = "";
+	int keep = 0;
+	int gi;
+	int i;
+
+	/* Remember where the user was so a refresh doesn't jump */
+	if (audio_current_category >= 0 && audio_current_category < audio_category_count) {
+		strncpy(saved_cat, audio_categories[audio_current_category], AUDIO_CAT_LEN - 1);
+		saved_cat[AUDIO_CAT_LEN - 1] = '\0';
+		if (audio_current_group >= 0 && audio_current_group < audio_group_count)
+			strncpy(saved_group, audio_groups[audio_current_group], AUDIO_CAT_LEN - 1);
+		if (audio_current_subgroup >= 0 && audio_current_subgroup < audio_subgroup_count)
+			strncpy(saved_subgroup, audio_subgroups[audio_current_subgroup], AUDIO_CAT_LEN - 1);
+		keep = 1;
+	}
+
+	audiomenu_out[audiomenu_out_len] = '\0';
+	tmp_count = audiomenu_parse_buffer(audiomenu_out, tmp, MAX_AUDIO_ENTRIES);
+	audiomenu_merge_parse(tmp, tmp_count, audiomenu_child_pid > 0);
+
+	if (keep) {
+		audio_current_category = -1;
+		for (i = 0; i < audio_category_count; i++) {
+			if (strcmp(audio_categories[i], saved_cat) == 0) {
+				audio_current_category = i;
+				break;
+			}
+		}
+	}
+	audiomenu_build_groups();
+	if (keep && audio_current_category >= 0) {
+		audio_current_group = -1;
+		for (gi = 0; gi < audio_group_count; gi++) {
+			if (strcmp(audio_groups[gi], saved_group) == 0) {
+				audio_current_group = gi;
+				break;
+			}
+		}
+		if (audio_current_group >= 0) {
+			audio_current_subgroup = -1;
+			audiomenu_build_subgroups();
+			audio_group_has_sub = (audio_subgroup_count > 0);
+			for (gi = 0; gi < audio_subgroup_count; gi++) {
+				if (strcmp(audio_subgroups[gi], saved_subgroup) == 0) {
+					audio_current_subgroup = gi;
+					break;
+				}
+			}
+		}
+	}
+	if (audiomenu_active)
+		updatemenuaudio();
+}
+
+/* Read audiomenu command output as it arrives; finalize when the child closes
+ * the pipe (EOF). Never blocks the event loop. */
+static int
+audiomenu_read_cb(int fd, uint32_t mask, void *data)
+{
+	char buf[4096];
+	ssize_t r;
+	int done = 0;
+
+	(void)mask;
+	(void)data;
+
+	while ((r = read(fd, buf, sizeof(buf))) > 0) {
+		ssize_t n = r;
+		if (audiomenu_out_len + n > (int)sizeof(audiomenu_out) - 1) {
+			n = (int)sizeof(audiomenu_out) - 1 - audiomenu_out_len;
+			done = 1;
+		}
+		if (n > 0) {
+			memcpy(audiomenu_out + audiomenu_out_len, buf, n);
+			audiomenu_out_len += n;
+		}
+		if (!done && n > 0 && buf[n - 1] == '\n' && audiomenu_active)
+			audiomenu_reparse();
+		if (done)
+			break;
+	}
+	if (r == 0)
+		done = 1;
+
+	if (done) {
+		if (audiomenu_source) {
+			wl_event_source_remove(audiomenu_source);
+			audiomenu_source = NULL;
+		}
+		if (audiomenu_pipe_fd >= 0) {
+			close(audiomenu_pipe_fd);
+			audiomenu_pipe_fd = -1;
+		}
+		if (audiomenu_child_pid > 0) {
+			waitpid(audiomenu_child_pid, NULL, WNOHANG);
+			audiomenu_child_pid = -1;
+		}
+		audiomenu_reparse();
+	}
+	return 1;
+}
+
+/* Start an asynchronous load of the audiomenu data. The command runs in a
+ * forked child; its stdout is read through a non-blocking pipe in the
+ * Wayland event loop, so this returns immediately. */
+static void
+audio_refresh(void)
+{
+	int p[2];
+	int flags;
+	pid_t pid;
+
+	audiomenu_cancel_load();
+	audiomenu_out_len = 0;
+	audiomenu_out[0] = '\0';
+
+	if (audiomenu_cmd[0] == '\0')
+		return;
+
+	if (pipe(p) < 0) {
+		tbwm_log(TBWM_LOG_WARN, "tbwm: audiomenu: pipe() failed: %s\n", strerror(errno));
+		return;
+	}
+
+	flags = fcntl(p[0], F_GETFL, 0);
+	if (flags >= 0)
+		fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
+
+	pid = fork();
+	if (pid < 0) {
+		tbwm_log(TBWM_LOG_WARN, "tbwm: audiomenu: fork() failed: %s\n", strerror(errno));
+		close(p[0]);
+		close(p[1]);
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		close(p[0]);
+		dup2(p[1], STDOUT_FILENO);
+		dup2(p[1], STDERR_FILENO);
+		close(p[1]);
+		execl("/bin/sh", "/bin/sh", "-c", audiomenu_cmd, (char *)NULL);
+		_exit(127);
+	}
+
+	close(p[1]);
+	audiomenu_pipe_fd = p[0];
+	audiomenu_child_pid = pid;
+	audiomenu_source = wl_event_loop_add_fd(wl_display_get_event_loop(dpy),
+		audiomenu_pipe_fd, WL_EVENT_READABLE, audiomenu_read_cb, NULL);
+	if (!audiomenu_source) {
+		close(audiomenu_pipe_fd);
+		audiomenu_pipe_fd = -1;
+		audiomenu_child_pid = -1;
+		kill(pid, SIGTERM);
+		waitpid(pid, NULL, WNOHANG);
+	}
+}
+
+static void
+togglaudiomenu(const Arg *arg)
+{
+	(void)arg;
+	audiomenu_active = !audiomenu_active;
+	if (audiomenu_active) {
+		/* Only one menu at a time: close the network and app menus so they
+		 * don't overlap this one on screen. */
+		netmenu_active = 0;
+		appmenu_active = 0;
+		updatenetmenu();
+		updateappmenu();
+		audio_current_category = -1;
+		audio_current_group = -1;
+		audio_current_subgroup = -1;
+		audio_group_has_sub = 0;
+		audio_group_count = 0;
+		audio_subgroup_count = 0;
+		audio_scroll_offset = 0;
+		audio_selected_row = 0;
+		audio_refresh();
+	} else {
+		audiomenu_cancel_load();
+	}
+	updatemenuaudio();
+	updatebars();
+}
+
+/* Run an audio entry's command, then refresh the menu so the new state is
+ * shown. The command runs synchronously in a short-lived child (wpctl calls
+ * complete in milliseconds) so the refresh always reads the updated value.
+ * The menu stays open so volume / selection can be adjusted in steps. */
+static void
+audio_run(AudioEntry *e)
+{
+	pid_t pid;
+	int status;
+
+	pid = fork();
+	if (pid < 0) {
+		audio_refresh();
+		return;
+	}
+	if (pid == 0) {
+		setsid();
+		execl("/bin/sh", "/bin/sh", "-c", e->exec, (char *)NULL);
+		_exit(127);
+	}
+	waitpid(pid, &status, 0);
+	audio_refresh();
+}
+
+static int
+audiomenukey(xkb_keysym_t sym)
+{
+	int content_rows = audiomenu_cells_h() - 2;
+	int item_count = audiomenu_item_count();
+
+	if (sym == XKB_KEY_Escape) {
+		if (audio_current_subgroup >= 0) {
+			if (audio_group_has_sub) {
+				audio_current_subgroup = -1;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				audio_current_subgroup = -1;
+			}
+		} else if (audio_current_group >= 0) {
+			if (audio_group_count > 0) {
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				audio_current_category = -1;
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			}
+		} else if (audio_current_category >= 0) {
+			audio_current_category = -1;
+			audio_current_group = -1;
+			audio_current_subgroup = -1;
+			audio_group_has_sub = 0;
+			audio_scroll_offset = 0;
+			audio_selected_row = 0;
+			updatemenuaudio();
+		} else {
+			audiomenu_active = 0;
+			updatemenuaudio();
+			updatebars();
+		}
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
+		if (audio_selected_row > 0) {
+			audio_selected_row--;
+		} else if (audio_scroll_offset > 0) {
+			audio_scroll_offset--;
+		}
+		updatemenuaudio();
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
+		int max_row = (item_count < content_rows) ? item_count - 1 : content_rows - 1;
+		if (audio_selected_row < max_row && audio_selected_row + audio_scroll_offset < item_count - 1) {
+			audio_selected_row++;
+		} else if (audio_selected_row + audio_scroll_offset < item_count - 1) {
+			audio_scroll_offset++;
+		}
+		updatemenuaudio();
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right || sym == XKB_KEY_l) {
+		int selected_idx = audio_selected_row + audio_scroll_offset;
+
+		if (audio_current_category < 0) {
+			/* Select a category */
+			if (selected_idx < audio_category_count) {
+				audio_current_category = selected_idx;
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				audiomenu_build_groups();
+				if (audio_group_count == 0)
+					audio_current_group = 0; /* show direct entries */
+				updatemenuaudio();
+			}
+		} else if (audio_current_group < 0) {
+			/* Showing sub-topics */
+			if (selected_idx == 0) {
+				/* Back to categories */
+				audio_current_category = -1;
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				int target = selected_idx - 1; /* -1 for Back row */
+				if (target < audio_group_count) {
+					audio_current_group = target;
+					audio_current_subgroup = -1;
+					audio_scroll_offset = 0;
+					audio_selected_row = 0;
+					audiomenu_build_subgroups();
+					audio_group_has_sub = (audio_subgroup_count > 0);
+					updatemenuaudio();
+				}
+			}
+		} else if (audio_group_has_sub && audio_current_subgroup < 0) {
+			/* Showing entities (sinks/sources) of the selected sub-topic */
+			if (selected_idx == 0) {
+				/* Back to sub-topics */
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				int target = selected_idx - 1; /* -1 for Back row */
+				if (target < audio_subgroup_count) {
+					audio_current_subgroup = target;
+					audio_scroll_offset = 0;
+					audio_selected_row = 0;
+					updatemenuaudio();
+				}
+			}
+		} else {
+			/* Showing actions */
+			if (selected_idx == 0) {
+				/* Back to sub-topics / entities / categories */
+				if (audio_current_subgroup >= 0) {
+					audio_current_subgroup = -1;
+					audio_scroll_offset = 0;
+					audio_selected_row = 0;
+					updatemenuaudio();
+				} else if (audio_group_count > 0) {
+					audio_current_group = -1;
+					audio_current_subgroup = -1;
+					audio_group_has_sub = 0;
+					audio_scroll_offset = 0;
+					audio_selected_row = 0;
+					updatemenuaudio();
+				} else {
+					audio_current_category = -1;
+					audio_current_group = -1;
+					audio_current_subgroup = -1;
+					audio_group_has_sub = 0;
+					audio_scroll_offset = 0;
+					audio_selected_row = 0;
+					updatemenuaudio();
+				}
+			} else {
+				const char *cat = audio_categories[audio_current_category];
+				const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
+				const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
+				int e_idx = 0;
+				int target = selected_idx - 1; /* -1 for Back row */
+				int i;
+
+				for (i = 0; i < audio_entry_count; i++) {
+					if (strcmp(audio_entries[i].category, cat) == 0 &&
+					    strcmp(audio_entries[i].group, group) == 0 &&
+					    strcmp(audio_entries[i].subgroup, sub) == 0) {
+						if (e_idx == target) {
+							audio_run(&audio_entries[i]);
+							return 1;
+						}
+						e_idx++;
+					}
+				}
+			}
+		}
+		return 1;
+	}
+
+	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
+		if (audio_current_subgroup >= 0) {
+			if (audio_group_has_sub) {
+				audio_current_subgroup = -1;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				audio_current_subgroup = -1;
+			}
+		} else if (audio_current_group >= 0) {
+			if (audio_group_count > 0) {
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			} else {
+				audio_current_category = -1;
+				audio_current_group = -1;
+				audio_current_subgroup = -1;
+				audio_group_has_sub = 0;
+				audio_scroll_offset = 0;
+				audio_selected_row = 0;
+				updatemenuaudio();
+			}
+		} else if (audio_current_category >= 0) {
+			audio_current_category = -1;
+			audio_current_group = -1;
+			audio_current_subgroup = -1;
+			audio_group_has_sub = 0;
+			audio_scroll_offset = 0;
+			audio_selected_row = 0;
+			updatemenuaudio();
+		}
+		return 1;
+	}
+
+	/* Don't consume unhandled keys - allows the toggle binding to work */
+	return 0;
+}
+
+/* Draw a row's text as a marquee: the string first rests at its normal
+ * left-aligned position for hold_px ticks (~0.7s at 30fps) so the beginning
+ * is readable, then it pans left continuously as a seamless ticker (the text
+ * is drawn twice with period text_px, so it wraps with no blank gap and no
+ * visible jump). scroll_px advances one pixel per scrolltimer tick.
+ * Characters outside the visible content area
+ * [cell_width, cell_width + visible_px) are clipped. */
+static void
+render_scrolling_row(uint32_t *pixels, int menu_width, int menu_height,
+		int text_y, const char *text, uint32_t fg, int scroll_px, int mtext)
+{
+	int i, len = 0;
+	while (text[len])
+		len++;
+	int text_px = len * cell_width;
+	int gap_px = cell_width; /* one cell of separation between copies */
+	int period_px = text_px + gap_px;
+	int visible_px = mtext * cell_width;
+	int hold_px = 21;
+	int left_edge;
+	int off;
+
+	if (scroll_px < hold_px) {
+		left_edge = cell_width; /* hold: show the text from the beginning */
+		off = 0;
+	} else {
+		off = (scroll_px - hold_px) % period_px;
+		left_edge = cell_width - off;
+	}
+
+	for (i = 0; i < len; i++) {
+		int x = left_edge + i * cell_width;
+		if (x >= cell_width && x < cell_width + visible_px) {
+			render_char_to_buffer(pixels, menu_width, menu_height, x, text_y,
+				(unsigned char)text[i], fg);
+		} else {
+			x += period_px; /* second copy, separated by the gap, seamless */
+			if (x >= cell_width && x < cell_width + visible_px)
+				render_char_to_buffer(pixels, menu_width, menu_height, x, text_y,
+					(unsigned char)text[i], fg);
+		}
+	}
+}
+
+/* Draw a content row. If it is the selected row and the text overflows the
+ * content area, use the marquee and flag that scrolling is needed; otherwise
+ * draw the truncated static text as before. marquee_px is the caller's pixel
+ * offset; *marquee_needed (may be NULL) is set to 1 when scrolling starts. */
+static void
+render_row_text(uint32_t *pixels, int menu_width, int menu_height,
+		int text_y, const char *text, uint32_t fg, int mtext, int is_selected,
+		int marquee_px, int *marquee_needed)
+{
+	int ci;
+
+	if (is_selected && (int)strlen(text) > mtext) {
+		render_scrolling_row(pixels, menu_width, menu_height, text_y, text, fg,
+			marquee_px, mtext);
+		if (marquee_needed)
+			*marquee_needed = 1;
+		return;
+	}
+	for (ci = 0; text[ci] && ci < mtext; ci++) {
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			cell_width + ci * cell_width, text_y, (unsigned char)text[ci], fg);
+	}
+}
+
+/* Audio menu (volume / outputs / microphones): a flat text list fed by
+ * audiomenu_cmd. Same layout as the network menu, minus the pairing/password
+ * views. Actions run their command and refresh, keeping the menu open. */
+static void
+updatemenuaudio(void)
+{
+	struct TitleBuffer *tb;
+	uint32_t *pixels;
+	int menu_cells_w = 25;
+	int menu_cells_h = audiomenu_cells_h();
+	int menu_width = menu_cells_w * cell_width;
+	int menu_height = menu_cells_h * cell_height;
+	int i, x, y, row, col;
+	uint32_t frame_bg = premul_argb(cfg_border_color);
+	uint32_t line_color = RGB_TO_ARGB(cfg_border_line_color);
+	uint32_t content_bg = premul_argb(cfg_menu_color);
+	uint32_t text_color = RGB_TO_ARGB(cfg_menu_text_color);
+	uint32_t highlight_bg = premul_argb(cfg_border_color);
+	uint32_t highlight_fg = RGB_TO_ARGB(cfg_border_line_color);
+
+	if (!audiomenu_active) {
+		if (audiomenu_buffer)
+			wlr_scene_node_set_enabled(&audiomenu_buffer->node, 0);
+		audio_menu_marquee_needed = 0;
+		audio_menu_marquee_px = 0;
+		return;
+	}
+
+	/* The height is content-fitted, so recreate the cached buffer when the
+	 * number of rows changed (mirrors the shutdown cleanup). */
+	if (audiomenu_tb && audiomenu_tb->base.height != menu_height) {
+		if (audiomenu_buffer)
+			wlr_scene_buffer_set_buffer(audiomenu_buffer, NULL);
+		wlr_buffer_drop(&audiomenu_tb->base);
+		audiomenu_tb = NULL;
+	}
+
+	if (!audiomenu_tb) {
+		audiomenu_tb = ecalloc(1, sizeof(*audiomenu_tb));
+		audiomenu_tb->stride = menu_width * 4;
+		audiomenu_tb->data = ecalloc(1, audiomenu_tb->stride * menu_height);
+		wlr_buffer_init(&audiomenu_tb->base, &titlebuf_impl, menu_width, menu_height);
+		titlebuf_alloc_count++;
+	}
+	tb = audiomenu_tb;
+	pixels = tb->data;
+
+	/* Reset the marquee flag; it is re-set below if the selected row overflows */
+	audio_menu_marquee_needed = 0;
+
+	/* Restart the marquee from position 0 whenever the selection moves */
+	menu_marquee_begin(&audio_menu_marquee_px, &audio_menu_marquee_selkey,
+		((audio_current_category + 3) * 100000) +
+		((audio_current_group + 3) * 1000) +
+		((audio_current_subgroup + 3) * 10) + audio_selected_row);
+
+	/* Fill entire background with content color first */
+	for (i = 0; i < menu_width * menu_height; i++) {
+		pixels[i] = content_bg;
+	}
+
+	/* Draw frame background for border cells */
+	for (y = 0; y < cell_height; y++) {
+		for (x = 0; x < menu_width; x++) {
+			pixels[y * menu_width + x] = frame_bg;
+		}
+	}
+	for (y = (menu_cells_h - 1) * cell_height; y < menu_height; y++) {
+		for (x = 0; x < menu_width; x++) {
+			pixels[y * menu_width + x] = frame_bg;
+		}
+	}
+	for (y = 0; y < menu_height; y++) {
+		for (x = 0; x < cell_width; x++) {
+			pixels[y * menu_width + x] = frame_bg;
+		}
+	}
+	for (y = 0; y < menu_height; y++) {
+		for (x = (menu_cells_w - 1) * cell_width; x < menu_width; x++) {
+			pixels[y * menu_width + x] = frame_bg;
+		}
+	}
+
+	/* Draw box-drawing characters for the frame */
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, 0, 0x2554, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, 0, 0x2557, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, (menu_cells_h - 1) * cell_height, 0x255A, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
+
+	/* Top edge with title */
+	{
+		const char *title = "Audio";
+		int title_len = strlen(title);
+		int title_start = 2;
+		for (col = 1; col < menu_cells_w - 1; col++) {
+			if (col >= title_start && col < title_start + title_len) {
+				render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, 0, title[col - title_start], line_color);
+			} else {
+				render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, 0, 0x2550, line_color);
+			}
+		}
+	}
+	/* Bottom edge */
+	for (col = 1; col < menu_cells_w - 1; col++) {
+		render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, (menu_cells_h - 1) * cell_height, 0x2550, line_color);
+	}
+	/* Left edge */
+	for (row = 1; row < menu_cells_h - 1; row++) {
+		render_char_to_buffer(pixels, menu_width, menu_height, 0, row * cell_height, 0x2551, line_color);
+	}
+	/* Right edge */
+	for (row = 1; row < menu_cells_h - 1; row++) {
+		render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
+	}
+
+	/* Draw content: categories, sub-topics or entries */
+	{
+		int crows = menu_cells_h - 2;
+		int mtext = menu_cells_w - 2;
+
+		if (audio_current_category < 0) {
+			/* Show categories */
+			if (audio_category_count == 0 && audiomenu_child_pid > 0) {
+				/* Data still loading on first open */
+				const char *loading = "Loading...";
+				int li;
+				for (li = 0; loading[li] && li < mtext; li++) {
+					render_char_to_buffer(pixels, menu_width, menu_height,
+						cell_width + li * cell_width, cell_height,
+						loading[li], text_color);
+				}
+			}
+			for (row = 0; row < crows && row + audio_scroll_offset < audio_category_count; row++) {
+				int item_idx = row + audio_scroll_offset;
+				int text_y = (row + 1) * cell_height;
+				int is_selected = (row == audio_selected_row);
+				uint32_t row_fg = is_selected ? highlight_fg : text_color;
+				const char *cat_name = audio_categories[item_idx];
+
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
+						}
+					}
+				}
+
+				render_row_text(pixels, menu_width, menu_height, text_y,
+					cat_name, row_fg, mtext, is_selected,
+					audio_menu_marquee_px, &audio_menu_marquee_needed);
+			}
+		} else if (audio_current_group < 0) {
+			/* Show sub-topics (groups) of the selected category */
+			int gi;
+			int displayed = 0;
+			int is_selected;
+			uint32_t row_fg;
+
+			/* First row: "< Back" */
+			is_selected = (audio_selected_row == 0);
+			row_fg = is_selected ? highlight_fg : text_color;
+			{
+				int text_y = cell_height;
+				const char *back = "< Back";
+				int bi;
+
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
+						}
+					}
+				}
+
+				for (bi = 0; back[bi] && bi < mtext; bi++) {
+					render_char_to_buffer(pixels, menu_width, menu_height,
+						cell_width + bi * cell_width, text_y,
+						back[bi], row_fg);
+				}
+			}
+
+			/* Show the sub-topics */
+			for (gi = 0; gi < audio_group_count && displayed < crows - 1; gi++) {
+				if (gi >= audio_scroll_offset) {
+					int text_y = (displayed + 2) * cell_height;
+					const char *gn = audio_groups[gi];
+
+					is_selected = (displayed + 1 == audio_selected_row);
+					row_fg = is_selected ? highlight_fg : text_color;
+
+					if (is_selected) {
+						int px, py;
+						for (py = text_y; py < text_y + cell_height; py++) {
+							for (px = cell_width; px < menu_width - cell_width; px++) {
+								pixels[py * menu_width + px] = highlight_bg;
+							}
+						}
+					}
+
+					render_row_text(pixels, menu_width, menu_height, text_y,
+						gn, row_fg, mtext, is_selected,
+						audio_menu_marquee_px, &audio_menu_marquee_needed);
+					displayed++;
+				}
+			}
+		} else if (audio_group_has_sub && audio_current_subgroup < 0) {
+			/* Show entities (each sink/source) of the selected sub-topic */
+			int gi;
+			int displayed = 0;
+			int is_selected;
+			uint32_t row_fg;
+
+			/* First row: "< Back" */
+			is_selected = (audio_selected_row == 0);
+			row_fg = is_selected ? highlight_fg : text_color;
+			{
+				int text_y = cell_height;
+				const char *back = "< Back";
+				int bi;
+
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
+						}
+					}
+				}
+
+				for (bi = 0; back[bi] && bi < mtext; bi++) {
+					render_char_to_buffer(pixels, menu_width, menu_height,
+						cell_width + bi * cell_width, text_y,
+						back[bi], row_fg);
+				}
+			}
+
+			/* Show the entities */
+			for (gi = 0; gi < audio_subgroup_count && displayed < crows - 1; gi++) {
+				if (gi >= audio_scroll_offset) {
+					int text_y = (displayed + 2) * cell_height;
+					const char *sn = audio_subgroups[gi];
+
+					is_selected = (displayed + 1 == audio_selected_row);
+					row_fg = is_selected ? highlight_fg : text_color;
+
+					if (is_selected) {
+						int px, py;
+						for (py = text_y; py < text_y + cell_height; py++) {
+							for (px = cell_width; px < menu_width - cell_width; px++) {
+								pixels[py * menu_width + px] = highlight_bg;
+							}
+						}
+					}
+
+					render_row_text(pixels, menu_width, menu_height, text_y,
+						sn, row_fg, mtext, is_selected,
+						audio_menu_marquee_px, &audio_menu_marquee_needed);
+					displayed++;
+				}
+			}
+		} else {
+			/* Show actions of the selected sub-topic (direct) or of a specific
+			 * entity. The < Back> row returns to the appropriate upper level. */
+			const char *cat = audio_categories[audio_current_category];
+			const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
+			const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
+			int e_idx = 0;
+			int displayed = 0;
+			int is_selected;
+			uint32_t row_fg;
+
+			/* First row: "< Back" */
+			is_selected = (audio_selected_row == 0);
+			row_fg = is_selected ? highlight_fg : text_color;
+			{
+				int text_y = cell_height;
+				const char *back = "< Back";
+				int bi;
+
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
+						}
+					}
+				}
+
+				for (bi = 0; back[bi] && bi < mtext; bi++) {
+					render_char_to_buffer(pixels, menu_width, menu_height,
+						cell_width + bi * cell_width, text_y,
+						back[bi], row_fg);
+				}
+			}
+
+			/* Show actions in this sub-topic / entity */
+			for (i = 0; i < audio_entry_count && displayed < crows - 1; i++) {
+				if (strcmp(audio_entries[i].category, cat) == 0 &&
+				    strcmp(audio_entries[i].group, group) == 0 &&
+				    strcmp(audio_entries[i].subgroup, sub) == 0) {
+					if (e_idx >= audio_scroll_offset) {
+						int text_y = (displayed + 2) * cell_height;
+						const char *nm = audio_entries[i].name;
+
+						is_selected = (displayed + 1 == audio_selected_row);
+						row_fg = is_selected ? highlight_fg : text_color;
+
+						if (is_selected) {
+							int px, py;
+							for (py = text_y; py < text_y + cell_height; py++) {
+								for (px = cell_width; px < menu_width - cell_width; px++) {
+									pixels[py * menu_width + px] = highlight_bg;
+								}
+							}
+						}
+
+						render_row_text(pixels, menu_width, menu_height, text_y,
+							nm, row_fg, mtext, is_selected,
+							audio_menu_marquee_px, &audio_menu_marquee_needed);
+						displayed++;
+					}
+					e_idx++;
+				}
+			}
+		}
+	}
+
+	/* Create or update the audiomenu buffer */
+	if (!audiomenu_buffer)
+		audiomenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
+	wlr_scene_node_set_enabled(&audiomenu_buffer->node, 1);
+	/* Position at top-right of focused monitor, below the bar */
+	if (selmon) {
+		wlr_scene_node_set_position(&audiomenu_buffer->node, selmon->m.x + selmon->m.width - menu_width, selmon->m.y + cell_height);
+	} else {
+		wlr_scene_node_set_position(&audiomenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
+	}
+	wlr_scene_buffer_set_buffer(audiomenu_buffer, &tb->base);
+	/* Wake the scroll timer immediately so the marquee reacts without the
+	 * normal 200ms idle delay once a long row becomes selected. */
+	if (audio_menu_marquee_needed)
+		wl_event_source_timer_update(scroll_timer, 33);
+	/* Don't drop - we're caching the buffer for reuse */
+}
+
 static int
 launcherkey(xkb_keysym_t sym)
 {
@@ -4977,6 +6414,8 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	if (appmenu_active && appmenukey(sym))
 		return 1;
 	if (netmenu_active && netmenukey(sym))
+		return 1;
+	if (audiomenu_active && audiomenukey(sym))
 		return 1;
 	if (thememenu_active && thememenu_key(sym))
 		return 1;
@@ -5408,6 +6847,29 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
 						net_selected_row = new_selected;
 						updatenetmenu();
+					}
+				}
+			}
+		}
+
+		/* Update audio menu hover selection */
+		if (audiomenu_active && selmon) {
+			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
+			int menu_y = selmon->m.y + cell_height;
+			int menu_w = 25 * cell_width;
+			int menu_h = audiomenu_cells_h() * cell_height;
+
+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
+				int rel_y = (int)(cursor->y - menu_y);
+				int hovered_row = rel_y / cell_height;
+
+				/* Row 0 is title bar, rows 1+ are content */
+				if (hovered_row >= 1 && hovered_row <= audiomenu_cells_h() - 2) {
+					int new_selected = hovered_row - 1; /* 0-indexed content row */
+					if (new_selected != audio_selected_row && new_selected < audiomenu_item_count()) {
+						audio_selected_row = new_selected;
+						updatemenuaudio();
 					}
 				}
 			}
@@ -6879,6 +8341,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
 	repl_add_line("(reload-config)    - reload config.scm");
 	repl_add_line("(bind-key K F)     - bind key to function");
 	repl_add_line("(toggle-net-menu)  - open WiFi/Bluetooth menu");
+	repl_add_line("(toggle-audio-menu) - open audio menu (volume / outputs / mics)");
 	repl_add_line("=== Appearance ===");
 	repl_add_line("(set-background-color C) - highlight/bg color");
 	repl_add_line("(set-border-line-color C)- box-drawing color");
@@ -7249,6 +8712,29 @@ static s7_pointer scm_set_net_menu_button(s7_scheme *sc, s7_pointer args) {
 	return s7_t(sc);
 }
 
+/* Scheme: (set-audio-menu-cmd "cmd") - set the command that lists audio menu entries */
+static s7_pointer scm_set_audio_menu_cmd(s7_scheme *sc, s7_pointer args) {
+	if (!s7_is_string(s7_car(args))) return s7_f(sc);
+	strncpy(audiomenu_cmd, s7_string(s7_car(args)), sizeof(audiomenu_cmd) - 1);
+	audiomenu_cmd[sizeof(audiomenu_cmd) - 1] = '\0';
+	return s7_t(sc);
+}
+
+/* Scheme: (toggle-audio-menu) - toggle the audio (volume/outputs/mics) menu */
+static s7_pointer scm_toggle_audio_menu(s7_scheme *sc, s7_pointer args) {
+	togglaudiomenu(NULL);
+	return s7_t(sc);
+}
+
+/* Scheme: (set-audio-menu-button "text") - set the audio menu button label */
+static s7_pointer scm_set_audio_menu_button(s7_scheme *sc, s7_pointer args) {
+	if (!s7_is_string(s7_car(args))) return s7_f(sc);
+	strncpy(cfg_audio_menu_button, s7_string(s7_car(args)), sizeof(cfg_audio_menu_button) - 1);
+	cfg_audio_menu_button[sizeof(cfg_audio_menu_button) - 1] = '\0';
+	updatebars();
+	return s7_t(sc);
+}
+
 /* ========== END COLOR CONFIG API ========== */
 
 /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
@@ -7602,6 +9088,9 @@ setup_scheme(void)
 	s7_define_function(sc, "toggle-appmenu", scm_toggle_appmenu, 0, 0, false, "(toggle-appmenu) toggle the app menu visibility");
 	s7_define_function(sc, "set-net-menu-cmd", scm_set_net_menu_cmd, 1, 0, false, "(set-net-menu-cmd \"cmd\") set command that lists network menu entries");
 	s7_define_function(sc, "toggle-net-menu", scm_toggle_net_menu, 0, 0, false, "(toggle-net-menu) toggle the network (WiFi/Bluetooth) menu");
+	s7_define_function(sc, "set-audio-menu-cmd", scm_set_audio_menu_cmd, 1, 0, false, "(set-audio-menu-cmd \"cmd\") set command that lists audio menu entries");
+	s7_define_function(sc, "toggle-audio-menu", scm_toggle_audio_menu, 0, 0, false, "(toggle-audio-menu) toggle the audio (volume/outputs/mics) menu");
+	s7_define_function(sc, "set-audio-menu-button", scm_set_audio_menu_button, 1, 0, false, "(set-audio-menu-button \"text\") set audio menu button label in bar");
 	s7_define_function(sc, "toggle-thememenu", scm_toggle_thememenu, 0, 0, false, "(toggle-thememenu) toggle the in-wm color theme menu");
 	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
 	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
@@ -7796,6 +9285,11 @@ static const char *default_config_parts[] = {
 ";; tbwm-network helper (installed by install.sh)\n"
 "(set-net-menu-cmd \"tbwm-network\")\n"
 "(bind-key \"M-n\" (lambda () (toggle-net-menu)))\n"
+"\n"
+";; Audio menu (volume / outputs / microphones) - requires wpctl (pipewire)\n"
+";; and the tbwm-audio-menu helper (installed by install.sh)\n"
+"(set-audio-menu-cmd \"tbwm-audio-menu\")\n"
+"(bind-key \"M-a\" (lambda () (toggle-audio-menu)))\n"
 "\n"
 ";; Volume control (requires wpctl/wireplumber)\n"
 "(bind-key \"XF86AudioRaiseVolume\" (lambda () (spawn \"wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+\")))\n"
@@ -8210,11 +9704,27 @@ scrolltimer(void *data)
 	Client *c;
 	int scroll_count = 0;
     
+	/* Advance the open menus' marquees one pixel per tick at 30fps */
+	if (audiomenu_active && audio_menu_marquee_needed) {
+		audio_menu_marquee_px++;
+		updatemenuaudio();
+	}
+	if (netmenu_active && netmenu_marquee_needed) {
+		netmenu_marquee_px++;
+		updatenetmenu();
+	}
+	if (appmenu_active && appmenu_marquee_needed) {
+		appmenu_marquee_px++;
+		updateappmenu();
+	}
+
 	/* Handle smooth scrolling for window titlebars and top-bar tabs.
 	 * Dynamically detect whether anything needs scrolling so we always
 	 * run the fast tick while any title/tab is scrolling. */
 	if (!title_scroll_mode) {
-		wl_event_source_timer_update(scroll_timer, 100);
+		/* keep 30fps while any menu marquee is active, else 100ms */
+		wl_event_source_timer_update(scroll_timer,
+			MENU_MARQUEE_TICKING ? 33 : 100);
 		return 0;
 	}
 
@@ -8255,9 +9765,11 @@ scrolltimer(void *data)
 	}
 
 	if (!needs_scroll) {
-		/* No scrolling needed, check again much later (200ms) */
+		/* No titles need scrolling; keep the 30fps tick only while a menu
+		 * marquee is active, otherwise check again at 200ms. */
 		any_title_needs_scroll = 0;
-		wl_event_source_timer_update(scroll_timer, 200);
+		wl_event_source_timer_update(scroll_timer,
+			MENU_MARQUEE_TICKING ? 33 : 200);
 		return 0;
 	}
 	any_title_needs_scroll = 1;
@@ -8552,6 +10064,12 @@ toggleappmenu(const Arg *arg)
 {
 	appmenu_active = !appmenu_active;
 	if (appmenu_active) {
+		/* Only one menu at a time: close the audio and network menus so they
+		 * don't overlap this one on screen. */
+		audiomenu_active = 0;
+		netmenu_active = 0;
+		updatemenuaudio();
+		updatenetmenu();
 		load_applications();
 		menu_current_category = -1;
 		menu_scroll_offset = 0;
@@ -8581,6 +10099,8 @@ updateappmenu(void)
 		if (appmenu_buffer) {
 			wlr_scene_node_set_enabled(&appmenu_buffer->node, 0);
 		}
+		appmenu_marquee_needed = 0;
+		appmenu_marquee_px = 0;
 		return;
 	}
 	
@@ -8594,6 +10114,13 @@ updateappmenu(void)
 	}
 	tb = appmenu_tb;
 	pixels = tb->data;
+
+	/* Reset the marquee flag; it is re-set below if the selected row overflows */
+	appmenu_marquee_needed = 0;
+
+	/* Restart the marquee from position 0 whenever the selection moves */
+	menu_marquee_begin(&appmenu_marquee_px, &appmenu_marquee_selkey,
+		((menu_current_category + 3) * 100000) + menu_selected_row);
 	
 	/* Fill entire background with content color first */
 	for (i = 0; i < menu_width * menu_height; i++) {
@@ -8674,9 +10201,7 @@ updateappmenu(void)
 			for (row = 0; row < content_rows && row + menu_scroll_offset < category_count; row++) {
 				int item_idx = row + menu_scroll_offset;
 				int text_y = (row + 1) * cell_height;
-				int text_x = cell_width; /* 1 cell from left */
 				const char *cat_name = categories[item_idx].name;
-				int ci;
 				int is_selected = (row == menu_selected_row);
 				uint32_t row_fg = is_selected ? highlight_fg : text_color;
 				
@@ -8690,12 +10215,10 @@ updateappmenu(void)
 					}
 				}
 				
-				/* Draw category name */
-				for (ci = 0; cat_name[ci] && ci < max_text_len; ci++) {
-					render_char_to_buffer(pixels, menu_width, menu_height,
-						text_x + ci * cell_width, text_y,
-						cat_name[ci], row_fg);
-				}
+			/* Draw category name */
+			render_row_text(pixels, menu_width, menu_height, text_y,
+				cat_name, row_fg, max_text_len, is_selected,
+				appmenu_marquee_px, &appmenu_marquee_needed);
 			}
 		} else {
 			/* Show apps in selected category */
@@ -8734,10 +10257,8 @@ updateappmenu(void)
 				if (strcmp(app_entries[i].category, selected_cat) == 0) {
 					if (app_idx >= menu_scroll_offset) {
 						int text_y = (displayed + 2) * cell_height;
-						int text_x = cell_width;
 						const char *app_name = app_entries[i].name;
-						int ai;
-						
+
 						is_selected = (displayed + 1 == menu_selected_row);
 						row_fg = is_selected ? highlight_fg : text_color;
 						
@@ -8751,11 +10272,9 @@ updateappmenu(void)
 						}
 						
 						/* Draw app name */
-						for (ai = 0; app_name[ai] && ai < max_text_len; ai++) {
-							render_char_to_buffer(pixels, menu_width, menu_height,
-								text_x + ai * cell_width, text_y,
-								app_name[ai], row_fg);
-						}
+						render_row_text(pixels, menu_width, menu_height, text_y,
+							app_name, row_fg, max_text_len, is_selected,
+							appmenu_marquee_px, &appmenu_marquee_needed);
 						displayed++;
 					}
 					app_idx++;
@@ -8775,6 +10294,10 @@ updateappmenu(void)
 		wlr_scene_node_set_position(&appmenu_buffer->node, sgeom.x, sgeom.y + cell_height);
 	}
 	wlr_scene_buffer_set_buffer(appmenu_buffer, &tb->base);
+	/* Wake the scroll timer immediately so the marquee reacts without the
+	 * normal idle delay once a long row becomes selected. */
+	if (appmenu_marquee_needed)
+		wl_event_source_timer_update(scroll_timer, 33);
 	/* Don't drop - we're caching the buffer for reuse */
 }
 
@@ -8801,6 +10324,8 @@ updatenetmenu(void)
 			wlr_scene_node_set_enabled(&netmenu_buffer->node, 0);
 		if (net_scan_timer)
 			wl_event_source_timer_update(net_scan_timer, 0);
+		netmenu_marquee_needed = 0;
+		netmenu_marquee_px = 0;
 		return;
 	}
 
@@ -8826,6 +10351,17 @@ updatenetmenu(void)
 	}
 	tb = netmenu_tb;
 	pixels = tb->data;
+
+	/* Reset the marquee flag; it is re-set below if the selected row overflows */
+	netmenu_marquee_needed = 0;
+
+	/* Restart the marquee from position 0 whenever the selection moves */
+	menu_marquee_begin(&netmenu_marquee_px, &netmenu_marquee_selkey,
+		((net_current_category + 3) * 100000) +
+		((net_current_group + 3) * 1000) +
+		((net_current_subgroup + 3) * 10) + net_selected_row +
+		(net_password_mode ? 1000000 : 0) +
+		(blt_dialog() ? 2000000 : 0));
 
 	/* Fill entire background with content color first */
 	for (i = 0; i < menu_width * menu_height; i++) {
@@ -9021,7 +10557,6 @@ updatenetmenu(void)
 				int is_selected = (row == net_selected_row);
 				uint32_t row_fg = is_selected ? highlight_fg : text_color;
 				const char *cat_name = net_categories[item_idx];
-				int ci;
 
 				if (is_selected) {
 					int px, py;
@@ -9032,11 +10567,9 @@ updatenetmenu(void)
 					}
 				}
 
-				for (ci = 0; cat_name[ci] && ci < mtext; ci++) {
-					render_char_to_buffer(pixels, menu_width, menu_height,
-						cell_width + ci * cell_width, text_y,
-						cat_name[ci], row_fg);
-				}
+				render_row_text(pixels, menu_width, menu_height, text_y,
+					cat_name, row_fg, mtext, is_selected,
+					netmenu_marquee_px, &netmenu_marquee_needed);
 			}
 		} else if (net_current_group < 0) {
 			/* Show sub-topics (groups) of the selected category */
@@ -9074,7 +10607,6 @@ updatenetmenu(void)
 				if (gi >= net_scroll_offset) {
 					int text_y = (displayed + 2) * cell_height;
 					const char *gn = net_groups[gi];
-					int ni2;
 
 					is_selected = (displayed + 1 == net_selected_row);
 					row_fg = is_selected ? highlight_fg : text_color;
@@ -9088,11 +10620,9 @@ updatenetmenu(void)
 						}
 					}
 
-					for (ni2 = 0; gn[ni2] && ni2 < mtext; ni2++) {
-						render_char_to_buffer(pixels, menu_width, menu_height,
-							cell_width + ni2 * cell_width, text_y,
-							(unsigned char)gn[ni2], row_fg);
-					}
+					render_row_text(pixels, menu_width, menu_height, text_y,
+						gn, row_fg, mtext, is_selected,
+						netmenu_marquee_px, &netmenu_marquee_needed);
 					displayed++;
 				}
 			}
@@ -9132,7 +10662,6 @@ updatenetmenu(void)
 				if (gi >= net_scroll_offset) {
 					int text_y = (displayed + 2) * cell_height;
 					const char *sn = net_subgroups[gi];
-					int ni2;
 
 					is_selected = (displayed + 1 == net_selected_row);
 					row_fg = is_selected ? highlight_fg : text_color;
@@ -9146,11 +10675,9 @@ updatenetmenu(void)
 						}
 					}
 
-					for (ni2 = 0; sn[ni2] && ni2 < mtext; ni2++) {
-						render_char_to_buffer(pixels, menu_width, menu_height,
-							cell_width + ni2 * cell_width, text_y,
-							(unsigned char)sn[ni2], row_fg);
-					}
+					render_row_text(pixels, menu_width, menu_height, text_y,
+						sn, row_fg, mtext, is_selected,
+						netmenu_marquee_px, &netmenu_marquee_needed);
 					displayed++;
 				}
 			}
@@ -9197,7 +10724,6 @@ updatenetmenu(void)
 					if (e_idx >= net_scroll_offset) {
 						int text_y = (displayed + 2) * cell_height;
 						const char *nm = net_entries[i].name;
-						int ni;
 
 						is_selected = (displayed + 1 == net_selected_row);
 						row_fg = is_selected ? highlight_fg : text_color;
@@ -9211,11 +10737,9 @@ updatenetmenu(void)
 							}
 						}
 
-						for (ni = 0; nm[ni] && ni < mtext; ni++) {
-							render_char_to_buffer(pixels, menu_width, menu_height,
-								cell_width + ni * cell_width, text_y,
-								(unsigned char)nm[ni], row_fg);
-						}
+						render_row_text(pixels, menu_width, menu_height, text_y,
+							nm, row_fg, mtext, is_selected,
+							netmenu_marquee_px, &netmenu_marquee_needed);
 						displayed++;
 					}
 					e_idx++;
@@ -9236,6 +10760,10 @@ updatenetmenu(void)
 		wlr_scene_node_set_position(&netmenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
 	}
 	wlr_scene_buffer_set_buffer(netmenu_buffer, &tb->base);
+	/* Wake the scroll timer immediately so the marquee reacts without the
+	 * normal idle delay once a long row becomes selected. */
+	if (netmenu_marquee_needed)
+		wl_event_source_timer_update(scroll_timer, 33);
 	/* Don't drop - we're caching the buffer for reuse */
 }
 
@@ -10411,17 +11939,21 @@ render_tabs:
 		now = time(NULL);
 		tm_info = localtime(&now);
 		
-		/* Reserve space for the network menu button [N] on the right */
+		/* Reserve space for the network menu button [N] and the audio menu
+		 * button [A] on the right, next to date/time */
 		{
 			int nbtn_len = strlen(cfg_net_menu_button);
 			int nbtn_cells = nbtn_len + 2; /* [nbtn] */
+			int abtn_len = strlen(cfg_audio_menu_button);
+			int abtn_cells = abtn_len + 2; /* [abtn] */
 			uint32_t nfg = RGB_TO_ARGB(cfg_bar_text_color);
 
-			/* Compute right-aligned start including the net button.
-			 * The renderer consumes: [N] (nbtn_cells) + 3 cells for the
-			 * separator before the text, plus 3 cells between date and time. */
+			/* Compute right-aligned start including both buttons.
+			 * The renderer consumes: [A] (abtn_cells) + 1 gap + [N] (nbtn_cells)
+			 * + 3 cells for the separator before the text, plus 3 cells between
+			 * date and time. */
 			if (cfg_status_text[0] != '\0') {
-				right_x = width - (nbtn_cells + 3 + (int)strlen(cfg_status_text)) * cell_width;
+				right_x = width - (abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text)) * cell_width;
 			} else if (cfg_show_date || cfg_show_time) {
 				int total_chars = 0;
 				if (cfg_show_date)
@@ -10431,21 +11963,51 @@ render_tabs:
 				date_len = cfg_show_date ? (int)strlen(datebuf) : 0;
 				time_len = cfg_show_time ? (int)strlen(timebuf) : 0;
 				if (cfg_show_date && cfg_show_time) {
-					total_chars = nbtn_cells + 3 + date_len + 3 + time_len;
+					total_chars = abtn_cells + 1 + nbtn_cells + 3 + date_len + 3 + time_len;
 				} else if (cfg_show_date) {
-					total_chars = nbtn_cells + 3 + date_len;
+					total_chars = abtn_cells + 1 + nbtn_cells + 3 + date_len;
 				} else if (cfg_show_time) {
-					total_chars = nbtn_cells + 3 + time_len;
+					total_chars = abtn_cells + 1 + nbtn_cells + 3 + time_len;
 				} else {
-					total_chars = nbtn_cells;
+					total_chars = abtn_cells + 1 + nbtn_cells;
 				}
 				right_x = width - total_chars * cell_width;
 			} else {
-				right_x = width - nbtn_cells * cell_width;
+				right_x = width - (abtn_cells + 1 + nbtn_cells) * cell_width;
 			}
 
 			if (right_x > x) {
 				x = right_x;
+
+				/* Audio menu button */
+				if (audiomenu_active) {
+					int px, py;
+					nfg = RGB_TO_ARGB(cfg_bar_color);
+					for (py = 0; py < cell_height; py++) {
+						for (px = x; px < x + abtn_cells * cell_width && px < width; px++) {
+							pixels[py * width + px] = RGB_TO_ARGB(cfg_bar_text_color);
+						}
+					}
+				}
+				render_char_to_buffer(pixels, width, cell_height, x, 0, '[', nfg);
+				x += cell_width;
+				{
+					int bi;
+					for (bi = 0; cfg_audio_menu_button[bi] && bi < 14; bi++) {
+						render_char_to_buffer(pixels, width, cell_height, x, 0, cfg_audio_menu_button[bi], nfg);
+						x += cell_width;
+					}
+				}
+				render_char_to_buffer(pixels, width, cell_height, x, 0, ']', nfg);
+				x += cell_width;
+
+				/* 1-cell gap before the network button */
+				x += cell_width;
+
+				/* Reset the color: the audio button above may have changed nfg
+				 * to the bar color for its active highlight, which would make
+				 * the network button invisible if it leaked through. */
+				nfg = RGB_TO_ARGB(cfg_bar_text_color);
 
 				/* Network menu button */
 				if (netmenu_active) {
