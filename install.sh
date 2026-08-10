@@ -140,6 +140,17 @@ install_deps() {
             fi
             ;;
     esac
+
+    # The package-manager lines above use `|| true` so that optional packages
+    # (portal backends, fonts, etc.) can't abort the install, but that also
+    # hides real failures. Verify the core build dependencies actually made it;
+    # a clear error here beats a cryptic meson crash later in build_wlroots.
+    if ! pkg-config --exists wayland-client wayland-protocols 2>/dev/null; then
+        error "Missing wayland development files (wayland / wayland-protocols)."
+        error "Re-run the package manager command above and check for errors, e.g.:"
+        error "  sudo pacman -S --needed wayland wayland-protocols"
+    fi
+
     success "Dependencies installed"
 }
 
@@ -280,16 +291,22 @@ build_wlroots() {
     case "$DISTRO" in
         arch|endeavouros|manjaro|garuda|cachyos|artix)
             sudo pacman -Sy --needed --noconfirm \
-                meson ninja hwdata libdisplay-info libliftoff seatd || true
+                base-devel meson ninja wayland wayland-protocols \
+                libinput libxkbcommon pixman libdrm libgbm glslang \
+                hwdata libdisplay-info libliftoff seatd || true
             ;;
         debian|ubuntu|pop|linuxmint|elementary)
             sudo apt-get install -y \
-                meson ninja-build libdrm-dev libgbm-dev libseat-dev \
-                libdisplay-info-dev libliftoff-dev hwdata || true
+                meson ninja-build libwayland-dev wayland-protocols \
+                libinput-dev libxkbcommon-dev libpixman-1-dev \
+                libdrm-dev libgbm-dev libglslang-dev \
+                libseat-dev libdisplay-info-dev libliftoff-dev hwdata || true
             ;;
         fedora|rhel|centos|rocky|almalinux)
             sudo dnf install -y \
-                meson ninja-build libdrm-devel mesa-libgbm-devel \
+                meson ninja-build wayland-devel wayland-protocols-devel \
+                libinput-devel libxkbcommon-devel pixman-devel \
+                libdrm-devel mesa-libgbm-devel glslang-devel \
                 libseat-devel libdisplay-info-devel libliftoff-devel hwdata || true
             ;;
     esac
@@ -305,6 +322,12 @@ build_wlroots() {
     info "Configuring..."
     if ! command -v meson >/dev/null 2>&1 || ! command -v ninja >/dev/null 2>&1; then
         error "meson/ninja not found. Install them and re-run (e.g. 'sudo pacman -S meson ninja' on Arch/Artix, 'sudo apt install meson ninja-build' on Debian/Ubuntu)."
+    fi
+    # wlroots 0.19 fails its meson setup if these are missing (the wrap-based
+    # fallback is disabled in meson), so fail with an actionable message here.
+    if ! pkg-config --exists wayland-client wayland-protocols libinput xkbcommon pixman-1 libdrm gbm 2>/dev/null; then
+        error "Missing wlroots build dependencies. Install them and re-run, e.g.:"
+        error "  sudo pacman -S --needed wayland wayland-protocols libinput libxkbcommon pixman libdrm libgbm glslang"
     fi
     meson setup build --prefix=/usr/local -Dexamples=false
     

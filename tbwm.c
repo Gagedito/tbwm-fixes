@@ -712,7 +712,8 @@ static int cfg_show_date = 1;          /* Show date in status bar */
 static char cfg_status_text[256] = ""; /* Custom status text (overrides date/time if set) */
 static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen */
 
-/* Colors (#RRGGBB format, alpha added at render time)
+/* Colors (AARRGGBB format; alpha 0xFF = opaque. "#RRGGBB" and "#RRGGBBAA"
+ * are both accepted; semi-transparent colors let the wallpaper show through.
  * cfg_bg_color          = root/REPL background (black)
  * cfg_bg_text_color     = text on background/REPL (grey)
  * cfg_bar_color         = status bar background (blue)
@@ -722,14 +723,14 @@ static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen *
  * cfg_menu_color        = app menu background (grey)
  * cfg_menu_text_color   = app menu text (white)
  */
-static uint32_t cfg_bg_color = 0x000000;           /* black background */
-static uint32_t cfg_bg_text_color = 0xaaaaaa;      /* grey text */
-static uint32_t cfg_bar_color = 0x0000aa;          /* blue bar background */
-static uint32_t cfg_bar_text_color = 0xaaaaaa;     /* grey bar text */
-static uint32_t cfg_border_color = 0x0000aa;       /* blue highlight */
-static uint32_t cfg_border_line_color = 0xaaaaaa;  /* grey box-drawing */
-static uint32_t cfg_menu_color = 0xaaaaaa;         /* grey menu background */
-static uint32_t cfg_menu_text_color = 0x000000;    /* black menu text */
+static uint32_t cfg_bg_color = 0xFF000000;           /* black background */
+static uint32_t cfg_bg_text_color = 0xFFaaaaaa;      /* grey text */
+static uint32_t cfg_bar_color = 0xFF0000aa;          /* blue bar background */
+static uint32_t cfg_bar_text_color = 0xFFaaaaaa;     /* grey bar text */
+static uint32_t cfg_border_color = 0xFF0000aa;       /* blue highlight */
+static uint32_t cfg_border_line_color = 0xFFaaaaaa;  /* grey box-drawing */
+static uint32_t cfg_menu_color = 0xFFaaaaaa;         /* grey menu background */
+static uint32_t cfg_menu_text_color = 0xFF000000;    /* black menu text */
 static char cfg_menu_button[16] = "X";             /* app menu button label */
 static char cfg_net_menu_button[16] = "N";         /* network menu button label */
 
@@ -783,9 +784,10 @@ static void netmenu_run(NetEntry *e);
 static void netmenu_connect_with_password(void);
 
 /* Theme menu: a native, centered color picker for the compositor colors.
- * It lists the settable colors and lets the user pick a basic palette entry
- * or type a custom #RRGGBB via the on-screen input buffer. */
-#define THEMEMENU_MAX_HEX 8 /* "RRGGBB" + NUL, "#" optional */
+ * It lists the settable colors and lets the user pick a basic palette entry,
+ * type a custom #RRGGBB[AA] via the on-screen input buffer, or adjust the
+ * transparency of the current color with the "Alpha" entry. */
+#define THEMEMENU_MAX_HEX 10 /* "RRGGBBAA" + NUL, "#" optional */
 static struct wlr_scene_buffer *thememenu_buffer = NULL;
 static struct TitleBuffer *thememenu_tb = NULL;  /* cached buffer for reuse */
 static int thememenu_active = 0;
@@ -793,8 +795,13 @@ static int thememenu_scroll_offset = 0;
 static int thememenu_selected_row = 0;
 static int thememenu_target = 0;     /* which color is being edited (index into thememenu_targets) */
 static int thememenu_palette_mode = 0; /* 1 = showing palette for chosen target */
+static int thememenu_alpha_mode = 0;  /* 1 = showing alpha levels for chosen target */
 static char thememenu_hex[THEMEMENU_MAX_HEX]; /* custom hex input buffer */
 static int thememenu_hex_len = 0;
+static int thememenu_hex_active = 0; /* 1 = typing a custom hex even if the buffer is empty */
+static int thememenu_alpha_active = 0; /* 1 = typing a custom alpha percentage */
+static char thememenu_alpha_buf[4];   /* 0-100, up to 3 digits + NUL */
+static int thememenu_alpha_len = 0;
 
 /* Bluetooth pairing lives in bluetooth.c (blt_* API in bluetooth.h): the
  * pairing dialog, the bluetoothcd session (pipes + fd watcher) and the
@@ -7086,18 +7093,39 @@ int check_scheme_bindings(uint32_t mods, xkb_keysym_t sym)
 
 /* ==================== SCHEME CONFIG SETTERS ==================== */
 
-/* Helper: parse hex color #RRGGBB to uint32_t (no alpha) */
-static uint32_t parse_color_rgb(const char *str) {
-	unsigned int r = 0, g = 0, b = 0;
-	if (str[0] == '#') str++;
-	if (strlen(str) >= 6) {
+/* Helper: parse hex color to ARGB uint32_t.
+ * Accepts "#RRGGBB" (opaque) or "#RRGGBBAA" (with alpha), '#' optional. */
+static uint32_t parse_color_argb(const char *str) {
+	unsigned int a = 0xFF, r = 0, g = 0, b = 0;
+	int n;
+	if (str == NULL)
+		return 0xFF000000;
+	if (str[0] == '#')
+		str++;
+	n = (int)strlen(str);
+	if (n >= 8) {
+		sscanf(str, "%02x%02x%02x%02x", &a, &r, &g, &b);
+	} else if (n >= 6) {
 		sscanf(str, "%02x%02x%02x", &r, &g, &b);
 	}
-	return (r << 16) | (g << 8) | b;
+	return ((a & 0xFF) << 24) | ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF);
 }
 
-/* Helper: get ARGB from RGB (add full alpha) */
-#define RGB_TO_ARGB(rgb) (0xFF000000 | (rgb))
+/* Helper: colors are stored as straight ARGB; wlroots composites shm buffers
+ * as premultiplied alpha, so write premultiplied values for semi-transparent
+ * fills. Opaque colors are returned unchanged. */
+static inline uint32_t premul_argb(uint32_t argb) {
+	unsigned int a = (argb >> 24) & 0xFF;
+	unsigned int r = (argb >> 16) & 0xFF;
+	unsigned int g = (argb >> 8) & 0xFF;
+	unsigned int b = argb & 0xFF;
+	if (a == 0xFF)
+		return argb;
+	return (a << 24) | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+}
+
+/* Helper: pass an ARGB color through (text glyphs handle alpha themselves) */
+#define RGB_TO_ARGB(rgb) (rgb)
 
 /* Scheme: (set-sloppy-focus b) */
 static s7_pointer scm_set_sloppy_focus(s7_scheme *sc, s7_pointer args) {
@@ -7107,77 +7135,78 @@ static s7_pointer scm_set_sloppy_focus(s7_scheme *sc, s7_pointer args) {
 
 /* ========== COLOR CONFIG API ========== */
 
-/* Scheme: (set-bg-color "#RRGGBB") - root/REPL background */
+/* Scheme: (set-bg-color "#RRGGBB[AA]") - root/REPL background */
 static s7_pointer scm_set_bg_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_bg_color = parse_color_rgb(s7_string(s7_car(args)));
-	/* Update root background if it exists */
+	cfg_bg_color = parse_color_argb(s7_string(s7_car(args)));
+	/* Update root background if it exists (wlr_scene_rect takes premultiplied RGBA) */
 	if (root_bg) {
+		float a = ((cfg_bg_color >> 24) & 0xFF) / 255.0f;
 		float c[4];
-		c[0] = ((cfg_bg_color >> 16) & 0xFF) / 255.0f;
-		c[1] = ((cfg_bg_color >> 8) & 0xFF) / 255.0f;
-		c[2] = (cfg_bg_color & 0xFF) / 255.0f;
-		c[3] = 1.0f;
+		c[0] = (((cfg_bg_color >> 16) & 0xFF) / 255.0f) * a;
+		c[1] = (((cfg_bg_color >> 8) & 0xFF) / 255.0f) * a;
+		c[2] = ((cfg_bg_color & 0xFF) / 255.0f) * a;
+		c[3] = a;
 		wlr_scene_rect_set_color(root_bg, c);
 	}
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-bg-text-color "#RRGGBB") - text on background/REPL */
+/* Scheme: (set-bg-text-color "#RRGGBB[AA]") - text on background/REPL */
 static s7_pointer scm_set_bg_text_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_bg_text_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_bg_text_color = parse_color_argb(s7_string(s7_car(args)));
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-border-color "#RRGGBB") - border highlight (blue) */
+/* Scheme: (set-border-color "#RRGGBB[AA]") - border highlight (blue) */
 static s7_pointer scm_set_border_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_border_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_border_color = parse_color_argb(s7_string(s7_car(args)));
 	updateframes();
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-border-line-color "#RRGGBB") - box drawing chars (grey) */
+/* Scheme: (set-border-line-color "#RRGGBB[AA]") - box drawing chars (grey) */
 static s7_pointer scm_set_border_line_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_border_line_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_border_line_color = parse_color_argb(s7_string(s7_car(args)));
 	updateframes();
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-bar-color "#RRGGBB") - status bar background */
+/* Scheme: (set-bar-color "#RRGGBB[AA]") - status bar background */
 static s7_pointer scm_set_bar_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_bar_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_bar_color = parse_color_argb(s7_string(s7_car(args)));
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-bar-text-color "#RRGGBB") - status bar text */
+/* Scheme: (set-bar-text-color "#RRGGBB[AA]") - status bar text */
 static s7_pointer scm_set_bar_text_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_bar_text_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_bar_text_color = parse_color_argb(s7_string(s7_car(args)));
 	updatebars();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-menu-color "#RRGGBB") - app menu background */
+/* Scheme: (set-menu-color "#RRGGBB[AA]") - app menu background */
 static s7_pointer scm_set_menu_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_menu_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_menu_color = parse_color_argb(s7_string(s7_car(args)));
 	updateappmenu();
 	return s7_t(sc);
 }
 
-/* Scheme: (set-menu-text-color "#RRGGBB") - app menu text */
+/* Scheme: (set-menu-text-color "#RRGGBB[AA]") - app menu text */
 static s7_pointer scm_set_menu_text_color(s7_scheme *sc, s7_pointer args) {
 	if (!s7_is_string(s7_car(args))) return s7_f(sc);
-	cfg_menu_text_color = parse_color_rgb(s7_string(s7_car(args)));
+	cfg_menu_text_color = parse_color_argb(s7_string(s7_car(args)));
 	updateappmenu();
 	return s7_t(sc);
 }
@@ -7560,14 +7589,14 @@ setup_scheme(void)
 	s7_define_function(sc, "set-title-scroll-speed", scm_set_title_scroll_speed, 1, 0, false, "(set-title-scroll-speed speed) set scroll speed in pixels per tick");
 
 	/* Configuration setters - NEW CLEAN API */
-	s7_define_function(sc, "set-bg-color", scm_set_bg_color, 1, 0, false, "(set-bg-color \"#RRGGBB\") set background/REPL color");
-	s7_define_function(sc, "set-bg-text-color", scm_set_bg_text_color, 1, 0, false, "(set-bg-text-color \"#RRGGBB\") set background/REPL text color");
-	s7_define_function(sc, "set-bar-color", scm_set_bar_color, 1, 0, false, "(set-bar-color \"#RRGGBB\") set status bar background color");
-	s7_define_function(sc, "set-bar-text-color", scm_set_bar_text_color, 1, 0, false, "(set-bar-text-color \"#RRGGBB\") set status bar text color");
-	s7_define_function(sc, "set-border-color", scm_set_border_color, 1, 0, false, "(set-border-color \"#RRGGBB\") set window highlight/border background color");
-	s7_define_function(sc, "set-border-line-color", scm_set_border_line_color, 1, 0, false, "(set-border-line-color \"#RRGGBB\") set box-drawing border line color");
-	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB\") set app menu background color");
-	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB\") set app menu text color");
+	s7_define_function(sc, "set-bg-color", scm_set_bg_color, 1, 0, false, "(set-bg-color \"#RRGGBB[AA]\") set background/REPL color");
+	s7_define_function(sc, "set-bg-text-color", scm_set_bg_text_color, 1, 0, false, "(set-bg-text-color \"#RRGGBB[AA]\") set background/REPL text color");
+	s7_define_function(sc, "set-bar-color", scm_set_bar_color, 1, 0, false, "(set-bar-color \"#RRGGBB[AA]\") set status bar background color");
+	s7_define_function(sc, "set-bar-text-color", scm_set_bar_text_color, 1, 0, false, "(set-bar-text-color \"#RRGGBB[AA]\") set status bar text color");
+	s7_define_function(sc, "set-border-color", scm_set_border_color, 1, 0, false, "(set-border-color \"#RRGGBB[AA]\") set window highlight/border background color");
+	s7_define_function(sc, "set-border-line-color", scm_set_border_line_color, 1, 0, false, "(set-border-line-color \"#RRGGBB[AA]\") set box-drawing border line color");
+	s7_define_function(sc, "set-menu-color", scm_set_menu_color, 1, 0, false, "(set-menu-color \"#RRGGBB[AA]\") set app menu background color");
+	s7_define_function(sc, "set-menu-text-color", scm_set_menu_text_color, 1, 0, false, "(set-menu-text-color \"#RRGGBB[AA]\") set app menu text color");
 	s7_define_function(sc, "set-menu-button", scm_set_menu_button, 1, 0, false, "(set-menu-button \"text\") set app menu button label in bar");
 	s7_define_function(sc, "set-net-menu-button", scm_set_net_menu_button, 1, 0, false, "(set-net-menu-button \"text\") set network menu button label in bar");
 	s7_define_function(sc, "toggle-appmenu", scm_toggle_appmenu, 0, 0, false, "(toggle-appmenu) toggle the app menu visibility");
@@ -8542,11 +8571,11 @@ updateappmenu(void)
 	int menu_width = menu_cells_w * cell_width;
 	int menu_height = menu_cells_h * cell_height;
 	int i, x, y, row, col;
-	uint32_t frame_bg = RGB_TO_ARGB(cfg_border_color);
+	uint32_t frame_bg = premul_argb(cfg_border_color);
 	uint32_t line_color = RGB_TO_ARGB(cfg_border_line_color);
-	uint32_t content_bg = RGB_TO_ARGB(cfg_menu_color);
+	uint32_t content_bg = premul_argb(cfg_menu_color);
 	uint32_t text_color = RGB_TO_ARGB(cfg_menu_text_color);
-	
+
 	/* If menu is not active, hide the buffer and return */
 	if (!appmenu_active) {
 		if (appmenu_buffer) {
@@ -8637,7 +8666,7 @@ updateappmenu(void)
 	{
 		int content_rows = menu_cells_h - 2; /* rows available for content */
 		int max_text_len = menu_cells_w - 2; /* space for text (minus borders) */
-		uint32_t highlight_bg = RGB_TO_ARGB(cfg_border_color); /* blue highlight */
+		uint32_t highlight_bg = premul_argb(cfg_border_color); /* blue highlight */
 		uint32_t highlight_fg = RGB_TO_ARGB(cfg_border_line_color); /* grey text on blue */
 		
 		if (menu_current_category < 0) {
@@ -8760,11 +8789,11 @@ updatenetmenu(void)
 	int menu_width = menu_cells_w * cell_width;
 	int menu_height = menu_cells_h * cell_height;
 	int i, x, y, row, col;
-	uint32_t frame_bg = RGB_TO_ARGB(cfg_border_color);
+	uint32_t frame_bg = premul_argb(cfg_border_color);
 	uint32_t line_color = RGB_TO_ARGB(cfg_border_line_color);
-	uint32_t content_bg = RGB_TO_ARGB(cfg_menu_color);
+	uint32_t content_bg = premul_argb(cfg_menu_color);
 	uint32_t text_color = RGB_TO_ARGB(cfg_menu_text_color);
-	uint32_t highlight_bg = RGB_TO_ARGB(cfg_border_color);
+	uint32_t highlight_bg = premul_argb(cfg_border_color);
 	uint32_t highlight_fg = RGB_TO_ARGB(cfg_border_line_color);
 
 	if (!netmenu_active) {
@@ -9215,21 +9244,29 @@ updatenetmenu(void)
  * picks from a basic palette or types a custom #RRGGBB via the on-screen hex
  * input. Changes apply immediately through the cfg_* variables, exactly like
  * the Scheme setters (set-border-color, set-bar-color, ...). */
-enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT };
-#define THEME_TARGET_COUNT 6
+enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT, TT_MENU, TT_MENU_TEXT };
+#define THEME_TARGET_COUNT 8
 #define THEME_PALETTE_COUNT 12
 
 static const char *const themetarget_names[THEME_TARGET_COUNT] = {
 	"Marco", "Lineas", "Barra",
-	"BarraTxt", "Fondo", "Texto"
+	"BarraTxt", "Fondo", "Texto",
+	"Menu", "MenuTxt"
 };
 static const char *const themepalette_names[THEME_PALETTE_COUNT] = {
 	"Rojo", "Verde", "Azul", "Amarillo", "Cian", "Magenta",
 	"Naranja", "Purpura", "Blanco", "Gris", "Negro", "Oscuro"
 };
 static const uint32_t themepalette_rgb[THEME_PALETTE_COUNT] = {
-	0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff,
-	0xff8800, 0x8800ff, 0xffffff, 0xaaaaaa, 0x000000, 0x555555
+	0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffff00, 0xff00ffff, 0xffff00ff,
+	0xffff8800, 0xff8800ff, 0xffffffff, 0xffaaaaaa, 0xff000000, 0xff555555
+};
+
+/* Transparency levels offered by the "Alpha..." entry (straight alpha bytes).
+ * The presets are quick picks; a "Custom" row lets you type any 0-100%. */
+#define THEME_ALPHA_COUNT 4
+static const unsigned int themealphas[THEME_ALPHA_COUNT] = {
+	255, 192, 128, 64
 };
 
 /* Current value of a target (index into themetarget_names). Passing the
@@ -9244,6 +9281,8 @@ thememenu_target_color(int target)
 	case TT_BAR_TEXT:    return cfg_bar_text_color;
 	case TT_BG:          return cfg_bg_color;
 	case TT_BG_TEXT:     return cfg_bg_text_color;
+	case TT_MENU:        return cfg_menu_color;
+	case TT_MENU_TEXT:   return cfg_menu_text_color;
 	default:             return 0;
 	}
 }
@@ -9259,10 +9298,12 @@ thememenu_apply_rgb(uint32_t rgb)
 	case TT_BAR_TEXT:    cfg_bar_text_color = rgb;    break;
 	case TT_BG:          cfg_bg_color = rgb;          updaterepl(); break;
 	case TT_BG_TEXT:     cfg_bg_text_color = rgb;     updaterepl(); break;
+	case TT_MENU:        cfg_menu_color = rgb;        updateappmenu(); updatenetmenu(); updatethememenu(); break;
+	case TT_MENU_TEXT:   cfg_menu_text_color = rgb;   updateappmenu(); updatenetmenu(); updatethememenu(); break;
 	}
 	updatebars();
 	theme_persist();
-	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: %s -> #%06x\n",
+	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: %s -> #%08x\n",
 		themetarget_names[thememenu_target], rgb);
 }
 
@@ -9270,7 +9311,7 @@ thememenu_apply_rgb(uint32_t rgb)
 static void
 thememenu_apply_hex(const char *hexstr)
 {
-	thememenu_apply_rgb(parse_color_rgb(hexstr));
+	thememenu_apply_rgb(parse_color_argb(hexstr));
 }
 
 /* Persist the six theme colors to ~/.config/tbwm/theme.scm so they survive a
@@ -9289,19 +9330,31 @@ theme_persist(void)
 	snprintf(path, sizeof(path), "%s/theme.scm", dir);
 	mkdir(dir, 0755);
 
-	f = fopen(path, "w");
+f = fopen(path, "w");
 	if (!f) {
 		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
 		return;
 	}
+
+	/* Write opaque colors as #RRGGBB and semi-transparent ones as #RRGGBBAA */
+#define THEME_PERSIST_COLOR(setter, c) do { \
+	if ((((c) >> 24) & 0xFF) == 0xFF) \
+		fprintf(f, "(%s \"#%06x\")\n", setter, (c) & 0x00FFFFFF); \
+	else \
+		fprintf(f, "(%s \"#%08x\")\n", setter, (c)); \
+} while (0)
+
 	fprintf(f, ";;; Theme colors picked with the in-WM theme menu (M-t).\n");
 	fprintf(f, ";;; Editable by hand; reloaded with (reload-config).\n");
-	fprintf(f, "(set-bg-color \"#%06x\")\n", cfg_bg_color);
-	fprintf(f, "(set-bg-text-color \"#%06x\")\n", cfg_bg_text_color);
-	fprintf(f, "(set-border-color \"#%06x\")\n", cfg_border_color);
-	fprintf(f, "(set-border-line-color \"#%06x\")\n", cfg_border_line_color);
-	fprintf(f, "(set-bar-color \"#%06x\")\n", cfg_bar_color);
-	fprintf(f, "(set-bar-text-color \"#%06x\")\n", cfg_bar_text_color);
+	THEME_PERSIST_COLOR("set-bg-color", cfg_bg_color);
+	THEME_PERSIST_COLOR("set-bg-text-color", cfg_bg_text_color);
+	THEME_PERSIST_COLOR("set-border-color", cfg_border_color);
+	THEME_PERSIST_COLOR("set-border-line-color", cfg_border_line_color);
+	THEME_PERSIST_COLOR("set-bar-color", cfg_bar_color);
+	THEME_PERSIST_COLOR("set-bar-text-color", cfg_bar_text_color);
+	THEME_PERSIST_COLOR("set-menu-color", cfg_menu_color);
+	THEME_PERSIST_COLOR("set-menu-text-color", cfg_menu_text_color);
+#undef THEME_PERSIST_COLOR
 	fclose(f);
 	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: persisted theme to %s\n", path);
 }
@@ -9333,7 +9386,7 @@ thememenu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
 			(unsigned char)text[ci], is_selected ? hi_fg : text_color);
 
 	if (swatch) {
-		uint32_t sc = RGB_TO_ARGB(*swatch);
+		uint32_t sc = premul_argb(*swatch);
 		int sx = menu_width - cell_width * (swatch_cells + 1);
 		int ex = menu_width - cell_width;
 		for (py = text_y; py < text_y + cell_height; py++)
@@ -9348,8 +9401,8 @@ updatethememenu(void)
 {
 	struct TitleBuffer *tb;
 	uint32_t *pixels;
-	int menu_cells_w = 13;
-	int menu_cells_h = thememenu_palette_mode ? 16 : 8;
+	int menu_cells_w = 16;
+	int menu_cells_h = (thememenu_palette_mode || thememenu_alpha_mode) ? 20 : 10;
 	int menu_width, menu_height;
 	int i, x, y, col, row, cur_row = 0, ci;
 	uint32_t frame_bg, line_color, content_bg, text_color, hi_bg, hi_fg;
@@ -9368,11 +9421,11 @@ updatethememenu(void)
 
 	menu_width  = menu_cells_w * cell_width;
 	menu_height = menu_cells_h * cell_height;
-	frame_bg   = RGB_TO_ARGB(cfg_border_color);
+	frame_bg   = premul_argb(cfg_border_color);
 	line_color = RGB_TO_ARGB(cfg_border_line_color);
-	content_bg = RGB_TO_ARGB(cfg_menu_color);
+	content_bg = premul_argb(cfg_menu_color);
 	text_color = RGB_TO_ARGB(cfg_menu_text_color);
-	hi_bg      = RGB_TO_ARGB(cfg_border_color);
+	hi_bg      = premul_argb(cfg_border_color);
 	hi_fg      = line_color;
 
 	if (!thememenu_tb) {
@@ -9417,7 +9470,8 @@ updatethememenu(void)
 	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
 
 	snprintf(title, sizeof(title), "%s",
-		thememenu_palette_mode ? "Color" : "Tema");
+		thememenu_alpha_mode ? "Alpha" :
+		(thememenu_palette_mode ? "Color" : "Tema"));
 	{
 		int tl = (int)strlen(title);
 		int ts = 2;
@@ -9440,7 +9494,7 @@ updatethememenu(void)
 	}
 
 	cur_row = 0;
-	if (!thememenu_palette_mode) {
+	if (!thememenu_palette_mode && !thememenu_alpha_mode) {
 		/* Level 1: the six color targets */
 		for (row = 0; row < content_rows && row + thememenu_scroll_offset < THEME_TARGET_COUNT; row++) {
 			int item = row + thememenu_scroll_offset;
@@ -9450,9 +9504,41 @@ updatethememenu(void)
 				themetarget_names[item], is_sel, text_color, hi_bg, hi_fg, &cur);
 			cur_row++;
 		}
+	} else if (thememenu_alpha_mode) {
+		/* Level 3: transparency levels for the current target + Custom */
+		int items = THEME_ALPHA_COUNT + 1;
+		uint32_t currgb = thememenu_target_color(thememenu_target) & 0x00FFFFFF;
+		for (row = 0; row < content_rows && row < items; row++) {
+			int is_sel = (row == thememenu_selected_row);
+			if (row < THEME_ALPHA_COUNT) {
+				uint32_t sw = currgb | (((uint32_t)themealphas[row]) << 24);
+				char label[20];
+				snprintf(label, sizeof(label), "Alpha %d%%",
+					themealphas[row] * 100 / 255);
+				thememenu_row(pixels, menu_width, menu_height, cur_row,
+					label, is_sel, text_color, hi_bg, hi_fg, &sw);
+			} else {
+				uint32_t cur_full = thememenu_target_color(thememenu_target);
+				thememenu_row(pixels, menu_width, menu_height, cur_row,
+					"Custom", is_sel, text_color, hi_bg, hi_fg, &cur_full);
+			}
+			cur_row++;
+		}
+		/* footer: on-screen 0-100% entry widget */
+		if (thememenu_alpha_active) {
+			char hint[44];
+			int text_y = (cur_row + 1) * cell_height;
+			int limit = menu_width / cell_width - 2;
+			int ci;
+			snprintf(hint, sizeof(hint), "%s%%_", thememenu_alpha_buf);
+			for (ci = 0; hint[ci] && ci < limit; ci++)
+				render_char_to_buffer(pixels, menu_width, menu_height,
+					cell_width + ci * cell_width, text_y,
+					(unsigned char)hint[ci], hi_fg);
+		}
 	} else {
-		/* Level 2: palette of named colors + a "Custom..." entry */
-		int items = THEME_PALETTE_COUNT + 1;
+		/* Level 2: palette of named colors + "Custom..." + "Alpha..." */
+		int items = THEME_PALETTE_COUNT + 2;
 		for (row = 0; row < content_rows && row + thememenu_scroll_offset < items; row++) {
 			int item = row + thememenu_scroll_offset;
 			int is_sel = (row == thememenu_selected_row);
@@ -9460,10 +9546,14 @@ updatethememenu(void)
 				uint32_t rgb = themepalette_rgb[item];
 				thememenu_row(pixels, menu_width, menu_height, cur_row,
 					themepalette_names[item], is_sel, text_color, hi_bg, hi_fg, &rgb);
-			} else {
+			} else if (item == THEME_PALETTE_COUNT) {
 				uint32_t cur = thememenu_target_color(thememenu_target);
 				thememenu_row(pixels, menu_width, menu_height, cur_row,
 					"Custom", is_sel, text_color, hi_bg, hi_fg, &cur);
+			} else {
+				uint32_t cur = thememenu_target_color(thememenu_target);
+				thememenu_row(pixels, menu_width, menu_height, cur_row,
+					"Alpha...", is_sel, text_color, hi_bg, hi_fg, &cur);
 			}
 			cur_row++;
 		}
@@ -9473,7 +9563,7 @@ updatethememenu(void)
 			int text_y = (cur_row + 1) * cell_height;
 			int limit = menu_width / cell_width - 2;
 			int ci;
-			if (thememenu_hex_len > 0)
+			if (thememenu_hex_active)
 				snprintf(hint, sizeof(hint), "#%s_", thememenu_hex);
 			else
 				snprintf(hint, sizeof(hint), "hex+Enter");
@@ -9500,7 +9590,11 @@ thememenu_reset_nav(void)
 	thememenu_scroll_offset = 0;
 	thememenu_selected_row = 0;
 	thememenu_hex_len = 0;
+	thememenu_hex_active = 0;
 	thememenu_hex[0] = '\0';
+	thememenu_alpha_active = 0;
+	thememenu_alpha_len = 0;
+	thememenu_alpha_buf[0] = '\0';
 }
 
 static void
@@ -9508,6 +9602,7 @@ thememenu_open_palette(int target)
 {
 	thememenu_target = target;
 	thememenu_palette_mode = 1;
+	thememenu_alpha_mode = 0;
 	thememenu_reset_nav();
 	updatethememenu();
 }
@@ -9516,6 +9611,7 @@ static void
 thememenu_open_targets(void)
 {
 	thememenu_palette_mode = 0;
+	thememenu_alpha_mode = 0;
 	thememenu_reset_nav();
 	updatethememenu();
 }
@@ -9525,6 +9621,7 @@ thememenu_close(void)
 {
 	thememenu_active = 0;
 	thememenu_palette_mode = 0;
+	thememenu_alpha_mode = 0;
 	thememenu_reset_nav();
 	updatethememenu();
 	updatebars();
@@ -9539,6 +9636,7 @@ togglethememenu(const Arg *arg)
 	}
 	thememenu_active = 1;
 	thememenu_palette_mode = 0;
+	thememenu_alpha_mode = 0;
 	thememenu_reset_nav();
 	updatethememenu();
 	updatebars();
@@ -9551,8 +9649,9 @@ thememenu_key(xkb_keysym_t sym)
 	int content_rows = 24;
 
 	/* Custom hex input mode: consume printable characters */
-	if (thememenu_hex_len > 0) {
+	if (thememenu_hex_active) {
 		if (sym == XKB_KEY_Escape) {
+			thememenu_hex_active = 0;
 			thememenu_hex_len = 0;
 			thememenu_hex[0] = '\0';
 			updatethememenu();
@@ -9565,12 +9664,13 @@ thememenu_key(xkb_keysym_t sym)
 			return 1;
 		}
 		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-			if (thememenu_hex_len == 6 ||
-			    (thememenu_hex_len == 7 && thememenu_hex[0] == '#')) {
+			int ok = (thememenu_hex_len == 6 || thememenu_hex_len == 8 ||
+				  (thememenu_hex_len == 7 && thememenu_hex[0] == '#') ||
+				  (thememenu_hex_len == 9 && thememenu_hex[0] == '#'));
+			if (ok)
 				thememenu_apply_hex(thememenu_hex);
-			}
-			if (thememenu_hex_len == 6 ||
-			    (thememenu_hex_len == 7 && thememenu_hex[0] == '#')) {
+			if (ok) {
+				thememenu_hex_active = 0;
 				thememenu_hex_len = 0;
 				thememenu_hex[0] = '\0';
 			}
@@ -9583,7 +9683,7 @@ thememenu_key(xkb_keysym_t sym)
 		    sym == XKB_KEY_numbersign) {
 			int len = thememenu_hex_len;
 			int allow_hash = (len == 0);
-			int maxlen = allow_hash ? 7 : 6;
+			int maxlen = allow_hash ? 9 : 8;
 			char c = (char)sym;
 			if (c >= 'A' && c <= 'F')
 				c = (char)(c - 'A' + 'a');
@@ -9599,15 +9699,56 @@ thememenu_key(xkb_keysym_t sym)
 		return 1; /* consume everything while typing */
 	}
 
+	/* Custom alpha input mode: consume digits (0-100) */
+	if (thememenu_alpha_active) {
+		if (sym == XKB_KEY_Escape) {
+			thememenu_alpha_active = 0;
+			thememenu_alpha_len = 0;
+			thememenu_alpha_buf[0] = '\0';
+			updatethememenu();
+			return 1;
+		}
+		if (sym == XKB_KEY_BackSpace) {
+			if (thememenu_alpha_len > 0)
+				thememenu_alpha_buf[--thememenu_alpha_len] = '\0';
+			updatethememenu();
+			return 1;
+		}
+		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+			if (thememenu_alpha_len > 0) {
+				uint32_t cur = thememenu_target_color(thememenu_target);
+				int pct = atoi(thememenu_alpha_buf);
+				if (pct > 100) pct = 100;
+				thememenu_apply_rgb((cur & 0x00FFFFFF) |
+					(((uint32_t)(pct * 255 / 100)) << 24));
+			}
+			thememenu_alpha_active = 0;
+			thememenu_alpha_len = 0;
+			thememenu_alpha_buf[0] = '\0';
+			updatethememenu();
+			return 1;
+		}
+		if (sym >= XKB_KEY_0 && sym <= XKB_KEY_9) {
+			if (thememenu_alpha_len + 1 < (int)sizeof(thememenu_alpha_buf)) {
+				thememenu_alpha_buf[thememenu_alpha_len] = (char)sym;
+				thememenu_alpha_buf[thememenu_alpha_len + 1] = '\0';
+				thememenu_alpha_len++;
+			}
+			updatethememenu();
+			return 1;
+		}
+		return 1; /* consume everything while typing */
+	}
+
 	if (sym == XKB_KEY_Escape) {
-		if (thememenu_palette_mode)
+		if (thememenu_alpha_mode || thememenu_palette_mode)
 			thememenu_open_targets();
 		else
 			thememenu_close();
 		return 1;
 	}
 	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
-		if (thememenu_palette_mode)
+		if (thememenu_alpha_mode || thememenu_palette_mode)
 			thememenu_open_targets();
 		return 1;
 	}
@@ -9618,9 +9759,11 @@ thememenu_key(xkb_keysym_t sym)
 		return 1;
 	}
 	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
-		items = thememenu_palette_mode
-			? (THEME_PALETTE_COUNT + 1)
-			: THEME_TARGET_COUNT;
+		items = thememenu_alpha_mode
+			? (THEME_ALPHA_COUNT + 1)
+			: (thememenu_palette_mode
+				? (THEME_PALETTE_COUNT + 2)
+				: THEME_TARGET_COUNT);
 		max_row = (items < content_rows) ? items - 1 : content_rows - 1;
 		if (thememenu_selected_row < max_row)
 			thememenu_selected_row++;
@@ -9630,23 +9773,52 @@ thememenu_key(xkb_keysym_t sym)
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
 	    sym == XKB_KEY_Right || sym == XKB_KEY_l) {
 		selected = thememenu_selected_row + thememenu_scroll_offset;
-		if (!thememenu_palette_mode) {
+		if (!thememenu_palette_mode && !thememenu_alpha_mode) {
 			if (selected >= 0 && selected < THEME_TARGET_COUNT) {
 				thememenu_open_palette(selected);
 			}
 			return 1;
 		}
+		if (thememenu_alpha_mode) {
+			/* Apply the selected transparency to the current color */
+			if (selected >= 0 && selected < THEME_ALPHA_COUNT) {
+				uint32_t cur = thememenu_target_color(thememenu_target);
+				uint32_t rgb = (cur & 0x00FFFFFF) |
+					(((uint32_t)themealphas[selected]) << 24);
+				thememenu_apply_rgb(rgb);
+			} else if (selected == THEME_ALPHA_COUNT) {
+				/* Custom: type any 0-100% */
+				thememenu_alpha_active = 1;
+				thememenu_alpha_len = 0;
+				thememenu_alpha_buf[0] = '\0';
+			}
+			updatethememenu();
+			return 1;
+		}
 		/* palette level */
 		if (selected < THEME_PALETTE_COUNT) {
-			thememenu_apply_rgb(themepalette_rgb[selected]);
+			thememenu_apply_rgb(themepalette_rgb[selected] | 0xFF000000);
+			updatethememenu();
+			return 1;
+		}
+		if (selected == THEME_PALETTE_COUNT + 1) {
+			/* Alpha...: edit transparency of the current color */
+			thememenu_alpha_mode = 1;
+			thememenu_reset_nav();
 			updatethememenu();
 			return 1;
 		}
 		/* Custom entry: start with the current value as a seed */
 		{
 			uint32_t cur = thememenu_target_color(thememenu_target);
-			snprintf(thememenu_hex, sizeof(thememenu_hex), "%06x", cur);
-			thememenu_hex_len = 6;
+			thememenu_hex_active = 1;
+			if (((cur >> 24) & 0xFF) == 0xFF) {
+				snprintf(thememenu_hex, sizeof(thememenu_hex), "%06x", cur & 0x00FFFFFF);
+				thememenu_hex_len = 6;
+			} else {
+				snprintf(thememenu_hex, sizeof(thememenu_hex), "%08x", cur);
+				thememenu_hex_len = 8;
+			}
 			updatethememenu();
 		}
 		return 1;
@@ -9848,7 +10020,7 @@ updaterepl(void)
 
 		/* Fill with background color */
 		for (i = 0; i < width * height; i++)
-			pixels[i] = RGB_TO_ARGB(cfg_bg_color);
+			pixels[i] = premul_argb(cfg_bg_color);
 
 		/* Calculate visible lines (leave space for bar at top) */
 		visible_lines = (height - cell_height) / cell_height;
@@ -9947,7 +10119,7 @@ updatebar(Monitor *m)
 	/* Fill background - skip if scroll-only update */
 	if (!scroll_only_bar_update) {
 		for (i = 0; i < width * cell_height; i++)
-			pixels[i] = RGB_TO_ARGB(cfg_bar_color);
+			pixels[i] = premul_argb(cfg_bar_color);
 	}
 
 	x = 0;
@@ -10009,7 +10181,7 @@ updatebar(Monitor *m)
 					/* Draw background */
 					for (py = 0; py < cell_height; py++) {
 						for (px = x; px < x + (len + 2) * cell_width && px < width; px++) {
-							pixels[py * width + px] = bg;
+							pixels[py * width + px] = premul_argb(bg);
 						}
 					}
 				} else {
@@ -10038,7 +10210,7 @@ updatebar(Monitor *m)
 				fg = RGB_TO_ARGB(cfg_bar_color);
 				for (py = 0; py < cell_height; py++) {
 					for (px = x; px < x + btn_cells * cell_width && px < width; px++) {
-						pixels[py * width + px] = bg;
+						pixels[py * width + px] = premul_argb(bg);
 					}
 				}
 			} else {
@@ -10077,7 +10249,7 @@ updatebar(Monitor *m)
 			if (bg != RGB_TO_ARGB(cfg_bar_color)) {
 				for (py = 0; py < cell_height; py++) {
 					for (px = x; px < x + 3 * cell_width && px < width; px++) {
-						pixels[py * width + px] = bg;
+						pixels[py * width + px] = premul_argb(bg);
 					}
 				}
 			}
@@ -10160,7 +10332,7 @@ render_tabs:
 				if (is_focused || (scroll_only_bar_update && needs_scroll)) {
 					for (py = 0; py < cell_height; py++) {
 						for (px = x; px < x + actual_tab_width && px < width; px++) {
-							pixels[py * width + px] = bg;
+							pixels[py * width + px] = premul_argb(bg);
 						}
 					}
 				}
@@ -10587,12 +10759,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
 {
 	CachedGlyph *cg;
 	int gx, gy, px, py;
-	unsigned char v, r, g, b;
+	unsigned char v, a, r, g, b;
 
 	cg = get_cached_glyph(charcode);
 	if (!cg || !cg->bitmap)
 		return;
 
+	a = (color >> 24) & 0xFF;
 	r = (color >> 16) & 0xFF;
 	g = (color >> 8) & 0xFF;
 	b = color & 0xFF;
@@ -10605,11 +10778,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
 			px = x + cg->bitmap_left + gx;
 			if (px < 0 || px >= buf_w) continue;
 			v = cg->bitmap[gy * cg->pitch + gx];
-			if (v > 0)
-				pixels[py * buf_w + px] = 0xFF000000 |
-					((r * v / 255) << 16) |
-					((g * v / 255) << 8) |
-					(b * v / 255);
+			if (v > 0) {
+				if (a == 255)
+					pixels[py * buf_w + px] = 0xFF000000 |
+						((r * v / 255) << 16) |
+						((g * v / 255) << 8) |
+						(b * v / 255);
+				else
+					pixels[py * buf_w + px] = (a << 24) |
+						((r * v * a / 65025) << 16) |
+						((g * v * a / 65025) << 8) |
+						(b * v * a / 65025);
+			}
 		}
 	}
 }
@@ -10621,12 +10801,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
 {
 	CachedGlyph *cg;
 	int gx, gy, px, py;
-	unsigned char v, r, g, b;
+	unsigned char v, a, r, g, b;
 
 	cg = get_cached_glyph(charcode);
 	if (!cg || !cg->bitmap)
 		return;
 
+	a = (color >> 24) & 0xFF;
 	r = (color >> 16) & 0xFF;
 	g = (color >> 8) & 0xFF;
 	b = color & 0xFF;
@@ -10639,11 +10820,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
 			if (px < clip_left || px >= clip_right) continue;
 			if (px < 0 || px >= buf_w) continue;
 			v = cg->bitmap[gy * cg->pitch + gx];
-			if (v > 0)
-				pixels[py * buf_w + px] = 0xFF000000 |
-					((r * v / 255) << 16) |
-					((g * v / 255) << 8) |
-					(b * v / 255);
+			if (v > 0) {
+				if (a == 255)
+					pixels[py * buf_w + px] = 0xFF000000 |
+						((r * v / 255) << 16) |
+						((g * v / 255) << 8) |
+						(b * v / 255);
+				else
+					pixels[py * buf_w + px] = (a << 24) |
+						((r * v * a / 65025) << 16) |
+						((g * v * a / 65025) << 8) |
+						(b * v * a / 65025);
+			}
 		}
 	}
 }
@@ -10688,7 +10876,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
 	
 	pixels = c->scroll_title_pixels;
 	for (i = 0; i < total_width * cell_height; i++)
-		pixels[i] = bg_color;
+		pixels[i] = premul_argb(bg_color);
 	
 	/* Render title characters TWICE (uses glyph cache - fast) */
 	pos = 0;
@@ -10955,7 +11143,7 @@ updateframe(Client *c)
 	
 	/* Clear buffer */
 	for (i = 0; i < width * cell_height; i++)
-		pixels[i] = bg_color;
+		pixels[i] = premul_argb(bg_color);
 
 	/* Format: ╔═ title ═╗ with horizontal lines filling the rest */
 	render_char_to_buffer(pixels, width, cell_height, 0, 0, tl_char, RGB_TO_ARGB(cfg_border_line_color));
@@ -11157,7 +11345,7 @@ updateframe(Client *c)
 		
 		/* Clear buffer */
 		for (i = 0; i < width * cell_height; i++)
-			pixels[i] = bg_color;
+			pixels[i] = premul_argb(bg_color);
 
 		render_char_to_buffer(pixels, width, cell_height, 0, 0, bl_char, RGB_TO_ARGB(cfg_border_line_color));
 		
@@ -11195,7 +11383,7 @@ updateframe(Client *c)
 			
 			/* Clear buffer */
 			for (i = 0; i < cell_width * side_height; i++)
-				pixels[i] = bg_color;
+				pixels[i] = premul_argb(bg_color);
 
 			for (i = 0; i < rows; i++)
 				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
@@ -11230,7 +11418,7 @@ updateframe(Client *c)
 			
 			/* Clear buffer */
 			for (i = 0; i < cell_width * side_height; i++)
-				pixels[i] = bg_color;
+				pixels[i] = premul_argb(bg_color);
 
 			for (i = 0; i < rows; i++)
 				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
