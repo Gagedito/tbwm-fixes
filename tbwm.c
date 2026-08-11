@@ -487,6 +487,8 @@ static void updateframe(Client *c);
 static void updateframes(void);
 static int update_scroll_only(Client *c);
 static void setup_scroll_scene_buffer(Client *c, uint32_t fg_color, uint32_t bg_color);
+static void bar_button_centers(Monitor *m, int *audio_center, int *net_center);
+static int centered_menu_x(Monitor *m, int button_center, int menu_width);
 
 static void startdrag(struct wl_listener *listener, void *data);
 static void tag(const Arg *arg);
@@ -1643,10 +1645,12 @@ buttonpress(struct wl_listener *listener, void *data)
 
 		/* Handle net menu clicks */
 		if (netmenu_active && selmon) {
-			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
-			int menu_y = selmon->m.y + cell_height;
-			int menu_w = 25 * cell_width;
-			int menu_h = netmenu_cells_h() * cell_height;
+			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = netmenu_cells_h() * cell_height;
 			
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
@@ -1778,10 +1782,12 @@ buttonpress(struct wl_listener *listener, void *data)
 
 		/* Handle audio menu clicks */
 		if (audiomenu_active && selmon) {
-			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
-			int menu_y = selmon->m.y + cell_height;
-			int menu_w = 25 * cell_width;
-			int menu_h = audiomenu_cells_h() * cell_height;
+			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = audiomenu_cells_h() * cell_height;
 
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
@@ -6017,6 +6023,83 @@ render_row_text(uint32_t *pixels, int menu_width, int menu_height,
 	}
 }
 
+/* Compute the horizontal centers (monitor-local pixels) of the [A] and [N]
+ * bar buttons for monitor m, using the same right-aligned layout priority that
+ * updatebar renders: battery+date/time > status text > date/time > buttons. */
+static void
+bar_button_centers(Monitor *m, int *audio_center, int *net_center)
+{
+	int nbtn_len = strlen(cfg_net_menu_button);
+	int nbtn_cells = nbtn_len + 2; /* [nbtn] */
+	int abtn_len = strlen(cfg_audio_menu_button);
+	int abtn_cells = abtn_len + 2; /* [abtn] */
+	int right_chars, right_x;
+	time_t nnow = time(NULL);
+	struct tm *ntm = localtime(&nnow);
+
+	if (cfg_battery_poll && battery_status_text[0] != '\0') {
+		int batt_len = (int)strlen(battery_status_text);
+		right_chars = abtn_cells + 1 + nbtn_cells + 3 + batt_len;
+		if (cfg_show_date || cfg_show_time)
+			right_chars += 3;
+		if (cfg_show_date) {
+			char n_date[32] = "";
+			strftime(n_date, sizeof(n_date), "%Y-%m-%d", ntm);
+			right_chars += (int)strlen(n_date);
+		}
+		if (cfg_show_time) {
+			char n_time[32] = "";
+			strftime(n_time, sizeof(n_time), "%I:%M:%S %p", ntm);
+			right_chars += (int)strlen(n_time);
+		}
+		if (cfg_show_date && cfg_show_time)
+			right_chars += 3;
+	} else if (cfg_status_text[0] != '\0') {
+		right_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
+	} else if (cfg_show_date || cfg_show_time) {
+		char n_date[32] = "", n_time[32] = "";
+		int n_dl = 0, n_tl = 0;
+		if (cfg_show_date) {
+			strftime(n_date, sizeof(n_date), "%Y-%m-%d", ntm);
+			n_dl = strlen(n_date);
+		}
+		if (cfg_show_time) {
+			strftime(n_time, sizeof(n_time), "%I:%M:%S %p", ntm);
+			n_tl = strlen(n_time);
+		}
+		if (cfg_show_date && cfg_show_time)
+			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
+		else if (cfg_show_date)
+			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl;
+		else if (cfg_show_time)
+			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_tl;
+		else
+			right_chars = abtn_cells + 1 + nbtn_cells;
+	} else {
+		right_chars = abtn_cells + 1 + nbtn_cells;
+	}
+
+	right_x = m->m.width - right_chars * cell_width;
+	if (right_x < 0)
+		right_x = 0;
+	*audio_center = right_x + abtn_cells * cell_width / 2;
+	*net_center = right_x + (abtn_cells + 1) * cell_width + nbtn_cells * cell_width / 2;
+}
+
+/* Horizontal x for a menu centered on a bar button, clamped to the monitor. */
+static int
+centered_menu_x(Monitor *m, int button_center, int menu_width)
+{
+	int mx = m->m.x + button_center - menu_width / 2;
+	if (mx < m->m.x)
+		mx = m->m.x;
+	if (mx + menu_width > m->m.x + m->m.width)
+		mx = m->m.x + m->m.width - menu_width;
+	if (mx < m->m.x)
+		mx = m->m.x;
+	return mx;
+}
+
 /* Audio menu (volume / outputs / microphones): a flat text list fed by
  * audiomenu_cmd. Same layout as the network menu, minus the pairing/password
  * views. Actions run their command and refresh, keeping the menu open. */
@@ -6350,9 +6433,12 @@ updatemenuaudio(void)
 	if (!audiomenu_buffer)
 		audiomenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
 	wlr_scene_node_set_enabled(&audiomenu_buffer->node, 1);
-	/* Position at top-right of focused monitor, below the bar */
+	/* Position centered on the [A] bar button, below the bar */
 	if (selmon) {
-		wlr_scene_node_set_position(&audiomenu_buffer->node, selmon->m.x + selmon->m.width - menu_width, selmon->m.y + cell_height);
+		int audio_center, net_center;
+		bar_button_centers(selmon, &audio_center, &net_center);
+		wlr_scene_node_set_position(&audiomenu_buffer->node,
+			centered_menu_x(selmon, audio_center, menu_width), selmon->m.y + cell_height);
 	} else {
 		wlr_scene_node_set_position(&audiomenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
 	}
@@ -6869,10 +6955,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 		/* Update net menu hover selection */
 		if (netmenu_active && selmon && !net_password_mode) {
-			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
-			int menu_y = selmon->m.y + cell_height;
-			int menu_w = 25 * cell_width;
-			int menu_h = netmenu_cells_h() * cell_height;
+			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = netmenu_cells_h() * cell_height;
 
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
@@ -6892,10 +6980,12 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 		/* Update audio menu hover selection */
 		if (audiomenu_active && selmon) {
-			int menu_x = selmon->m.x + selmon->m.width - 25 * cell_width;
-			int menu_y = selmon->m.y + cell_height;
-			int menu_w = 25 * cell_width;
-			int menu_h = audiomenu_cells_h() * cell_height;
+			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = audiomenu_cells_h() * cell_height;
 
 			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
@@ -10859,9 +10949,12 @@ updatenetmenu(void)
 	if (!netmenu_buffer)
 		netmenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
 	wlr_scene_node_set_enabled(&netmenu_buffer->node, 1);
-	/* Position at top-right of focused monitor, below the bar */
+	/* Position centered on the [N] bar button, below the bar */
 	if (selmon) {
-		wlr_scene_node_set_position(&netmenu_buffer->node, selmon->m.x + selmon->m.width - menu_width, selmon->m.y + cell_height);
+		int audio_center, net_center;
+		bar_button_centers(selmon, &audio_center, &net_center);
+		wlr_scene_node_set_position(&netmenu_buffer->node,
+			centered_menu_x(selmon, net_center, menu_width), selmon->m.y + cell_height);
 	} else {
 		wlr_scene_node_set_position(&netmenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
 	}
