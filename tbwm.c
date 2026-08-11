@@ -474,6 +474,7 @@ static int netmenu_scan_is_active(void);
 static int timingtimer(void *data);
 static int bartimer(void *data);
 static int scrolltimer(void *data);
+static int batterytimer(void *data);
 static void togglelauncher(const Arg *arg);
 static void togglerepl(const Arg *arg);
 static void toggleappmenu(const Arg *arg);
@@ -680,10 +681,13 @@ static int netmenu_last_sub = 0;        /* last netmenu_refresh() used a focused
 static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
 static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
 static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
-static int title_scroll_speed = 30;      /* pixels per second */
+static int title_scroll_speed = 30;      /* currently unused: scroll advances 1px per 30fps tick (~30 px/s) */
 static struct wl_event_source *scroll_timer = NULL;
 static int any_title_needs_scroll = 0;   /* track if any title needs scrolling */
 static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
+static int cfg_battery_poll = 0;         /* 1 = auto-update status text with battery % */
+static int battery_poll_interval = 60;   /* seconds between battery polls */
+static struct wl_event_source *battery_timer = NULL;
 
 /* REPL state */
 static int repl_visible = 0;             /* 0 = REPL background/text hidden unless active */
@@ -8365,6 +8369,7 @@ static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
 	repl_add_line("(set-show-time B)  - show time in bar");
 	repl_add_line("(set-show-date B)  - show date in bar");
 	repl_add_line("(set-status-text S)- custom status text");
+	repl_add_line("(set-battery-poll B [sec])- auto battery % in bar");
 	repl_add_line("DIR: DIR-LEFT/RIGHT/UP/DOWN");
 	return s7_t(sc);
 }
@@ -8788,6 +8793,36 @@ static s7_pointer scm_set_status_text(s7_scheme *sc, s7_pointer args) {
 	return s7_t(sc);
 }
 
+/* Scheme: (set-battery-poll b [interval]) - auto-show battery % in status bar.
+ * Interval is in seconds (default 60); while enabled it overwrites set-status-text. */
+static s7_pointer scm_set_battery_poll(s7_scheme *sc, s7_pointer args) {
+	int enable;
+	s7_pointer rest = s7_cdr(args);
+	if (!s7_is_boolean(s7_car(args)))
+		return s7_f(sc);
+	enable = s7_boolean(sc, s7_car(args)) ? 1 : 0;
+	if (s7_is_pair(rest) && s7_is_integer(s7_car(rest))) {
+		int iv = s7_integer(s7_car(rest));
+		if (iv < 1) iv = 1;
+		battery_poll_interval = iv;
+	}
+	cfg_battery_poll = enable;
+	if (enable) {
+		if (!battery_timer && event_loop) {
+			battery_timer = wl_event_loop_add_timer(event_loop, batterytimer, NULL);
+			if (!battery_timer) {
+				cfg_battery_poll = 0;
+				return s7_f(sc);
+			}
+		}
+		batterytimer(NULL); /* read now and schedule next tick */
+	} else if (battery_timer) {
+		wl_event_source_remove(battery_timer);
+		battery_timer = NULL;
+	}
+	return s7_t(sc);
+}
+
 /* Scheme: (set-bar-autohide b) - enable/disable hiding bar when a client is fullscreen */
 static s7_pointer scm_set_bar_autohide(s7_scheme *sc, s7_pointer args) {
 	cfg_bar_autohide = s7_boolean(sc, s7_car(args)) ? 1 : 0;
@@ -9112,6 +9147,7 @@ setup_scheme(void)
 	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
 	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
 	s7_define_function(sc, "set-status-text", scm_set_status_text, 1, 0, false, "(set-status-text \"text\") custom status text (replaces date/time)");
+	s7_define_function(sc, "set-battery-poll", scm_set_battery_poll, 1, 0, true, "(set-battery-poll b [interval]) auto-show battery % in status bar (overrides set-status-text)");
 	s7_define_function(sc, "set-sloppy-focus", scm_set_sloppy_focus, 1, 0, false, "(set-sloppy-focus b) enable/disable focus follows mouse");
 	s7_define_function(sc, "on-startup", scm_on_startup, 0, 0, true, "(on-startup cmd1 cmd2 ...) register commands to run on startup");
 	s7_define_function(sc, "buffer-stats", scm_buffer_stats, 0, 0, false, "(buffer-stats) show buffer alloc/free counts for leak detection");
@@ -9711,6 +9747,34 @@ bartimer(void *data)
 	/* Used for clock updates */
 	updatebars();
 	wl_event_source_timer_update(bar_timer, 1000);
+	return 0;
+}
+
+int
+batterytimer(void *data)
+{
+	char path[64];
+	FILE *f;
+	int pct = -1;
+	int i;
+	if (!cfg_battery_poll)
+		return 1;
+	/* Read capacity from the first BAT* device */
+	for (i = 0; i < 10; i++) {
+		snprintf(path, sizeof(path), "/sys/class/power_supply/BAT%d/capacity", i);
+		f = fopen(path, "r");
+		if (f) {
+			if (fscanf(f, "%d", &pct) == 1 && pct >= 0) {
+				snprintf(cfg_status_text, sizeof(cfg_status_text), "Battery: %d%%", pct);
+				updatebars();
+			}
+			fclose(f);
+			break;
+		}
+	}
+	if (pct < 0)
+		tbwm_log(TBWM_LOG_WARN, "tbwm: battery poll: no BAT* device found\n");
+	wl_event_source_timer_update(battery_timer, battery_poll_interval * 1000);
 	return 0;
 }
 

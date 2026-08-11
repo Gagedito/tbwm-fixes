@@ -1707,7 +1707,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..418bbd9 100644
+index a1e049d..f64369e 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -17,8 +17,10 @@
@@ -1721,7 +1721,7 @@ index a1e049d..418bbd9 100644
  #include <wayland-server-core.h>
  #include <wlr/backend.h>
  #include <wlr/backend/libinput.h>
-@@ -440,6 +442,35 @@ static void updatebar(Monitor *m);
+@@ -440,9 +442,39 @@ static void updatebar(Monitor *m);
  static void updatebars(void);
  static void updateappmenu(void);
  static int appmenu_item_count(void);
@@ -1757,7 +1757,11 @@ index a1e049d..418bbd9 100644
  static int timingtimer(void *data);
  static int bartimer(void *data);
  static int scrolltimer(void *data);
-@@ -505,7 +536,11 @@ static int launcher_active = 0;
++static int batterytimer(void *data);
+ static void togglelauncher(const Arg *arg);
+ static void togglerepl(const Arg *arg);
+ static void toggleappmenu(const Arg *arg);
+@@ -505,7 +537,11 @@ static int launcher_active = 0;
  static char launcher_input[256] = {0};
  static int launcher_input_len = 0;
  static int launcher_selection = 0;
@@ -1770,7 +1774,7 @@ index a1e049d..418bbd9 100644
  static int app_cache_count = 0;
  
  /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
-@@ -640,6 +675,8 @@ static int signal_fd = -1;
+@@ -640,16 +676,21 @@ static int signal_fd = -1;
  static struct wl_event_source *signal_fd_source = NULL;
  
  static struct wl_event_source *bar_timer = NULL;
@@ -1779,8 +1783,14 @@ index a1e049d..418bbd9 100644
  static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
  static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
  static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
-@@ -649,7 +686,7 @@ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling *
+-static int title_scroll_speed = 30;      /* pixels per second */
++static int title_scroll_speed = 30;      /* currently unused: scroll advances 1px per 30fps tick (~30 px/s) */
+ static struct wl_event_source *scroll_timer = NULL;
+ static int any_title_needs_scroll = 0;   /* track if any title needs scrolling */
  static int scroll_only_bar_update = 0;   /* 1 = only update scrolling tabs, skip static */
++static int cfg_battery_poll = 0;         /* 1 = auto-update status text with battery % */
++static int battery_poll_interval = 60;   /* seconds between battery polls */
++static struct wl_event_source *battery_timer = NULL;
  
  /* REPL state */
 -static int repl_visible = 1;             /* 1 = REPL background/text visible */
@@ -1788,7 +1798,7 @@ index a1e049d..418bbd9 100644
  static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
  static char repl_input[1024] = {0};      /* current input line */
  static int repl_input_len = 0;
-@@ -687,7 +724,8 @@ static int cfg_show_date = 1;          /* Show date in status bar */
+@@ -687,7 +728,8 @@ static int cfg_show_date = 1;          /* Show date in status bar */
  static char cfg_status_text[256] = ""; /* Custom status text (overrides date/time if set) */
  static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen */
  
@@ -1798,7 +1808,7 @@ index a1e049d..418bbd9 100644
   * cfg_bg_color          = root/REPL background (black)
   * cfg_bg_text_color     = text on background/REPL (grey)
   * cfg_bar_color         = status bar background (blue)
-@@ -697,21 +735,171 @@ static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen *
+@@ -697,21 +739,171 @@ static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen *
   * cfg_menu_color        = app menu background (grey)
   * cfg_menu_text_color   = app menu text (white)
   */
@@ -1978,7 +1988,7 @@ index a1e049d..418bbd9 100644
  /* App launcher data structures */
  #define MAX_APPS 512
  #define MAX_CATEGORIES 32
-@@ -857,6 +1045,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
+@@ -857,6 +1049,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
  };
  
  static pid_t child_pid = -1;
@@ -1986,7 +1996,7 @@ index a1e049d..418bbd9 100644
  static int locked;
  static void *exclusive_focus;
  static struct wl_display *dpy;
-@@ -1304,6 +1493,61 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1304,6 +1497,61 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -2048,7 +2058,7 @@ index a1e049d..418bbd9 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1619,269 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1623,269 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -2318,7 +2328,7 @@ index a1e049d..418bbd9 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1591,6 +2098,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+@@ -1591,6 +2102,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
  	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
  }
  
@@ -2387,7 +2397,7 @@ index a1e049d..418bbd9 100644
  void
  cleanup(void)
  {
-@@ -1606,6 +2175,13 @@ cleanup(void)
+@@ -1606,6 +2179,13 @@ cleanup(void)
  		kill(-child_pid, SIGTERM);
  		waitpid(child_pid, NULL, 0);
  	}
@@ -2401,7 +2411,7 @@ index a1e049d..418bbd9 100644
  	wlr_xcursor_manager_destroy(cursor_mgr);
  
  	/* Clean up glyph cache bitmaps */
-@@ -1633,6 +2209,38 @@ cleanup(void)
+@@ -1633,6 +2213,38 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -2440,7 +2450,7 @@ index a1e049d..418bbd9 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +2290,6 @@ cleanup(void)
+@@ -1682,9 +2294,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -2450,7 +2460,7 @@ index a1e049d..418bbd9 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -3191,9 +3796,10 @@ void
+@@ -3191,9 +3800,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -2464,7 +2474,7 @@ index a1e049d..418bbd9 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +3972,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +3976,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -2490,7 +2500,7 @@ index a1e049d..418bbd9 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +4000,9 @@ launcher_get_match(int index)
+@@ -3382,9 +4004,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -2502,7 +2512,7 @@ index a1e049d..418bbd9 100644
  			count++;
  		}
  	}
-@@ -3586,2783 +4204,5070 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,2783 +4208,5102 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -9004,6 +9014,7 @@ index a1e049d..418bbd9 100644
 +	repl_add_line("(set-show-time B)  - show time in bar");
 +	repl_add_line("(set-show-date B)  - show date in bar");
 +	repl_add_line("(set-status-text S)- custom status text");
++	repl_add_line("(set-battery-poll B [sec])- auto battery % in bar");
 +	repl_add_line("DIR: DIR-LEFT/RIGHT/UP/DOWN");
 +	return s7_t(sc);
 +}
@@ -9427,6 +9438,36 @@ index a1e049d..418bbd9 100644
 +	return s7_t(sc);
 +}
 +
++/* Scheme: (set-battery-poll b [interval]) - auto-show battery % in status bar.
++ * Interval is in seconds (default 60); while enabled it overwrites set-status-text. */
++static s7_pointer scm_set_battery_poll(s7_scheme *sc, s7_pointer args) {
++	int enable;
++	s7_pointer rest = s7_cdr(args);
++	if (!s7_is_boolean(s7_car(args)))
++		return s7_f(sc);
++	enable = s7_boolean(sc, s7_car(args)) ? 1 : 0;
++	if (s7_is_pair(rest) && s7_is_integer(s7_car(rest))) {
++		int iv = s7_integer(s7_car(rest));
++		if (iv < 1) iv = 1;
++		battery_poll_interval = iv;
++	}
++	cfg_battery_poll = enable;
++	if (enable) {
++		if (!battery_timer && event_loop) {
++			battery_timer = wl_event_loop_add_timer(event_loop, batterytimer, NULL);
++			if (!battery_timer) {
++				cfg_battery_poll = 0;
++				return s7_f(sc);
++			}
++		}
++		batterytimer(NULL); /* read now and schedule next tick */
++	} else if (battery_timer) {
++		wl_event_source_remove(battery_timer);
++		battery_timer = NULL;
++	}
++	return s7_t(sc);
++}
++
 +/* Scheme: (set-bar-autohide b) - enable/disable hiding bar when a client is fullscreen */
 +static s7_pointer scm_set_bar_autohide(s7_scheme *sc, s7_pointer args) {
 +	cfg_bar_autohide = s7_boolean(sc, s7_car(args)) ? 1 : 0;
@@ -9751,6 +9792,7 @@ index a1e049d..418bbd9 100644
 +	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
 +	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
 +	s7_define_function(sc, "set-status-text", scm_set_status_text, 1, 0, false, "(set-status-text \"text\") custom status text (replaces date/time)");
++	s7_define_function(sc, "set-battery-poll", scm_set_battery_poll, 1, 0, true, "(set-battery-poll b [interval]) auto-show battery % in status bar (overrides set-status-text)");
 +	s7_define_function(sc, "set-sloppy-focus", scm_set_sloppy_focus, 1, 0, false, "(set-sloppy-focus b) enable/disable focus follows mouse");
 +	s7_define_function(sc, "on-startup", scm_on_startup, 0, 0, true, "(on-startup cmd1 cmd2 ...) register commands to run on startup");
 +	s7_define_function(sc, "buffer-stats", scm_buffer_stats, 0, 0, false, "(buffer-stats) show buffer alloc/free counts for leak detection");
@@ -9910,7 +9952,7 @@ index a1e049d..418bbd9 100644
  "(bind-key \"M-3\" (lambda () (view-tag 3)))\n"
  "(bind-key \"M-4\" (lambda () (view-tag 4)))\n"
  "(bind-key \"M-5\" (lambda () (view-tag 5)))\n"
-@@ -6382,937 +9287,2102 @@ static const char *default_config_parts[] = {
+@@ -6382,937 +9323,2130 @@ static const char *default_config_parts[] = {
  "(bind-key \"M-S-asterisk\" (lambda () (tag-window 8)))\n"
  "(bind-key \"M-S-parenleft\" (lambda () (tag-window 9)))\n",
  
@@ -10453,6 +10495,34 @@ index a1e049d..418bbd9 100644
 +	/* Used for clock updates */
 +	updatebars();
 +	wl_event_source_timer_update(bar_timer, 1000);
++	return 0;
++}
++
++int
++batterytimer(void *data)
++{
++	char path[64];
++	FILE *f;
++	int pct = -1;
++	int i;
++	if (!cfg_battery_poll)
++		return 1;
++	/* Read capacity from the first BAT* device */
++	for (i = 0; i < 10; i++) {
++		snprintf(path, sizeof(path), "/sys/class/power_supply/BAT%d/capacity", i);
++		f = fopen(path, "r");
++		if (f) {
++			if (fscanf(f, "%d", &pct) == 1 && pct >= 0) {
++				snprintf(cfg_status_text, sizeof(cfg_status_text), "Battery: %d%%", pct);
++				updatebars();
++			}
++			fclose(f);
++			break;
++		}
++	}
++	if (pct < 0)
++		tbwm_log(TBWM_LOG_WARN, "tbwm: battery poll: no BAT* device found\n");
++	wl_event_source_timer_update(battery_timer, battery_poll_interval * 1000);
 +	return 0;
 +}
 +
@@ -12838,7 +12908,7 @@ index a1e049d..418bbd9 100644
  }
  
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
-@@ -7412,9 +11482,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +11546,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -12850,7 +12920,7 @@ index a1e049d..418bbd9 100644
  		return 1;
  	}
  
-@@ -7497,7 +11569,7 @@ updaterepl(void)
+@@ -7497,7 +11633,7 @@ updaterepl(void)
  
  		/* Fill with background color */
  		for (i = 0; i < width * height; i++)
@@ -12859,7 +12929,7 @@ index a1e049d..418bbd9 100644
  
  		/* Calculate visible lines (leave space for bar at top) */
  		visible_lines = (height - cell_height) / cell_height;
-@@ -7596,7 +11668,7 @@ updatebar(Monitor *m)
+@@ -7596,7 +11732,7 @@ updatebar(Monitor *m)
  	/* Fill background - skip if scroll-only update */
  	if (!scroll_only_bar_update) {
  		for (i = 0; i < width * cell_height; i++)
@@ -12868,7 +12938,7 @@ index a1e049d..418bbd9 100644
  	}
  
  	x = 0;
-@@ -7643,37 +11715,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +11779,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -12931,7 +13001,7 @@ index a1e049d..418bbd9 100644
  			}
  		}
  	} else {
-@@ -7687,7 +11759,7 @@ updatebar(Monitor *m)
+@@ -7687,7 +11823,7 @@ updatebar(Monitor *m)
  				fg = RGB_TO_ARGB(cfg_bar_color);
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + btn_cells * cell_width && px < width; px++) {
@@ -12940,7 +13010,7 @@ index a1e049d..418bbd9 100644
  					}
  				}
  			} else {
-@@ -7726,7 +11798,7 @@ updatebar(Monitor *m)
+@@ -7726,7 +11862,7 @@ updatebar(Monitor *m)
  			if (bg != RGB_TO_ARGB(cfg_bar_color)) {
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + 3 * cell_width && px < width; px++) {
@@ -12949,7 +13019,7 @@ index a1e049d..418bbd9 100644
  					}
  				}
  			}
-@@ -7809,7 +11881,7 @@ render_tabs:
+@@ -7809,7 +11945,7 @@ render_tabs:
  				if (is_focused || (scroll_only_bar_update && needs_scroll)) {
  					for (py = 0; py < cell_height; py++) {
  						for (px = x; px < x + actual_tab_width && px < width; px++) {
@@ -12958,7 +13028,7 @@ index a1e049d..418bbd9 100644
  						}
  					}
  				}
-@@ -7884,66 +11956,132 @@ render_tabs:
+@@ -7884,66 +12020,132 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -13135,7 +13205,7 @@ index a1e049d..418bbd9 100644
  				}
  			}
  		}
-@@ -8204,12 +12342,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8204,12 +12406,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -13150,7 +13220,7 @@ index a1e049d..418bbd9 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8222,11 +12361,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8222,11 +12425,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			px = x + cg->bitmap_left + gx;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -13174,7 +13244,7 @@ index a1e049d..418bbd9 100644
  		}
  	}
  }
-@@ -8238,12 +12384,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8238,12 +12448,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -13189,7 +13259,7 @@ index a1e049d..418bbd9 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8256,11 +12403,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8256,11 +12467,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			if (px < clip_left || px >= clip_right) continue;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -13213,7 +13283,7 @@ index a1e049d..418bbd9 100644
  		}
  	}
  }
-@@ -8305,7 +12459,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
+@@ -8305,7 +12523,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
  	
  	pixels = c->scroll_title_pixels;
  	for (i = 0; i < total_width * cell_height; i++)
@@ -13222,7 +13292,7 @@ index a1e049d..418bbd9 100644
  	
  	/* Render title characters TWICE (uses glyph cache - fast) */
  	pos = 0;
-@@ -8572,7 +12726,7 @@ updateframe(Client *c)
+@@ -8572,7 +12790,7 @@ updateframe(Client *c)
  	
  	/* Clear buffer */
  	for (i = 0; i < width * cell_height; i++)
@@ -13231,7 +13301,7 @@ index a1e049d..418bbd9 100644
  
  	/* Format: ╔═ title ═╗ with horizontal lines filling the rest */
  	render_char_to_buffer(pixels, width, cell_height, 0, 0, tl_char, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8774,7 +12928,7 @@ updateframe(Client *c)
+@@ -8774,7 +12992,7 @@ updateframe(Client *c)
  		
  		/* Clear buffer */
  		for (i = 0; i < width * cell_height; i++)
@@ -13240,7 +13310,7 @@ index a1e049d..418bbd9 100644
  
  		render_char_to_buffer(pixels, width, cell_height, 0, 0, bl_char, RGB_TO_ARGB(cfg_border_line_color));
  		
-@@ -8812,7 +12966,7 @@ updateframe(Client *c)
+@@ -8812,7 +13030,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -13249,7 +13319,7 @@ index a1e049d..418bbd9 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8847,7 +13001,7 @@ updateframe(Client *c)
+@@ -8847,7 +13065,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -13258,7 +13328,7 @@ index a1e049d..418bbd9 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -9561,6 +13715,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +13779,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  

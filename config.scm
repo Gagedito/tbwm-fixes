@@ -39,15 +39,20 @@
 
 ;; Show date and time in status bar
 (set-show-date #t)
-(set-show-time #t)
+(set-show-time #f)
 
 ;; Custom status text (if set, replaces date/time)
 ;; Use this from scripts to show anything: battery, wifi, etc.
 ;; (set-status-text "Battery: 85%")
 
+;; Automatic battery percentage in the status bar (reads /sys/class/power_supply).
+;; Overrides set-status-text while enabled. Second arg = refresh interval in
+;; seconds (default 60).
+;; (set-battery-poll #t 30)
+
 ;; Title bar scrolling for long titles
 (set-title-scroll-mode 1)   ; 1 = scroll, 0 = truncate with ...
-(set-title-scroll-speed 30) ; pixels per second
+(set-title-scroll-speed 30) ; accepted but NOT applied - scroll is fixed (~30 px/s)
 
 ;;;; ==================== BEHAVIOR ====================
 
