@@ -39,15 +39,15 @@
 
 ;; Show date and time in status bar
 (set-show-date #t)
-(set-show-time #f)
+(set-show-time #t)
 
 ;; Custom status text (if set, replaces date/time)
 ;; Use this from scripts to show anything: battery, wifi, etc.
 ;; (set-status-text "Battery: 85%")
 
 ;; Automatic battery percentage in the status bar (reads /sys/class/power_supply).
-;; Overrides set-status-text while enabled. Second arg = refresh interval in
-;; seconds (default 60).
+;; Shown alongside the date/time (no longer replaces them). Second arg = refresh
+;; interval in seconds (default 60).
 ;; (set-battery-poll #t 30)
 
 ;; Title bar scrolling for long titles

@@ -726,6 +726,7 @@ static int cfg_tagcount = 9;
 static int cfg_show_time = 1;          /* Show time in status bar */
 static int cfg_show_date = 1;          /* Show date in status bar */
 static char cfg_status_text[256] = ""; /* Custom status text (overrides date/time if set) */
+static char battery_status_text[64] = ""; /* live battery text from set-battery-poll (shown alongside date/time) */
 static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen */
 
 /* Colors (AARRGGBB format; alpha 0xFF = opaque. "#RRGGBB" and "#RRGGBBAA"
@@ -1509,7 +1510,24 @@ buttonpress(struct wl_listener *listener, void *data)
 				time_t nnow = time(NULL);
 				struct tm *ntm = localtime(&nnow);
 
-				if (cfg_status_text[0] != '\0') {
+				if (cfg_battery_poll && battery_status_text[0] != '\0') {
+					int batt_len = (int)strlen(battery_status_text);
+					right_chars = abtn_cells + 1 + nbtn_cells + 3 + batt_len;
+					if (cfg_show_date || cfg_show_time)
+						right_chars += 3;
+					if (cfg_show_date) {
+						char n_date[32] = "";
+						strftime(n_date, sizeof(n_date), "%Y-%m-%d", ntm);
+						right_chars += (int)strlen(n_date);
+					}
+					if (cfg_show_time) {
+						char n_time[32] = "";
+						strftime(n_time, sizeof(n_time), "%I:%M:%S %p", ntm);
+						right_chars += (int)strlen(n_time);
+					}
+					if (cfg_show_date && cfg_show_time)
+						right_chars += 3;
+				} else if (cfg_status_text[0] != '\0') {
 					right_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
 				} else if (cfg_show_date || cfg_show_time) {
 					char n_date[32] = "", n_time[32] = "";
@@ -8820,6 +8838,9 @@ static s7_pointer scm_set_battery_poll(s7_scheme *sc, s7_pointer args) {
 		wl_event_source_remove(battery_timer);
 		battery_timer = NULL;
 	}
+	if (!enable)
+		battery_status_text[0] = '\0';
+	updatebars();
 	return s7_t(sc);
 }
 
@@ -9147,7 +9168,7 @@ setup_scheme(void)
 	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
 	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
 	s7_define_function(sc, "set-status-text", scm_set_status_text, 1, 0, false, "(set-status-text \"text\") custom status text (replaces date/time)");
-	s7_define_function(sc, "set-battery-poll", scm_set_battery_poll, 1, 0, true, "(set-battery-poll b [interval]) auto-show battery % in status bar (overrides set-status-text)");
+	s7_define_function(sc, "set-battery-poll", scm_set_battery_poll, 1, 0, true, "(set-battery-poll b [interval]) auto-show battery % in status bar (shown alongside date/time)");
 	s7_define_function(sc, "set-sloppy-focus", scm_set_sloppy_focus, 1, 0, false, "(set-sloppy-focus b) enable/disable focus follows mouse");
 	s7_define_function(sc, "on-startup", scm_on_startup, 0, 0, true, "(on-startup cmd1 cmd2 ...) register commands to run on startup");
 	s7_define_function(sc, "buffer-stats", scm_buffer_stats, 0, 0, false, "(buffer-stats) show buffer alloc/free counts for leak detection");
@@ -9765,7 +9786,7 @@ batterytimer(void *data)
 		f = fopen(path, "r");
 		if (f) {
 			if (fscanf(f, "%d", &pct) == 1 && pct >= 0) {
-				snprintf(cfg_status_text, sizeof(cfg_status_text), "Battery: %d%%", pct);
+				snprintf(battery_status_text, sizeof(battery_status_text), "Battery: %d%%", pct);
 				updatebars();
 			}
 			fclose(f);
@@ -12036,8 +12057,23 @@ render_tabs:
 			/* Compute right-aligned start including both buttons.
 			 * The renderer consumes: [A] (abtn_cells) + 1 gap + [N] (nbtn_cells)
 			 * + 3 cells for the separator before the text, plus 3 cells between
-			 * date and time. */
-			if (cfg_status_text[0] != '\0') {
+			 * segments (battery | date | time). */
+			if (cfg_battery_poll && battery_status_text[0] != '\0') {
+				int total_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(battery_status_text);
+				if (cfg_show_date)
+					strftime(datebuf, sizeof(datebuf), "%Y-%m-%d", tm_info);
+				if (cfg_show_time)
+					strftime(timebuf, sizeof(timebuf), "%I:%M:%S %p", tm_info);
+				date_len = cfg_show_date ? (int)strlen(datebuf) : 0;
+				time_len = cfg_show_time ? (int)strlen(timebuf) : 0;
+				if (cfg_show_date || cfg_show_time)
+					total_chars += 3;
+				total_chars += date_len;
+				if (cfg_show_date && cfg_show_time)
+					total_chars += 3;
+				total_chars += time_len;
+				right_x = width - total_chars * cell_width;
+			} else if (cfg_status_text[0] != '\0') {
 				right_x = width - (abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text)) * cell_width;
 			} else if (cfg_show_date || cfg_show_time) {
 				int total_chars = 0;
@@ -12121,7 +12157,35 @@ render_tabs:
 				render_char_to_buffer(pixels, width, cell_height, x, 0, '|', RGB_TO_ARGB(cfg_bar_text_color));
 				x += cell_width * 2;
 				
-				if (cfg_status_text[0] != '\0') {
+				if (cfg_battery_poll && battery_status_text[0] != '\0') {
+					/* Battery + date/time mode (battery shown alongside date/time) */
+					for (i = 0; battery_status_text[i]; i++) {
+						render_char_to_buffer(pixels, width, cell_height, x, 0, (unsigned char)battery_status_text[i], RGB_TO_ARGB(cfg_bar_text_color));
+						x += cell_width;
+					}
+					if (cfg_show_date || cfg_show_time) {
+						x += cell_width;
+						render_char_to_buffer(pixels, width, cell_height, x, 0, '|', RGB_TO_ARGB(cfg_bar_text_color));
+						x += cell_width * 2;
+					}
+					if (cfg_show_date) {
+						for (i = 0; datebuf[i]; i++) {
+							render_char_to_buffer(pixels, width, cell_height, x, 0, datebuf[i], RGB_TO_ARGB(cfg_bar_text_color));
+							x += cell_width;
+						}
+						if (cfg_show_time) {
+							x += cell_width;
+							render_char_to_buffer(pixels, width, cell_height, x, 0, '|', RGB_TO_ARGB(cfg_bar_text_color));
+							x += cell_width * 2;
+						}
+					}
+					if (cfg_show_time) {
+						for (i = 0; timebuf[i]; i++) {
+							render_char_to_buffer(pixels, width, cell_height, x, 0, timebuf[i], RGB_TO_ARGB(cfg_bar_text_color));
+							x += cell_width;
+						}
+					}
+				} else if (cfg_status_text[0] != '\0') {
 					/* Custom status text mode */
 					for (i = 0; cfg_status_text[i]; i++) {
 						render_char_to_buffer(pixels, width, cell_height, x, 0, (unsigned char)cfg_status_text[i], RGB_TO_ARGB(cfg_bar_text_color));
