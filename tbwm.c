@@ -1,5 +1,6 @@
 //go to >550 for the important stuff
 #include <dirent.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
@@ -21,6 +22,7 @@
 #include <errno.h>
 #include <stdarg.h>
 #include "bluetooth.h"
+#include <dbus/dbus.h>
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/backend/libinput.h>
@@ -416,6 +418,7 @@ static void requestmonstate(struct wl_listener *listener, void *data);
 static void resize(Client *c, struct wlr_box geo, int interact);
 static void run(char *startup_cmd);
 static void run_startup_commands(void);
+static void install_crash_handlers(void);
 static void setcursor(struct wl_listener *listener, void *data);
 static void setcursorshape(struct wl_listener *listener, void *data);
 static void setfloating(Client *c, int floating);
@@ -469,6 +472,15 @@ static int thememenu_key(xkb_keysym_t sym);
 static void updatethememenu(void);
 static void theme_persist(void);
 static s7_pointer scm_toggle_thememenu(s7_scheme *sc, s7_pointer args);
+ static void toggletraymenu(const Arg *arg);
+ static int traymenu_key(xkb_keysym_t sym);
+ static void updatetraymenu(void);
+ static int traymenu_cells_h(void);
+ static void tray_select_row(int row);
+ static void tray_menu_reset(void);
+static void tray_setup(void);
+static void tray_cleanup(void);
+static s7_pointer scm_toggle_tray_menu(s7_scheme *sc, s7_pointer args);
 static int netmenu_scan_keepalive(void *data);
 static int netmenu_scan_is_active(void);
 static int timingtimer(void *data);
@@ -487,7 +499,7 @@ static void updateframe(Client *c);
 static void updateframes(void);
 static int update_scroll_only(Client *c);
 static void setup_scroll_scene_buffer(Client *c, uint32_t fg_color, uint32_t bg_color);
-static void bar_button_centers(Monitor *m, int *audio_center, int *net_center);
+static void bar_button_centers(Monitor *m, int *settings_center, int *audio_center, int *net_center);
 static int centered_menu_x(Monitor *m, int button_center, int menu_width);
 
 static void startdrag(struct wl_listener *listener, void *data);
@@ -691,6 +703,12 @@ static int cfg_battery_poll = 0;         /* 1 = auto-update status text with bat
 static int battery_poll_interval = 60;   /* seconds between battery polls */
 static struct wl_event_source *battery_timer = NULL;
 
+/* ---- crash diagnostics ---- */
+/* /tmp is tmpfs and is wiped on reboot, so crash evidence is kept in the
+ * home directory instead. */
+#define TBWM_DIAG_DIR "/home/gage"
+#define TBWM_CRASH_LOG TBWM_DIAG_DIR "/tbwm-crash.log"
+
 /* REPL state */
 static int repl_visible = 0;             /* 0 = REPL background/text hidden unless active */
 static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
@@ -753,6 +771,7 @@ static uint32_t cfg_menu_text_color = 0xFF000000;    /* black menu text */
 static char cfg_menu_button[16] = "X";             /* app menu button label */
 static char cfg_net_menu_button[16] = "N";         /* network menu button label */
 static char cfg_audio_menu_button[16] = "A";       /* audio menu button label */
+static char cfg_settings_menu_button[16] = "S";    /* settings menu button label */
 
 /* App menu state */
 static int appmenu_active = 0;
@@ -870,6 +889,57 @@ static int appmenu_marquee_selkey = 0;
 static int netmenu_marquee_px = 0;
 static int netmenu_marquee_needed = 0;
 static int netmenu_marquee_selkey = 0;
+
+/* System tray state (StatusNotifierItem / DBusMenu, opened with [S] / M-S-s).
+ * Level 0 lists the minimized apps (Discord, Spotify, Steam...); deeper levels
+ * walk each app's own context-menu tree, like the [A]/[N] text menus. */
+
+/* A dbusmenu node (one row in a tray app's menu). */
+typedef struct TrayNode {
+	struct TrayNode *parent;     /* menu this node belongs to (config depth) */
+	struct TrayNode *children;   /* head of child list */
+	struct TrayNode *sibling;    /* next sibling */
+	char *label;                 /* display text */
+	int id;                      /* dbusmenu item id */
+	int enabled;                 /* 1 = selectable */
+	int checked;                 /* 0/1 = check state, -1 = not a check item */
+	int is_sep;                  /* 1 = separator row */
+	int is_visible;              /* 0 = hidden (skip) */
+	int child_count;
+} TrayNode;
+
+/* A registered tray app. */
+typedef struct TrayItem {
+	struct TrayItem *next;
+	char *display;               /* name shown in the menu (Title/Id) */
+	char *busname;               /* bus connection that serves the item */
+	char *itempath;              /* object path of the StatusNotifierItem */
+	char *menupath;              /* object path of its com.canonical.dbusmenu */
+	TrayNode *menuroot;          /* fetched menu tree (NULL until requested) */
+	int no_menu;                 /* 1 = app reported no menu (show "Abrir") */
+	int resolved;                /* 1 = Title/Id/Menu props fetched (outside dispatch) */
+	int dead;                    /* pending removal (processed outside dispatch) */
+	int path_tried;              /* 1 = non-default item path already probed */
+} TrayItem;
+
+#define TRAY_MAX_NAME 32
+static DBusConnection *tray_dbus = NULL;      /* session bus */
+static char tray_watcher_name[64] = "";       /* the well-known name we own */
+static TrayItem *tray_items = NULL;
+static int tray_items_count = 0;
+static struct wl_event_source *tray_timer = NULL; /* pumps the DBus fd */
+
+static int traymenu_active = 0;
+static struct wlr_scene_buffer *traymenu_buffer = NULL;
+static struct TitleBuffer *traymenu_tb = NULL;
+static int tray_row = 0;            /* selected row in the current level */
+static int tray_scroll = 0;         /* scroll offset in the current level */
+static int tray_level = 0;          /* 0 = apps list, >=1 = inside a menu node */
+static TrayItem *tray_cur_item = NULL;  /* the app whose menu we are in */
+static TrayNode *tray_cur_node = NULL;  /* node whose children are listed */
+static int tray_needs_redraw = 0; /* redraw bars/menu from the timer, not from a D-Bus dispatch */
+
+/* Helpers declared below; used before their definitions in the click handler. */
 
 /* True while any open menu is scrolling its selected label; keeps the scroll
  * timer at 30fps instead of the idle 100/200ms rate. */
@@ -1241,8 +1311,9 @@ applyrules(Client *c)
 	/* rule matching */
 	const char *appid, *title;
 	uint32_t newtags = 0;
-	int i;
+	int i, ri;
 	const Rule *r;
+	RuntimeRule *rr;
 	Monitor *mon = selmon, *m;
 
 	appid = client_get_appid(c);
@@ -1256,6 +1327,21 @@ applyrules(Client *c)
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++)
+					mon = m;
+			}
+		}
+	}
+	/* Runtime rules added via Scheme (add-rule). id/title are '\0'-terminated
+	 * fixed buffers: an empty buffer means "match any". */
+	for (ri = 0; ri < cfg_rule_count; ri++) {
+		rr = &cfg_rules[ri];
+		if ((!rr->title[0] || strstr(title, rr->title))
+				&& (!rr->id[0] || strstr(appid, rr->id))) {
+			c->isfloating = rr->isfloating;
+			newtags |= rr->tags;
+			i = 0;
+			wl_list_for_each(m, &mons, link) {
+				if (rr->monitor == i++)
 					mon = m;
 			}
 		}
@@ -1501,20 +1587,22 @@ buttonpress(struct wl_listener *listener, void *data)
 				return;
 			}
 
-			/* Network menu button [N] on the right, next to date/time, with the
-			 * audio menu button [A] immediately to its left */
+			/* Settings [S], audio [A] and network [N] menu buttons on the
+			 * right, next to date/time */
 			{
 				int nbtn_len = strlen(cfg_net_menu_button);
 				int nbtn_cells = nbtn_len + 2; /* [nbtn] */
 				int abtn_len = strlen(cfg_audio_menu_button);
 				int abtn_cells = abtn_len + 2; /* [abtn] */
+				int sbtn_len = strlen(cfg_settings_menu_button);
+				int sbtn_cells = sbtn_len + 2; /* [sbtn] */
 				int right_chars;
 				time_t nnow = time(NULL);
 				struct tm *ntm = localtime(&nnow);
 
 				if (cfg_battery_poll && battery_status_text[0] != '\0') {
 					int batt_len = (int)strlen(battery_status_text);
-					right_chars = abtn_cells + 1 + nbtn_cells + 3 + batt_len;
+					right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + batt_len;
 					if (cfg_show_date || cfg_show_time)
 						right_chars += 3;
 					if (cfg_show_date) {
@@ -1530,7 +1618,7 @@ buttonpress(struct wl_listener *listener, void *data)
 					if (cfg_show_date && cfg_show_time)
 						right_chars += 3;
 				} else if (cfg_status_text[0] != '\0') {
-					right_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
+					right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
 				} else if (cfg_show_date || cfg_show_time) {
 					char n_date[32] = "", n_time[32] = "";
 					int n_dl = 0, n_tl = 0;
@@ -1543,23 +1631,30 @@ buttonpress(struct wl_listener *listener, void *data)
 						n_tl = strlen(n_time);
 					}
 					if (cfg_show_date && cfg_show_time)
-						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
+						right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
 					else if (cfg_show_date)
-						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl;
+						right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_dl;
 					else if (cfg_show_time)
-						right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_tl;
+						right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_tl;
 					else
-						right_chars = abtn_cells + 1 + nbtn_cells;
+						right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 				} else {
-					right_chars = abtn_cells + 1 + nbtn_cells;
+					right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 				}
 
 				{
 					int right_start = selmon->m.width - right_chars * cell_width;
-					int audio_start = right_start;
+					int settings_start = right_start;
+					int settings_end = settings_start + sbtn_cells * cell_width;
+					int audio_start = settings_end + cell_width; /* 1-cell gap */
 					int audio_end = audio_start + abtn_cells * cell_width;
 					int net_start = audio_end + cell_width; /* 1-cell gap */
 					int net_end = net_start + nbtn_cells * cell_width;
+					if (bar_x >= settings_start && bar_x < settings_end) {
+						Arg a = {0};
+						toggletraymenu(&a);
+						return;
+					}
 					if (bar_x >= audio_start && bar_x < audio_end) {
 						Arg a = {0};
 						togglaudiomenu(&a);
@@ -1645,8 +1740,8 @@ buttonpress(struct wl_listener *listener, void *data)
 
 		/* Handle net menu clicks */
 		if (netmenu_active && selmon) {
-			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-			bar_button_centers(selmon, &audio_center, &net_center);
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
 			menu_y = selmon->m.y + cell_height;
 			menu_w = 25 * cell_width;
@@ -1780,10 +1875,35 @@ buttonpress(struct wl_listener *listener, void *data)
 			}
 		}
 
+		/* Handle tray menu clicks */
+		if (traymenu_active && selmon) {
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, settings_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = traymenu_cells_h() * cell_height;
+
+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
+				/* Click is inside menu: select the clicked row and act as Enter */
+				int rel_y = cursor->y - menu_y;
+				int clicked_row = rel_y / cell_height - 1;
+				if (clicked_row >= 0)
+					tray_select_row(clicked_row);
+				return; /* Consume the click */
+			} else {
+				/* Click outside menu - close it */
+				tray_menu_reset();
+				updatetraymenu();
+				updatebars();
+			}
+		}
+
 		/* Handle audio menu clicks */
 		if (audiomenu_active && selmon) {
-			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-			bar_button_centers(selmon, &audio_center, &net_center);
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
 			menu_y = selmon->m.y + cell_height;
 			menu_w = 25 * cell_width;
@@ -2267,6 +2387,26 @@ cleanup(void)
 	if (thememenu_tb) {
 		wlr_buffer_drop(&thememenu_tb->base);
 		thememenu_tb = NULL;
+	}
+
+	/* Clean up tray menu buffer */
+	if (traymenu_buffer) {
+		wlr_scene_buffer_set_buffer(traymenu_buffer, NULL);
+	}
+	if (traymenu_tb) {
+		wlr_buffer_drop(&traymenu_tb->base);
+		traymenu_tb = NULL;
+	}
+	/* Stop the tray DBus pump */
+	if (tray_timer) {
+		wl_event_source_remove(tray_timer);
+		tray_timer = NULL;
+	}
+	tray_cleanup();
+	if (tray_dbus) {
+		dbus_connection_close(tray_dbus);
+		dbus_connection_unref(tray_dbus);
+		tray_dbus = NULL;
 	}
 
 	/* Clean up REPL buffers on all monitors */
@@ -6023,23 +6163,25 @@ render_row_text(uint32_t *pixels, int menu_width, int menu_height,
 	}
 }
 
-/* Compute the horizontal centers (monitor-local pixels) of the [A] and [N]
- * bar buttons for monitor m, using the same right-aligned layout priority that
- * updatebar renders: battery+date/time > status text > date/time > buttons. */
+/* Compute the horizontal centers (monitor-local pixels) of the [S], [A] and
+ * [N] bar buttons for monitor m, using the same right-aligned layout priority
+ * that updatebar renders: battery+date/time > status text > date/time > buttons. */
 static void
-bar_button_centers(Monitor *m, int *audio_center, int *net_center)
+bar_button_centers(Monitor *m, int *settings_center, int *audio_center, int *net_center)
 {
 	int nbtn_len = strlen(cfg_net_menu_button);
 	int nbtn_cells = nbtn_len + 2; /* [nbtn] */
 	int abtn_len = strlen(cfg_audio_menu_button);
 	int abtn_cells = abtn_len + 2; /* [abtn] */
+	int sbtn_len = strlen(cfg_settings_menu_button);
+	int sbtn_cells = sbtn_len + 2; /* [sbtn] */
 	int right_chars, right_x;
 	time_t nnow = time(NULL);
 	struct tm *ntm = localtime(&nnow);
 
 	if (cfg_battery_poll && battery_status_text[0] != '\0') {
 		int batt_len = (int)strlen(battery_status_text);
-		right_chars = abtn_cells + 1 + nbtn_cells + 3 + batt_len;
+		right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + batt_len;
 		if (cfg_show_date || cfg_show_time)
 			right_chars += 3;
 		if (cfg_show_date) {
@@ -6055,7 +6197,7 @@ bar_button_centers(Monitor *m, int *audio_center, int *net_center)
 		if (cfg_show_date && cfg_show_time)
 			right_chars += 3;
 	} else if (cfg_status_text[0] != '\0') {
-		right_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
+		right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text);
 	} else if (cfg_show_date || cfg_show_time) {
 		char n_date[32] = "", n_time[32] = "";
 		int n_dl = 0, n_tl = 0;
@@ -6068,22 +6210,23 @@ bar_button_centers(Monitor *m, int *audio_center, int *net_center)
 			n_tl = strlen(n_time);
 		}
 		if (cfg_show_date && cfg_show_time)
-			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
+			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_dl + 3 + n_tl;
 		else if (cfg_show_date)
-			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_dl;
+			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_dl;
 		else if (cfg_show_time)
-			right_chars = abtn_cells + 1 + nbtn_cells + 3 + n_tl;
+			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_tl;
 		else
-			right_chars = abtn_cells + 1 + nbtn_cells;
+			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 	} else {
-		right_chars = abtn_cells + 1 + nbtn_cells;
+		right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 	}
 
 	right_x = m->m.width - right_chars * cell_width;
 	if (right_x < 0)
 		right_x = 0;
-	*audio_center = right_x + abtn_cells * cell_width / 2;
-	*net_center = right_x + (abtn_cells + 1) * cell_width + nbtn_cells * cell_width / 2;
+	*settings_center = right_x + sbtn_cells * cell_width / 2;
+	*audio_center = right_x + (sbtn_cells + 1) * cell_width + abtn_cells * cell_width / 2;
+	*net_center = right_x + (sbtn_cells + 1 + abtn_cells + 1) * cell_width + nbtn_cells * cell_width / 2;
 }
 
 /* Horizontal x for a menu centered on a bar button, clamped to the monitor. */
@@ -6435,8 +6578,8 @@ updatemenuaudio(void)
 	wlr_scene_node_set_enabled(&audiomenu_buffer->node, 1);
 	/* Position centered on the [A] bar button, below the bar */
 	if (selmon) {
-		int audio_center, net_center;
-		bar_button_centers(selmon, &audio_center, &net_center);
+		int settings_center, audio_center, net_center;
+		bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 		wlr_scene_node_set_position(&audiomenu_buffer->node,
 			centered_menu_x(selmon, audio_center, menu_width), selmon->m.y + cell_height);
 	} else {
@@ -6542,6 +6685,8 @@ keybinding(uint32_t mods, xkb_keysym_t sym)
 	if (audiomenu_active && audiomenukey(sym))
 		return 1;
 	if (thememenu_active && thememenu_key(sym))
+		return 1;
+	if (traymenu_active && traymenu_key(sym))
 		return 1;
 
 	/*
@@ -6955,8 +7100,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 		/* Update net menu hover selection */
 		if (netmenu_active && selmon && !net_password_mode) {
-			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-			bar_button_centers(selmon, &audio_center, &net_center);
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
 			menu_y = selmon->m.y + cell_height;
 			menu_w = 25 * cell_width;
@@ -6980,8 +7125,8 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 
 		/* Update audio menu hover selection */
 		if (audiomenu_active && selmon) {
-			int audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-			bar_button_centers(selmon, &audio_center, &net_center);
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
 			menu_y = selmon->m.y + cell_height;
 			menu_w = 25 * cell_width;
@@ -7546,6 +7691,15 @@ run(char *startup_cmd)
 	 * sub-topic (passive pairing keepalive) and to repaint that menu whenever
 	 * pairing state changes. */
 	bluetooth_init(dpy, netmenu_scan_is_active, updatenetmenu);
+
+	/* Dump a backtrace to TBWM_CRASH_LOG if we abort/segfault, then
+	 * re-raise so the behaviour matches a plain crash. */
+	install_crash_handlers();
+
+	/* System tray: own the StatusNotifierWatcher name and start pumping the
+	 * session D-Bus fd so minimized apps (Discord/Spotify/Steam...) can
+	 * register and be listed in the [S] menu. */
+	tray_setup();
 
 	/* Run on-startup commands from config */
 	run_startup_commands();
@@ -8864,6 +9018,15 @@ static s7_pointer scm_set_audio_menu_button(s7_scheme *sc, s7_pointer args) {
 	return s7_t(sc);
 }
 
+/* Scheme: (set-settings-menu-button "text") - set the settings menu button label */
+static s7_pointer scm_set_settings_menu_button(s7_scheme *sc, s7_pointer args) {
+	if (!s7_is_string(s7_car(args))) return s7_f(sc);
+	strncpy(cfg_settings_menu_button, s7_string(s7_car(args)), sizeof(cfg_settings_menu_button) - 1);
+	cfg_settings_menu_button[sizeof(cfg_settings_menu_button) - 1] = '\0';
+	updatebars();
+	return s7_t(sc);
+}
+
 /* ========== END COLOR CONFIG API ========== */
 
 /* Scheme: (set-tag-count n) - number of virtual desktops (1-9) */
@@ -9253,7 +9416,9 @@ setup_scheme(void)
 	s7_define_function(sc, "set-audio-menu-cmd", scm_set_audio_menu_cmd, 1, 0, false, "(set-audio-menu-cmd \"cmd\") set command that lists audio menu entries");
 	s7_define_function(sc, "toggle-audio-menu", scm_toggle_audio_menu, 0, 0, false, "(toggle-audio-menu) toggle the audio (volume/outputs/mics) menu");
 	s7_define_function(sc, "set-audio-menu-button", scm_set_audio_menu_button, 1, 0, false, "(set-audio-menu-button \"text\") set audio menu button label in bar");
+	s7_define_function(sc, "set-settings-menu-button", scm_set_settings_menu_button, 1, 0, false, "(set-settings-menu-button \"text\") set settings menu button label in bar");
 	s7_define_function(sc, "toggle-thememenu", scm_toggle_thememenu, 0, 0, false, "(toggle-thememenu) toggle the in-wm color theme menu");
+	s7_define_function(sc, "toggle-settings-menu", scm_toggle_tray_menu, 0, 0, false, "(toggle-settings-menu) toggle the in-wm tray menu (minimized apps / [S])");
 	s7_define_function(sc, "set-tag-count", scm_set_tag_count, 1, 0, false, "(set-tag-count n) set number of virtual desktops (1-9)");
 	s7_define_function(sc, "set-show-time", scm_set_show_time, 1, 0, false, "(set-show-time b) show/hide time in status bar");
 	s7_define_function(sc, "set-show-date", scm_set_show_date, 1, 0, false, "(set-show-date b) show/hide date in status bar");
@@ -9467,6 +9632,10 @@ static const char *default_config_parts[] = {
 ";; REPL - Scheme console on the desktop\n"
 ";; Super+Shift+; (Win+:) to open, Escape to close\n"
 "(bind-key \"M-S-colon\" (lambda () (toggle-repl)))\n"
+"\n"
+";; Settings menu - in-WM config editor\n"
+";; Super+Shift+S to open, Enter/arrows to edit, Escape to close\n"
+"(bind-key \"M-S-s\" (lambda () (toggle-settings-menu)))\n"
 "\n"
 ";; TTY switching (Ctrl+Alt+F1-F12)\n"
 "(bind-key \"C-A-F1\" (lambda () (chvt 1)))\n"
@@ -10951,8 +11120,8 @@ updatenetmenu(void)
 	wlr_scene_node_set_enabled(&netmenu_buffer->node, 1);
 	/* Position centered on the [N] bar button, below the bar */
 	if (selmon) {
-		int audio_center, net_center;
-		bar_button_centers(selmon, &audio_center, &net_center);
+		int settings_center, audio_center, net_center;
+		bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
 		wlr_scene_node_set_position(&netmenu_buffer->node,
 			centered_menu_x(selmon, net_center, menu_width), selmon->m.y + cell_height);
 	} else {
@@ -11563,6 +11732,1344 @@ scm_toggle_thememenu(s7_scheme *sc, s7_pointer args)
 	return s7_t(sc);
 }
 
+/* ==================== TRAY MENU ====================
+ * A native system-tray menu (opened with [S] / M-S-s). Level 0 lists the
+ * minimized background apps (Discord, Spotify, Steam...) that expose a
+ * StatusNotifierItem on the session bus. Deeper levels walk each app's own
+ * context-menu tree (com.canonical.dbusmenu), rendered as plain text rows
+ * exactly like the [A]/[N] menus. Selecting a leaf runs its "clicked"
+ * event; apps without a menu get a single "Abrir" row that restores them.
+ *
+ * The struct types (TrayNode/TrayItem) and the traymenu/tray globals are
+ * declared at the top of this file; the function bodies live here (after all
+ * dialogs), so only a few prototypes are needed above. */
+
+/* ---- tree helpers ---- */
+
+static void
+tray_node_free(TrayNode *n)
+{
+	TrayNode *c, *nc;
+	if (!n)
+		return;
+	free(n->label);
+	for (c = n->children; c; c = nc) {
+		nc = c->sibling;
+		tray_node_free(c);
+	}
+	free(n);
+}
+
+static void
+tray_item_free_helper(TrayItem *it)
+{
+	if (!it)
+		return;
+	free(it->display);
+	free(it->busname);
+	free(it->itempath);
+	free(it->menupath);
+	tray_node_free(it->menuroot);
+	free(it);
+}
+
+/* Recursively parse a dbusmenu GetLayout item array into sibling nodes.
+ * `arr` must be an iterator over child structs (id, props dict, child array).
+ * depth guards against a hostile/buggy service nesting menus forever and
+ * *budget caps the total number of nodes parsed to avoid a memory blow-up. */
+static TrayNode *
+tray_parse_items(DBusMessageIter *arr, TrayNode *parent, int depth, int *budget)
+{
+	TrayNode *head = NULL, *last = NULL;
+
+	if (depth > 8 || (budget && *budget <= 0))
+		return NULL;
+	while (dbus_message_iter_get_arg_type(arr) == DBUS_TYPE_VARIANT ||
+	    dbus_message_iter_get_arg_type(arr) == DBUS_TYPE_STRUCT) {
+		DBusMessageIter st, dict, kids, prop, ent;
+		TrayNode *n = calloc(1, sizeof(*n));
+		int has_toggle = 0, toggle_state = 0;
+
+		if (budget)
+			(*budget)--;
+		if (budget && *budget <= 0) {
+			free(n);
+			break;
+		}
+
+		n->parent = parent;
+		n->enabled = 1;
+		n->checked = -1;
+		n->is_visible = 1;
+		/* children are stored as av; unwrap one variant so st reads the
+		 * struct's fields (id, props dict, children array). */
+		if (dbus_message_iter_get_arg_type(arr) == DBUS_TYPE_VARIANT) {
+			DBusMessageIter v;
+			dbus_message_iter_recurse(arr, &v);
+			dbus_message_iter_recurse(&v, &st);
+		} else {
+			dbus_message_iter_recurse(arr, &st);
+		}
+		if (dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_INT32)
+			dbus_message_iter_get_basic(&st, &n->id);
+
+		/* props dict */
+		if (dbus_message_iter_next(&st) &&
+		    dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_ARRAY &&
+		    dbus_message_iter_get_element_type(&st) == DBUS_TYPE_DICT_ENTRY) {
+			dbus_message_iter_recurse(&st, &dict);
+			dbus_message_iter_recurse(&st, &prop);
+			while (dbus_message_iter_get_arg_type(&prop) ==
+			    DBUS_TYPE_DICT_ENTRY) {
+				char *key = NULL;
+				dbus_message_iter_recurse(&prop, &ent);
+				if (dbus_message_iter_get_arg_type(&ent) == DBUS_TYPE_STRING)
+					dbus_message_iter_get_basic(&ent, &key);
+				if (dbus_message_iter_next(&ent) &&
+				    dbus_message_iter_get_arg_type(&ent) == DBUS_TYPE_VARIANT) {
+					DBusMessageIter val;
+					dbus_message_iter_recurse(&ent, &val);
+					if (key && strcmp(key, "label") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_STRING) {
+						char *s = NULL;
+						dbus_message_iter_get_basic(&val, &s);
+						n->label = strdup(s ? s : "");
+					} else if (key && strcmp(key, "enabled") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_BOOLEAN) {
+						dbus_message_iter_get_basic(&val, &n->enabled);
+					} else if (key && strcmp(key, "toggle-type") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_STRING) {
+						char *s = NULL;
+						dbus_message_iter_get_basic(&val, &s);
+						if (s && s[0])
+							has_toggle = 1;
+					} else if (key && strcmp(key, "toggle-state") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_INT32) {
+						int sti = 0;
+						dbus_message_iter_get_basic(&val, &sti);
+						toggle_state = sti;
+					} else if (key && strcmp(key, "type") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_STRING) {
+						char *s = NULL;
+						dbus_message_iter_get_basic(&val, &s);
+						if (s && strcmp(s, "separator") == 0)
+							n->is_sep = 1;
+					} else if (key && strcmp(key, "visible") == 0 &&
+					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_BOOLEAN) {
+						dbus_message_iter_get_basic(&val, &n->is_visible);
+					}
+				}
+				if (!dbus_message_iter_next(&prop))
+					break;
+			}
+			/* toggle-type may come before or after toggle-state in the
+			 * dict (bus order is arbitrary); resolve only once both are
+			 * seen. */
+			if (has_toggle)
+				n->checked = toggle_state;
+		}
+
+		/* children array */
+		if (dbus_message_iter_next(&st) &&
+		    dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_ARRAY) {
+			dbus_message_iter_recurse(&st, &kids);
+			n->children = tray_parse_items(&kids, n, depth + 1, budget);
+		}
+
+		if (!n->label) {
+			char idbuf[16];
+			snprintf(idbuf, sizeof(idbuf), "(item %d)", n->id);
+			n->label = strdup(idbuf);
+		}
+		{
+			TrayNode *c;
+			for (n->child_count = 0, c = n->children; c; c = c->sibling)
+				n->child_count++;
+		}
+
+		if (last)
+			last->sibling = n;
+		else
+			head = n;
+		last = n;
+
+		if (!dbus_message_iter_next(arr))
+			break;
+	}
+	return head;
+}
+
+/* Fetch and parse an app's full dbusmenu tree. Returns 1 on success. */
+static int
+tray_fetch_menu(TrayItem *it)
+{
+	DBusMessage *msg, *reply;
+	DBusMessageIter body, layout, arr;
+	char *srv = it->busname;
+	TrayNode *c;
+
+	if (it->no_menu || it->dead)
+		return 0;
+	if (!srv || !it->menupath || it->menupath[0] != '/')
+		return 0;
+
+	msg = dbus_message_new_method_call(srv, it->menupath,
+		"com.canonical.dbusmenu", "GetLayout");
+	if (!msg)
+		return 0;
+	{
+		int parentid = 0, depth = -1;
+		const char **empty = NULL;
+		int n = 0;
+		dbus_message_append_args(msg,
+			DBUS_TYPE_INT32, &parentid,
+			DBUS_TYPE_INT32, &depth,
+			DBUS_TYPE_ARRAY, DBUS_TYPE_STRING, &empty, n,
+			DBUS_TYPE_INVALID);
+	}
+	reply = dbus_connection_send_with_reply_and_block(tray_dbus, msg, 1000, NULL);
+	dbus_message_unref(msg);
+	if (!reply) {
+		tbwm_log(TBWM_LOG_DEBUG, "tray: %s: GetLayout failed\n", it->display);
+		return 0;
+	}
+
+	/* body: (uint32 revision, struct{ int32 id, a{sv} props, av children }) */
+	tray_node_free(it->menuroot);
+	it->menuroot = NULL;
+	if (dbus_message_iter_init(reply, &body)) {
+		if (dbus_message_iter_get_arg_type(&body) == DBUS_TYPE_UINT32) {
+			dbus_message_iter_next(&body);
+			if (dbus_message_iter_get_arg_type(&body) == DBUS_TYPE_STRUCT) {
+				dbus_message_iter_recurse(&body, &layout);
+				/* skip root id */
+				if (dbus_message_iter_get_arg_type(&layout) == DBUS_TYPE_INT32)
+					dbus_message_iter_next(&layout);
+				/* skip root props dict */
+				if (dbus_message_iter_get_arg_type(&layout) == DBUS_TYPE_ARRAY)
+					dbus_message_iter_next(&layout);
+				/* av of child items, each a variant wrapping a struct */
+				if (dbus_message_iter_get_arg_type(&layout) == DBUS_TYPE_ARRAY) {
+					int budget = 512;
+					dbus_message_iter_recurse(&layout, &arr);
+					it->menuroot = calloc(1, sizeof(*it->menuroot));
+					it->menuroot->children = tray_parse_items(&arr, it->menuroot, 0, &budget);
+					for (c = it->menuroot->children; c; c = c->sibling)
+						it->menuroot->child_count++;
+				}
+			}
+		}
+	}
+	dbus_message_unref(reply);
+	tbwm_log(TBWM_LOG_INFO, "tray: %s menu fetched\n", it->display);
+	return it->menuroot != NULL;
+}
+
+/* ---- DBus helpers ---- */
+
+/* read a single org.freedesktop.DBus.Properties.Get reply (one string) */
+static char *
+tray_prop_get_string(DBusMessage *reply)
+{
+	DBusMessageIter args, variant;
+	char *out = NULL;
+
+	if (!reply)
+		return NULL;
+	if (dbus_message_iter_init(reply, &args) &&
+	    dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_VARIANT) {
+		dbus_message_iter_recurse(&args, &variant);
+		if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_STRING ||
+		    dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_OBJECT_PATH)
+			dbus_message_iter_get_basic(&variant, &out);
+	}
+	return out ? strdup(out) : NULL;
+}
+
+/* synchronous (iface, prop) Get on the item; caller frees the reply */
+static DBusMessage *
+tray_prop_get(TrayItem *it, const char *prop)
+{
+	DBusMessage *msg, *reply;
+	const char *iface = "org.kde.StatusNotifierItem";
+
+	if (!tray_dbus || !it || it->dead || !it->busname || !it->busname[0] ||
+	    !it->itempath || it->itempath[0] != '/')
+		return NULL;
+	msg = dbus_message_new_method_call(it->busname, it->itempath,
+		DBUS_INTERFACE_PROPERTIES, "Get");
+	if (!msg)
+		return NULL;
+	dbus_message_append_args(msg,
+		DBUS_TYPE_STRING, &iface,
+		DBUS_TYPE_STRING, &prop,
+		DBUS_TYPE_INVALID);
+	reply = dbus_connection_send_with_reply_and_block(tray_dbus, msg, 1000, NULL);
+	dbus_message_unref(msg);
+	return reply;
+}
+
+/* ---- item lifecycle ---- */
+
+static int
+tray_dedupe_name(const char *name)
+{
+	int count = 1;
+	TrayItem *p;
+	for (p = tray_items; p; p = p->next)
+		if (p->display && strcmp(p->display, name) == 0)
+			count++;
+	return count;
+}
+
+static void
+tray_add_item(const char *service, const char *path)
+{
+	TrayItem *it, *p;
+
+	if (!tray_dbus || !service || !path || !service[0] || !path[0])
+		return;
+	for (p = tray_items; p; p = p->next)
+		if (strcmp(p->busname, service) == 0 && strcmp(p->itempath, path) == 0)
+			return;
+
+	it = calloc(1, sizeof(*it));
+	it->busname = strdup(service);
+	it->itempath = strdup(path);
+	/* register immediately with the well-known name as a stand-in; the real
+	 * Title/Id/Menu properties are fetched offline, from tray_resolve_items(),
+	 * because we may be inside a D-Bus dispatch callback here and a blocking
+	 * property call there would re-enter libdbus (assert/crash). */
+	it->display = strdup(service);
+	it->resolved = 0;
+
+	it->next = tray_items;
+	tray_items = it;
+	tray_items_count++;
+	tray_needs_redraw = 1;
+	tbwm_log(TBWM_LOG_INFO, "tray: + %s (%s) [pending]\n", it->display, it->busname);
+}
+
+static void
+tray_remove_item_service(const char *service)
+{
+	TrayItem *it;
+	int removed = 0;
+
+	for (it = tray_items; it; it = it->next) {
+		if (it->busname && strcmp(it->busname, service) == 0) {
+			/* Mark for removal; it is freed by tray_prune_dead() outside
+			 * the D-Bus dispatch (tray_filter runs inside one). */
+			it->dead = 1;
+			tray_needs_redraw = 1;
+			removed = 1;
+			break;
+		}
+	}
+	if (removed && !tray_cur_item)
+		tray_level = 0;
+}
+
+/* Actually disconnect and free items marked dead. Must run outside any D-Bus
+ * dispatch callback (the NameOwnerChanged filter only flags them). */
+static void
+tray_prune_dead(void)
+{
+	TrayItem *it, *prev = NULL, *next;
+
+	for (it = tray_items; it; it = next) {
+		next = it->next;
+		if (!it->dead) {
+			prev = it;
+			continue;
+		}
+		tbwm_log(TBWM_LOG_INFO, "tray: - %s\n", it->display ? it->display : "?");
+		if (prev)
+			prev->next = next;
+		else
+			tray_items = next;
+		if (tray_cur_item == it) {
+			tray_cur_item = NULL;
+			/* The menu tree is freed below; never let tray_cur_node dangle
+			 * into it or the nav code will deref freed memory. */
+			tray_cur_node = NULL;
+			traymenu_active = 0;
+		}
+		tray_items_count--;
+		tray_item_free_helper(it);
+		tray_needs_redraw = 1;
+	}
+	if (!tray_cur_item)
+		tray_level = 0;
+}
+
+/* Discover the actual object path of a StatusNotifierItem exported by a bus
+ * service whose default /StatusNotifierItem is absent (some apps, e.g.
+ * Steam, register an arbitrary path such as
+ * /org/ayatana/NotificationItem/<id>). Blocking introspection is safe here:
+ * callers invoke this only from the main loop, never from a dispatch
+ * callback. Returns a strdup'd path or NULL. */
+
+/* Introspect one node; returns 1 and sets *out (strdup'd) if it or a child
+ * exports org.kde.StatusNotifierItem. */
+static int
+tray_probe_node(const char *service, const char *path, char **out, int depth)
+{
+	DBusMessage *msg, *reply;
+	DBusMessageIter args;
+	const char *needle = "org.kde.StatusNotifierItem";
+	char *xml = NULL;
+	char *p;
+
+	if (depth > 6)
+		return 0;
+	msg = dbus_message_new_method_call(service, path,
+		"org.freedesktop.DBus.Introspectable", "Introspect");
+	if (!msg)
+		return 0;
+	reply = dbus_connection_send_with_reply_and_block(tray_dbus, msg, 1000, NULL);
+	dbus_message_unref(msg);
+	if (reply) {
+		if (dbus_message_iter_init(reply, &args) &&
+		    dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_STRING) {
+			const char *s = NULL;
+			dbus_message_iter_get_basic(&args, &s);
+			/* s points into the message; copy before unref frees it */
+			if (s)
+				xml = strdup(s);
+		}
+		dbus_message_unref(reply);
+	}
+	if (!xml)
+		return 0;
+	if (strstr(xml, needle)) {
+		*out = strdup(path);
+		free(xml);
+		return 1;
+	}
+	/* descend into self-closing <node name="X"/> children */
+	for (p = xml; (p = strstr(p, "<node name=\"")) != NULL; p = p + 1) {
+		char *q = p + 12;
+		char *e = strchr(q, '"');
+		int n;
+		if (!e)
+			break;
+		n = (int)(e - q);
+		/* child reference = self-closing tag: name" /> or name"/> */
+		while (e[1] == ' ')
+			e++;
+		if (n > 0 && n < 240 && e[1] == '/' && strstr(e + 2, ">")) {
+			char buf[256];
+			if (strcmp(path, "/") == 0)
+				snprintf(buf, sizeof(buf), "/%.*s", n, q);
+			else
+				snprintf(buf, sizeof(buf), "%s/%.*s", path, n, q);
+			if (tray_probe_node(service, buf, out, depth + 1)) {
+				free(xml);
+				return 1;
+			}
+		}
+	}
+	free(xml);
+	return 0;
+}
+
+static char *
+tray_find_item_path(const char *service)
+{
+	char *out = NULL;
+
+	if (tray_probe_node(service, "/", &out, 0))
+		return out;
+	return NULL;
+}
+
+/* Resolve Title/Id/Menu for one item. Blocking calls here are safe: callers
+ * only invoke this from the main loop (timer or input handlers), never from a
+ * D-Bus dispatch callback. */
+static void
+tray_resolve_one(TrayItem *it)
+{
+	DBusMessage *r;
+	char *title = NULL;
+	char *menu = NULL;
+	int dup;
+	int retried = 0;
+
+	if (!it || it->resolved || it->dead || !tray_dbus || !it->busname || !it->busname[0])
+		return;
+
+retry:
+	r = tray_prop_get(it, "Title");
+	title = tray_prop_get_string(r);
+	if (r) dbus_message_unref(r);
+	if (!title) {
+		r = tray_prop_get(it, "Id");
+		title = tray_prop_get_string(r);
+		if (r) dbus_message_unref(r);
+	}
+	if (!title && !retried && it->busname) {
+		/* The default /StatusNotifierItem path is missing: some apps
+		 * (e.g. Steam) export the item at an arbitrary path such as
+		 * /org/ayatana/NotificationItem/<id>. Discover it and retry. */
+		char *found = tray_find_item_path(it->busname);
+		it->path_tried = 1;
+		if (found) {
+			tbwm_log(TBWM_LOG_INFO, "tray: item %s found at %s\n", it->busname, found);
+			free(it->itempath);
+			it->itempath = found;
+			free(it->display);
+			it->display = NULL;
+			retried = 1;
+			goto retry;
+		}
+	}
+	dup = tray_dedupe_name(title && *title ? title : it->busname);
+	if (dup > 1) {
+		char buf[TRAY_MAX_NAME + 8];
+		snprintf(buf, sizeof(buf), "%s (%d)", title && *title ? title : it->busname, dup);
+		free(title);
+		title = strdup(buf);
+	}
+	free(it->display);
+	it->display = title && *title ? title : strdup(it->busname);
+
+	r = tray_prop_get(it, "Menu");
+	menu = tray_prop_get_string(r);
+	if (r) dbus_message_unref(r);
+	if (menu && *menu && strcmp(menu, "/") != 0 && menu[0] == '/')
+		it->menupath = strdup(menu);
+	else
+		it->no_menu = 1;
+	if (menu)
+		free(menu);
+
+	it->resolved = 1;
+	tray_needs_redraw = 1;
+	tbwm_log(TBWM_LOG_INFO, "tray: resolved %s (%s)%s\n", it->display, it->busname,
+		it->no_menu ? " [no menu]" : "");
+}
+
+/* Fetch Title/Id/Menu for items whose props are still unknown. Runs from the
+ * main loop timer, never from a D-Bus dispatch callback. */
+static void
+tray_resolve_items(void)
+{
+	static TrayItem *next = NULL;
+	TrayItem *it;
+
+	if (!next || next->dead) {
+		next = tray_items;
+		if (!next)
+			return;
+	}
+	for (it = next; it; it = it->next) {
+		next = it;
+		if (it->resolved || it->dead)
+			continue;
+		tray_resolve_one(it);
+		next = it->next ? it->next : tray_items;
+		break;
+	}
+	if (!it)
+		next = tray_items;
+}
+
+static void
+tray_cleanup(void)
+{
+	TrayItem *it, *nit;
+	for (it = tray_items; it; it = nit) {
+		nit = it->next;
+		tray_item_free_helper(it);
+	}
+	tray_items = NULL;
+	tray_items_count = 0;
+	traymenu_active = 0;
+	tray_cur_item = NULL;
+	tray_cur_node = NULL;
+	tray_level = 0;
+}
+
+/* ---- watcher object (org.kde.StatusNotifierWatcher) ---- */
+
+static void
+tray_send_error(DBusConnection *conn, DBusMessage *msg, const char *name,
+                const char *text)
+{
+	DBusMessage *reply = dbus_message_new_error(msg, name, text);
+	if (reply) {
+		dbus_connection_send(conn, reply, NULL);
+		dbus_message_unref(reply);
+	}
+}
+
+static void
+tray_send_empty_reply(DBusConnection *conn, DBusMessage *msg)
+{
+	DBusMessage *reply = dbus_message_new_method_return(msg);
+	if (reply) {
+		dbus_connection_send(conn, reply, NULL);
+		dbus_message_unref(reply);
+	}
+}
+
+static DBusHandlerResult
+tray_watcher_handler(DBusConnection *conn, DBusMessage *msg, void *data)
+{
+	char *arg = NULL;
+	DBusError err;
+	(void)data;
+
+	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
+	    "RegisterStatusNotifierItem")) {
+		dbus_error_init(&err);
+		if (dbus_message_get_args(msg, &err, DBUS_TYPE_STRING, &arg,
+		    DBUS_TYPE_INVALID)) {
+			const char *sender = dbus_message_get_sender(msg);
+			char *tmp = strdup(arg);
+			char *svc = tmp;
+			char *path = "/StatusNotifierItem";
+			char pathbuf[TRAY_MAX_NAME + 2];
+			char *cp = tmp ? strchr(tmp, '/') : NULL;
+			if (cp) {
+				*cp = '\0';
+				if (cp[1] == '\0') {
+					path = "/StatusNotifierItem";
+				} else if (cp[1] == '/') {
+					path = cp + 1;
+				} else {
+					snprintf(pathbuf, sizeof(pathbuf), "/%s", cp + 1);
+					path = pathbuf;
+				}
+			}
+			/* Some items (e.g. waywallen) register with an empty service:
+			 * fall back to the sender's unique name per the SNI spec. */
+			if (svc && svc[0] == '\0')
+				svc = (char *)sender;
+			if (svc && svc[0] != '\0' && path[0] == '/')
+				tray_add_item(svc, path);
+			else
+				tbwm_log(TBWM_LOG_WARN, "tray: register with no service (%s)\n",
+					sender ? sender : "?");
+			free(tmp);
+		} else {
+			tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, err.message);
+			dbus_error_free(&err);
+			return DBUS_HANDLER_RESULT_HANDLED;
+		}
+		tray_send_empty_reply(conn, msg);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
+	    "RegisterStatusNotifierHost")) {
+		tray_send_empty_reply(conn, msg);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+/* ---- bus signal filter: drop items whose owner vanished ---- */
+
+static DBusHandlerResult
+tray_filter(DBusConnection *conn, DBusMessage *msg, void *data)
+{
+	const char *sender, *path, *iface, *member;
+	(void)conn; (void)data;
+
+	sender = dbus_message_get_sender(msg);
+	iface  = dbus_message_get_interface(msg);
+	path   = dbus_message_get_path(msg);
+	member = dbus_message_get_member(msg);
+	if (sender && strcmp(sender, DBUS_SERVICE_DBUS) == 0 &&
+	    iface && strcmp(iface, DBUS_INTERFACE_DBUS) == 0 &&
+	    path && strcmp(path, DBUS_PATH_DBUS) == 0 &&
+	    member && strcmp(member, "NameOwnerChanged") == 0) {
+		char *name = NULL, *oldowner = NULL, *newowner = NULL;
+		if (dbus_message_get_args(msg, NULL,
+		    DBUS_TYPE_STRING, &name,
+		    DBUS_TYPE_STRING, &oldowner,
+		    DBUS_TYPE_STRING, &newowner,
+		    DBUS_TYPE_INVALID)) {
+			if (newowner == NULL || newowner[0] == '\0')
+				tray_remove_item_service(name);
+		}
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+}
+
+/* ---- menu actions ---- */
+
+static void
+tray_activate_app(TrayItem *it)
+{
+	DBusMessage *msg;
+	int x = 0, y = 0;
+	if (!tray_dbus || !it->busname || !it->busname[0])
+		return;
+	msg = dbus_message_new_method_call(it->busname, it->itempath,
+		"org.kde.StatusNotifierItem", "Activate");
+	if (!msg)
+		return;
+	dbus_message_append_args(msg,
+		DBUS_TYPE_INT32, &x,
+		DBUS_TYPE_INT32, &y,
+		DBUS_TYPE_INVALID);
+	dbus_connection_send(tray_dbus, msg, NULL);
+	dbus_message_unref(msg);
+	dbus_connection_flush(tray_dbus);
+}
+
+static void
+tray_activate_node(TrayItem *it, TrayNode *node)
+{
+	DBusMessage *msg;
+	char *clicked = "clicked";
+	int32_t int0 = 0;
+	uint32_t ts = 0;
+	if (!tray_dbus || !it->busname || !it->menupath || it->menupath[0] != '/')
+		return;
+	msg = dbus_message_new_method_call(it->busname, it->menupath,
+		"com.canonical.dbusmenu", "Event");
+	if (!msg)
+		return;
+	{
+		DBusMessageIter iter, sub;
+		dbus_message_iter_init_append(msg, &iter);
+		dbus_message_iter_append_basic(&iter, DBUS_TYPE_INT32, &node->id);
+		dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &clicked);
+		dbus_message_iter_open_container(&iter, DBUS_TYPE_VARIANT,
+			DBUS_TYPE_INT32_AS_STRING, &sub);
+		dbus_message_iter_append_basic(&sub, DBUS_TYPE_INT32, &int0);
+		dbus_message_iter_close_container(&iter, &sub);
+		dbus_message_iter_append_basic(&iter, DBUS_TYPE_UINT32, &ts);
+	}
+	dbus_connection_send(tray_dbus, msg, NULL);
+	dbus_message_unref(msg);
+	dbus_connection_flush(tray_dbus);
+}
+
+/* ---- menu navigation ---- */
+
+static int
+tray_visible_count(void)
+{
+	int c = 0;
+	if (tray_level == 0)
+		return tray_items_count;
+	if (tray_cur_item && tray_cur_item->dead)
+		return 0;
+	if (!tray_cur_node && tray_cur_item)
+		tray_cur_node = tray_cur_item->menuroot;
+	{
+		TrayNode *ch;
+		/* Count physical rows: separators occupy a row too so navigation,
+		 * the renderer and the menu height all use the same index. */
+		for (ch = tray_cur_node ? tray_cur_node->children : NULL; ch;
+		     ch = ch->sibling)
+			if (ch->is_visible)
+				c++;
+	}
+	return c;
+}
+
+static TrayNode *
+tray_row_node(int row, int *was_sep)
+{
+	TrayNode *ch;
+	int i = 0;
+	if (was_sep)
+		*was_sep = 0;
+	if (tray_level == 0)
+		return NULL;
+	if (tray_cur_item && tray_cur_item->dead)
+		return NULL;
+	if (!tray_cur_node && tray_cur_item)
+		tray_cur_node = tray_cur_item->menuroot;
+	for (ch = tray_cur_node ? tray_cur_node->children : NULL; ch; ch = ch->sibling) {
+		if (!ch->is_visible)
+			continue;
+		if (i == row) {
+			if (was_sep)
+				*was_sep = ch->is_sep;
+			return ch;
+		}
+		i++;
+	}
+	return NULL;
+}
+
+static void
+tray_enter_row(int row)
+{
+	if (tray_level == 0) {
+		TrayItem *p;
+		int c = 0;
+		for (p = tray_items; p; p = p->next) {
+			if (c == row)
+				break;
+			c++;
+		}
+		if (!p)
+			return;
+		if (p->dead) {
+			/* Owner vanished; don't block on D-Bus calls to a dead service. */
+			tray_menu_reset();
+			updatetraymenu();
+			updatebars();
+			return;
+		}
+		tray_cur_item = p;
+		tray_cur_node = p->menuroot;
+		tray_level = 1;
+		tray_row = 0;
+		tray_scroll = 0;
+		/* Resolve props here (input handler, safe to block) so the menu path
+		 * is known before deciding between dbusmenu vs "Abrir". */
+		tray_resolve_one(p);
+		if (!p->no_menu)
+			tray_fetch_menu(p);
+		if (!p->no_menu && (!p->menuroot || !p->menuroot->children)) {
+			/* app exposed a menu path but GetLayout gave nothing:
+			 * treat as a single "Abrir" row instead */
+			p->no_menu = 1;
+		}
+		if (p->no_menu) {
+			/* no menu: synthesize a single "Abrir" row */
+			if (!p->menuroot) {
+				p->menuroot = calloc(1, sizeof(*p->menuroot));
+				tray_cur_node = p->menuroot;
+			}
+			if (!tray_cur_node->children) {
+				TrayNode *open = calloc(1, sizeof(*open));
+				open->label = strdup("Abrir");
+				open->enabled = 1;
+				open->is_visible = 1;
+				open->children = NULL;
+				open->parent = tray_cur_node;
+				tray_cur_node->children = open;
+				tray_cur_node->child_count = 1;
+			}
+			tray_cur_node = p->menuroot;
+		}
+		/* tray_fetch_menu() freed the old menu tree and built a fresh one,
+		 * so re-point tray_cur_node at the new root (the 2nd+ open of the
+		 * same item used to leave it dangling into freed nodes -> SIGSEGV
+		 * in tray_visible_count()). */
+		tray_cur_node = p->menuroot;
+		updatetraymenu();
+		return;
+	}
+
+	if (!tray_cur_item)
+		return;
+	if (!tray_cur_node && tray_cur_item)
+		tray_cur_node = tray_cur_item->menuroot;
+	{
+		TrayNode *child = tray_row_node(row, NULL);
+		if (!child)
+			return;
+		if (child->is_sep)
+			return; /* separators occupy a row but aren't selectable */
+		if (child->child_count > 0 && child->children) {
+			tray_cur_node = child;
+			tray_level++;
+			tray_row = 0;
+			tray_scroll = 0;
+			updatetraymenu();
+			return;
+		}
+		/* leaf: real menu items run their "clicked" event; the synthetic
+		 * "Abrir" row (no_menu apps) restores the app itself */
+		if (tray_cur_item->no_menu)
+			tray_activate_app(tray_cur_item);
+		else
+			tray_activate_node(tray_cur_item, child);
+		tray_menu_reset();
+		updatetraymenu();
+		updatebars();
+	}
+}
+
+static void
+tray_select_row(int row)
+{
+	if (row < 0)
+		return;
+	tray_row = row;
+	tray_enter_row(row);
+}
+
+static int
+traymenu_cells_h(void)
+{
+	int items;
+	if (tray_level == 0)
+		items = tray_items_count;
+	else
+		items = tray_visible_count();
+	if (items < 12)
+		return items + 2;
+	return 14;
+}
+
+/* ---- rendering ---- */
+
+static const char *
+tray_current_title(void)
+{
+	if (tray_level == 0)
+		return "Apps";
+	if (!tray_cur_item)
+		return "Apps";
+	if (tray_level == 1 || !tray_cur_node)
+		return tray_cur_item->display;
+	return tray_cur_node->label ? tray_cur_node->label : tray_cur_item->display;
+}
+
+static void
+tray_menu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
+              const char *label, int is_sel, int has_children, int is_checked,
+              uint32_t text_color, uint32_t hi_bg, uint32_t hi_fg)
+{
+	int text_y = (row + 1) * cell_height;
+	int limit = menu_width / cell_width - 2;
+	int ci, o = 0;
+	char buf[160];
+
+	if (is_sel) {
+		int px, py;
+		for (py = text_y; py < text_y + cell_height; py++)
+			for (px = cell_width; px < menu_width - cell_width; px++)
+				pixels[py * menu_width + px] = hi_bg;
+	}
+	if (is_checked)
+		buf[o++] = '[';
+	if (label)
+		for (ci = 0; label[ci] && o < (int)sizeof(buf) - 3; ci++) {
+			if (label[ci] == (char)0xB7) /* · middle dot is fine */
+				buf[o++] = ' ';
+			else
+				buf[o++] = label[ci];
+		}
+	if (is_checked)
+		buf[o++] = ']';
+	if (has_children)
+		buf[o++] = 0xBB; /* » */
+	buf[o] = '\0';
+
+	for (ci = 0; buf[ci] && ci < limit; ci++)
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			cell_width + ci * cell_width, text_y,
+			(unsigned char)buf[ci], is_sel ? hi_fg : text_color);
+}
+
+static void
+updatetraymenu(void)
+{
+	struct TitleBuffer *tb;
+	uint32_t *pixels;
+	int menu_cells_w = 25;
+	int menu_cells_h = traymenu_cells_h();
+	int menu_width = menu_cells_w * cell_width;
+	int menu_height = menu_cells_h * cell_height;
+	int i, x, y, col, cur_row = 0, row;
+	int content_rows = menu_cells_h - 2;
+	uint32_t frame_bg, line_color, content_bg, text_color, hi_bg, hi_fg;
+	char title[40];
+
+	if (!traymenu_active) {
+		if (traymenu_buffer)
+			wlr_scene_node_set_enabled(&traymenu_buffer->node, 0);
+		return;
+	}
+	if (!selmon)
+		return;
+
+	frame_bg   = premul_argb(cfg_border_color);
+	line_color = RGB_TO_ARGB(cfg_border_line_color);
+	content_bg = premul_argb(cfg_menu_color);
+	text_color = RGB_TO_ARGB(cfg_menu_text_color);
+	hi_bg      = premul_argb(cfg_border_color);
+	hi_fg      = line_color;
+
+	if (!traymenu_tb) {
+		traymenu_tb = ecalloc(1, sizeof(*traymenu_tb));
+		traymenu_tb->stride = menu_width * 4;
+		traymenu_tb->data = ecalloc(1, traymenu_tb->stride * menu_height);
+		wlr_buffer_init(&traymenu_tb->base, &titlebuf_impl, menu_width, menu_height);
+		titlebuf_alloc_count++;
+	} else if (traymenu_tb->base.width != (size_t)menu_width ||
+	           traymenu_tb->base.height != (size_t)menu_height) {
+		if (traymenu_buffer)
+			wlr_scene_buffer_set_buffer(traymenu_buffer, NULL);
+		wlr_buffer_drop(&traymenu_tb->base);
+		traymenu_tb = ecalloc(1, sizeof(*traymenu_tb));
+		traymenu_tb->stride = menu_width * 4;
+		traymenu_tb->data = ecalloc(1, traymenu_tb->stride * menu_height);
+		wlr_buffer_init(&traymenu_tb->base, &titlebuf_impl, menu_width, menu_height);
+		titlebuf_alloc_count++;
+	}
+	tb = traymenu_tb;
+	pixels = (uint32_t *)tb->data;
+
+	for (i = 0; i < menu_width * menu_height; i++)
+		pixels[i] = content_bg;
+	for (y = 0; y < cell_height; y++)
+		for (x = 0; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	for (y = (menu_cells_h - 1) * cell_height; y < menu_height; y++)
+		for (x = 0; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	for (y = 0; y < menu_height; y++) {
+		for (x = 0; x < cell_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+		for (x = (menu_cells_w - 1) * cell_width; x < menu_width; x++)
+			pixels[y * menu_width + x] = frame_bg;
+	}
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, 0, 0x2554, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, 0, 0x2557, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, 0, (menu_cells_h - 1) * cell_height, 0x255A, line_color);
+	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
+
+	snprintf(title, sizeof(title), "%s", tray_current_title());
+	for (col = 1; col < menu_cells_w - 1; col++) {
+		int ts = 2, tl = (int)strlen(title);
+		if (col >= ts && col < ts + tl)
+			render_char_to_buffer(pixels, menu_width, menu_height,
+				col * cell_width, 0, title[col - ts], line_color);
+		else
+			render_char_to_buffer(pixels, menu_width, menu_height,
+				col * cell_width, 0, 0x2550, line_color);
+	}
+	for (col = 1; col < menu_cells_w - 1; col++)
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			col * cell_width, (menu_cells_h - 1) * cell_height, 0x2550, line_color);
+	for (row = 1; row < menu_cells_h - 1; row++) {
+		render_char_to_buffer(pixels, menu_width, menu_height, 0, row * cell_height, 0x2551, line_color);
+		render_char_to_buffer(pixels, menu_width, menu_height,
+			(menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
+	}
+
+	cur_row = 0;
+	if (tray_level == 0) {
+		TrayItem *p;
+		int r = 0;
+		for (p = tray_items; p; p = p->next) {
+			if (r < tray_scroll) {
+				r++;
+				continue;
+			}
+			if (cur_row >= content_rows)
+				break;
+			tray_menu_row(pixels, menu_width, menu_height, cur_row,
+				p->display, (r == tray_row), !p->no_menu, 0,
+				text_color, hi_bg, hi_fg);
+			cur_row++;
+			r++;
+		}
+	} else {
+		TrayNode *ch;
+		int r = 0;
+		if (!tray_cur_node && tray_cur_item)
+			tray_cur_node = tray_cur_item->menuroot;
+		for (ch = tray_cur_node ? tray_cur_node->children : NULL; ch;
+		     ch = ch->sibling) {
+			if (!ch->is_visible)
+				continue;
+			if (r < tray_scroll) {
+				r++;
+				continue;
+			}
+			if (cur_row >= content_rows)
+				break;
+			if (ch->is_sep) {
+				int ci;
+				int text_y = (r - tray_scroll + 1) * cell_height;
+				for (ci = 0; ci < menu_width / cell_width - 2; ci++)
+					render_char_to_buffer(pixels, menu_width, menu_height,
+						cell_width + ci * cell_width, text_y, 0x2500,
+						text_color);
+			} else {
+				tray_menu_row(pixels, menu_width, menu_height, cur_row,
+					ch->label, (r == tray_row), ch->child_count > 0,
+					ch->checked > 0, text_color, hi_bg, hi_fg);
+			}
+			cur_row++;
+			r++;
+		}
+	}
+
+	if (!traymenu_buffer)
+		traymenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
+	wlr_scene_node_set_enabled(&traymenu_buffer->node, 1);
+	if (selmon) {
+		int sc, ac, nc;
+		bar_button_centers(selmon, &sc, &ac, &nc);
+		wlr_scene_node_set_position(&traymenu_buffer->node,
+			centered_menu_x(selmon, sc, menu_width), selmon->m.y + cell_height);
+	}
+	wlr_scene_buffer_set_buffer(traymenu_buffer, &tb->base);
+}
+
+/* ---- toggle / keyboard ---- */
+
+/* Fully close the tray menu and drop all navigation state so
+ * tray_cur_item/tray_cur_node never linger pointing at menu trees that may
+ * later be freed by tray_prune_dead(). */
+static void
+tray_menu_reset(void)
+{
+	traymenu_active = 0;
+	tray_level = 0;
+	tray_row = 0;
+	tray_scroll = 0;
+	tray_cur_item = NULL;
+	tray_cur_node = NULL;
+}
+
+static void
+toggletraymenu(const Arg *arg)
+{
+	if (traymenu_active) {
+		tray_menu_reset();
+		updatetraymenu();
+		updatebars();
+		return;
+	}
+	traymenu_active = 1;
+	tray_level = 0;
+	tray_row = 0;
+	tray_scroll = 0;
+	tray_cur_item = NULL;
+	tray_cur_node = NULL;
+	updatetraymenu();
+	updatebars();
+}
+
+static int
+traymenu_key(xkb_keysym_t sym)
+{
+	int items, max_row;
+
+	if (!traymenu_active)
+		return 0;
+	items = (tray_level == 0) ? tray_items_count : tray_visible_count();
+
+	if (sym == XKB_KEY_Escape) {
+		if (tray_level > 0) {
+			tray_level--;
+			tray_row = 0;
+			tray_scroll = 0;
+		} else {
+			tray_menu_reset();
+		}
+		updatetraymenu();
+		updatebars();
+		return 1;
+	}
+	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
+		if (tray_level > 0) {
+			tray_level--;
+			tray_row = 0;
+			tray_scroll = 0;
+			updatetraymenu();
+		}
+		return 1;
+	}
+	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
+		if (tray_row > 0)
+			tray_row--;
+		updatetraymenu();
+		return 1;
+	}
+	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
+		max_row = items < 12 ? items - 1 : 11;
+		if (max_row < 0)
+			max_row = 0;
+		if (tray_row < max_row)
+			tray_row++;
+		else if (items > 0 && tray_scroll < items - max_row - 1)
+			tray_scroll++;
+		updatetraymenu();
+		return 1;
+	}
+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
+	    sym == XKB_KEY_Right || sym == XKB_KEY_l) {
+		tray_enter_row(tray_row);
+		return 1;
+	}
+	return 0;
+}
+
+/* ---- setup / dbus pump ---- */
+
+static int
+tray_timer_cb(void *data)
+{
+	(void)data;
+	if (tray_dbus)
+		dbus_connection_read_write_dispatch(tray_dbus, 0);
+	/* Property lookups and item freeing are only safe here, after dispatch
+	 * has fully unwound (never inside a message handler). */
+	tray_resolve_items();
+	tray_prune_dead();
+	if (tray_needs_redraw) {
+		tray_needs_redraw = 0;
+		updatetraymenu();
+		updatebars();
+	}
+	if (tray_timer)
+		wl_event_source_timer_update(tray_timer, 100);
+	return 1;
+}
+
+static void
+tray_announce_host(void)
+{
+	/* Emit StatusNotifierHostRegistered so already-running items re-register
+	 * with us even if they did not watch our name takeover. */
+	DBusMessage *sig;
+	const char *host = "/StatusNotifierHost";
+	if (!tray_dbus)
+		return;
+	sig = dbus_message_new_signal("/StatusNotifierWatcher",
+		"org.kde.StatusNotifierWatcher", "StatusNotifierHostRegistered");
+	if (!sig)
+		return;
+	dbus_message_append_args(sig, DBUS_TYPE_STRING, &host, DBUS_TYPE_INVALID);
+	dbus_connection_send(tray_dbus, sig, NULL);
+	dbus_message_unref(sig);
+	dbus_connection_flush(tray_dbus);
+}
+
+static void
+tray_setup(void)
+{
+	DBusError err;
+	DBusMessage *msg, *reply;
+	DBusObjectPathVTable vt;
+	const char *name = "org.kde.StatusNotifierWatcher";
+	unsigned int flags = DBUS_NAME_FLAG_DO_NOT_QUEUE;
+	unsigned int result = 0;
+
+	dbus_error_init(&err);
+	if (getenv("DBUS_SESSION_BUS_ADDRESS") == NULL) {
+		tbwm_log(TBWM_LOG_WARN, "tray: no DBUS_SESSION_BUS_ADDRESS, skipping\n");
+		dbus_error_free(&err);
+		return;
+	}
+	tray_dbus = dbus_bus_get_private(DBUS_BUS_SESSION, &err);
+	if (!tray_dbus) {
+		tbwm_log(TBWM_LOG_WARN, "tray: session bus unavailable: %s\n",
+			err.message ? err.message : "?");
+		dbus_error_free(&err);
+		return;
+	}
+	dbus_connection_set_exit_on_disconnect(tray_dbus, FALSE);
+
+	/* Own the watcher name (do not queue behind another panel) */
+	msg = dbus_message_new_method_call(DBUS_SERVICE_DBUS, DBUS_PATH_DBUS,
+		DBUS_INTERFACE_DBUS, "RequestName");
+	if (msg) {
+		dbus_message_append_args(msg,
+			DBUS_TYPE_STRING, &name,
+			DBUS_TYPE_UINT32, &flags,
+			DBUS_TYPE_INVALID);
+		reply = dbus_connection_send_with_reply_and_block(tray_dbus, msg,
+			2000, &err);
+		if (reply) {
+			if (dbus_message_get_args(reply, &err, DBUS_TYPE_UINT32,
+			    &result, DBUS_TYPE_INVALID) && result == 1) {
+				strncpy(tray_watcher_name, name, sizeof(tray_watcher_name) - 1);
+				tray_watcher_name[sizeof(tray_watcher_name) - 1] = '\0';
+				tbwm_log(TBWM_LOG_INFO, "tray: watcher name owned\n");
+			} else {
+				tbwm_log(TBWM_LOG_WARN, "tray: watcher name not ours (result %u)\n",
+					result);
+			}
+			dbus_message_unref(reply);
+		}
+		dbus_message_unref(msg);
+	}
+	dbus_error_free(&err);
+
+	/* Export /StatusNotifierWatcher */
+	memset(&vt, 0, sizeof(vt));
+	vt.message_function = tray_watcher_handler;
+	dbus_connection_register_object_path(tray_dbus, "/StatusNotifierWatcher",
+		&vt, NULL);
+
+	/* Add a filter for bus signals (item removal detection) */
+	dbus_connection_add_filter(tray_dbus, tray_filter, NULL, NULL);
+	{
+		const char *rule =
+			"type='signal',interface='org.freedesktop.DBus',member='NameOwnerChanged',"
+			"path='/org/freedesktop/DBus',sender='org.freedesktop.DBus'";
+		dbus_error_init(&err);
+		dbus_bus_add_match(tray_dbus, rule, &err);
+		if (err.name)
+			tbwm_log(TBWM_LOG_WARN, "tray: add_match: %s\n", err.message);
+		dbus_error_free(&err);
+	}
+
+	/* The host must never see itself appear in its own menu */
+	tray_announce_host();
+
+	tray_timer = wl_event_loop_add_timer(event_loop, tray_timer_cb, NULL);
+	if (tray_timer)
+		wl_event_source_timer_update(tray_timer, 100);
+	tbwm_log(TBWM_LOG_INFO, "tray: initialized\n");
+}
+
+/* ---- crash diagnostics ---- */
+
+static void
+crash_handler(int sig)
+{
+	void *frames[64];
+	int n = backtrace(frames, 64), fd;
+	int w = 0;
+	const char *msg = "\n=== tbwm crash (signal ";
+
+	dprintf(2, "%s%d%s", msg, sig, ") ===\n");
+	fd = open(TBWM_CRASH_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	if (fd < 0)
+		goto out;
+	w += dprintf(fd, "\n=== tbwm crash (signal %d) at %ld ===\n", sig,
+		(long)time(NULL));
+	backtrace_symbols_fd(frames, n, fd);
+	close(fd);
+out:
+	/* Re-raise with the default handler so the exit status / core behaviour
+	 * matches what the kernel would have produced. */
+	signal(sig, SIG_DFL);
+	raise(sig);
+	_exit(128 + sig);
+}
+
+static void
+install_crash_handlers(void)
+{
+	int sigs[] = { SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL };
+	unsigned i;
+
+	for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+		signal(sigs[i], crash_handler);
+}
+
+/* ---- scheme wrapper ---- */
+
+/* Scheme function: (toggle-settings-menu) still toggles the [S] tray menu */
+static s7_pointer
+scm_toggle_tray_menu(s7_scheme *sc, s7_pointer args)
+{
+	(void)args;
+	toggletraymenu(NULL);
+	return s7_t(sc);
+}
+
 /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
 void
 reload_config_key(const Arg *arg)
@@ -12138,21 +13645,23 @@ render_tabs:
 		now = time(NULL);
 		tm_info = localtime(&now);
 		
-		/* Reserve space for the network menu button [N] and the audio menu
-		 * button [A] on the right, next to date/time */
+		/* Reserve space for the settings [S], network [N] and audio [A]
+		 * menu buttons on the right, next to date/time */
 		{
 			int nbtn_len = strlen(cfg_net_menu_button);
 			int nbtn_cells = nbtn_len + 2; /* [nbtn] */
 			int abtn_len = strlen(cfg_audio_menu_button);
 			int abtn_cells = abtn_len + 2; /* [abtn] */
+			int sbtn_len = strlen(cfg_settings_menu_button);
+			int sbtn_cells = sbtn_len + 2; /* [sbtn] */
 			uint32_t nfg = RGB_TO_ARGB(cfg_bar_text_color);
 
-			/* Compute right-aligned start including both buttons.
-			 * The renderer consumes: [A] (abtn_cells) + 1 gap + [N] (nbtn_cells)
-			 * + 3 cells for the separator before the text, plus 3 cells between
-			 * segments (battery | date | time). */
+			/* Compute right-aligned start including the three buttons.
+			 * The renderer consumes: [S] (sbtn_cells) + 1 gap + [A] (abtn_cells)
+			 * + 1 gap + [N] (nbtn_cells) + 3 cells for the separator before the
+			 * text, plus 3 cells between segments (battery | date | time). */
 			if (cfg_battery_poll && battery_status_text[0] != '\0') {
-				int total_chars = abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(battery_status_text);
+				int total_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(battery_status_text);
 				if (cfg_show_date)
 					strftime(datebuf, sizeof(datebuf), "%Y-%m-%d", tm_info);
 				if (cfg_show_time)
@@ -12167,7 +13676,7 @@ render_tabs:
 				total_chars += time_len;
 				right_x = width - total_chars * cell_width;
 			} else if (cfg_status_text[0] != '\0') {
-				right_x = width - (abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text)) * cell_width;
+				right_x = width - (sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + (int)strlen(cfg_status_text)) * cell_width;
 			} else if (cfg_show_date || cfg_show_time) {
 				int total_chars = 0;
 				if (cfg_show_date)
@@ -12177,21 +13686,46 @@ render_tabs:
 				date_len = cfg_show_date ? (int)strlen(datebuf) : 0;
 				time_len = cfg_show_time ? (int)strlen(timebuf) : 0;
 				if (cfg_show_date && cfg_show_time) {
-					total_chars = abtn_cells + 1 + nbtn_cells + 3 + date_len + 3 + time_len;
+					total_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + date_len + 3 + time_len;
 				} else if (cfg_show_date) {
-					total_chars = abtn_cells + 1 + nbtn_cells + 3 + date_len;
+					total_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + date_len;
 				} else if (cfg_show_time) {
-					total_chars = abtn_cells + 1 + nbtn_cells + 3 + time_len;
+					total_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + time_len;
 				} else {
-					total_chars = abtn_cells + 1 + nbtn_cells;
+					total_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 				}
 				right_x = width - total_chars * cell_width;
 			} else {
-				right_x = width - (abtn_cells + 1 + nbtn_cells) * cell_width;
+				right_x = width - (sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells) * cell_width;
 			}
 
 			if (right_x > x) {
 				x = right_x;
+
+				/* Settings menu button (the [S] tray menu) */
+				if (traymenu_active) {
+					int px, py;
+					nfg = RGB_TO_ARGB(cfg_bar_color);
+					for (py = 0; py < cell_height; py++) {
+						for (px = x; px < x + sbtn_cells * cell_width && px < width; px++) {
+							pixels[py * width + px] = RGB_TO_ARGB(cfg_bar_text_color);
+						}
+					}
+				}
+				render_char_to_buffer(pixels, width, cell_height, x, 0, '[', nfg);
+				x += cell_width;
+				{
+					int bi;
+					for (bi = 0; cfg_settings_menu_button[bi] && bi < 14; bi++) {
+						render_char_to_buffer(pixels, width, cell_height, x, 0, cfg_settings_menu_button[bi], nfg);
+						x += cell_width;
+					}
+				}
+				render_char_to_buffer(pixels, width, cell_height, x, 0, ']', nfg);
+				x += cell_width;
+
+				/* 1-cell gap before the audio button */
+				x += cell_width;
 
 				/* Audio menu button */
 				if (audiomenu_active) {
@@ -13752,8 +15286,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
 		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
 			continue;
 
-		file_debug_log("xytonode: found node in layer %d at (%.0f, %.0f)\n", layer, x, y);
-
 		if (node->type == WLR_SCENE_NODE_BUFFER) {
 			struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(
 					wlr_scene_buffer_from_node(node));
@@ -13768,8 +15300,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
 			l = pnode->data;
 		}
 	}
-
-	file_debug_log("xytonode: result c=%p l=%p surface=%p at (%.0f, %.0f)\n", c, l, surface, x, y);
 
 	if (psurface) *psurface = surface;
 	if (pc) *pc = c;

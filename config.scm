@@ -93,6 +93,9 @@
 ;; Theme menu (in-WM): frame/bar/background colors, palette or custom
 (bind-key "M-t" (lambda () (toggle-thememenu)))
 
+;; Settings menu (in-WM): all options in categories, editable live
+(bind-key "M-S-s" (lambda () (toggle-settings-menu)))
+
 ;; Close window
 (bind-key "M-q" (lambda () (kill-client)))
 
