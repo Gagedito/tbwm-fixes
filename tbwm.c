@@ -474,9 +474,10 @@ static void theme_persist(void);
 static s7_pointer scm_toggle_thememenu(s7_scheme *sc, s7_pointer args);
  static void toggletraymenu(const Arg *arg);
  static int traymenu_key(xkb_keysym_t sym);
- static void updatetraymenu(void);
- static int traymenu_cells_h(void);
- static void tray_select_row(int row);
+static void updatetraymenu(void);
+  static int traymenu_cells_h(void);
+  static int tray_visible_count(void);
+  static void tray_select_row(int row);
  static void tray_menu_reset(void);
 static void tray_setup(void);
 static void tray_cleanup(void);
@@ -7078,6 +7079,31 @@ motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double d
 					if (new_selected != audio_selected_row && new_selected < audiomenu_item_count()) {
 						audio_selected_row = new_selected;
 						updatemenuaudio();
+					}
+				}
+			}
+		}
+
+		/* Update tray menu hover selection */
+		if (traymenu_active && selmon) {
+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
+			int items = (tray_level == 0) ? tray_items_count : tray_visible_count();
+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
+			menu_x = centered_menu_x(selmon, settings_center, 25 * cell_width);
+			menu_y = selmon->m.y + cell_height;
+			menu_w = 25 * cell_width;
+			menu_h = traymenu_cells_h() * cell_height;
+
+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
+				int rel_y = (int)(cursor->y - menu_y);
+				int hovered_row = rel_y / cell_height - 1; /* 0 = title bar */
+
+				/* Row 0 is title bar, rows 1+ are content */
+				if (hovered_row >= 0 && hovered_row < items) {
+					if (hovered_row != tray_row) {
+						tray_row = hovered_row;
+						updatetraymenu();
 					}
 				}
 			}
