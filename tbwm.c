@@ -799,7 +799,6 @@ static char netmenu_cmd[512] = ""; /* command that lists entries (category<TAB>g
 static int netmenu_active = 0;
 static struct wlr_scene_buffer *netmenu_buffer = NULL;
 static struct TitleBuffer *netmenu_tb = NULL;  /* cached buffer for reuse */
-static int net_scroll_offset = 0;
 static int net_selected_row = 0;
 static char net_categories[MAX_NET_CATEGORIES][NET_CAT_LEN];
 static int net_category_count = 0;
@@ -877,7 +876,6 @@ static char audiomenu_cmd[512] = ""; /* command that lists audio entries */
 static int audiomenu_active = 0;
 static struct wlr_scene_buffer *audiomenu_buffer = NULL;
 static struct TitleBuffer *audiomenu_tb = NULL;  /* cached buffer for reuse */
-static int audio_scroll_offset = 0;
 static int audio_selected_row = 0;
 static int audio_menu_marquee_px = 0;      /* pixel offset for scrolling a long selected label */
 static int audio_menu_marquee_needed = 0;  /* 1 = selected row overflows and is being scrolled */
@@ -933,7 +931,6 @@ static int traymenu_active = 0;
 static struct wlr_scene_buffer *traymenu_buffer = NULL;
 static struct TitleBuffer *traymenu_tb = NULL;
 static int tray_row = 0;            /* selected row in the current level */
-static int tray_scroll = 0;         /* scroll offset in the current level */
 static int tray_level = 0;          /* 0 = apps list, >=1 = inside a menu node */
 static TrayItem *tray_cur_item = NULL;  /* the app whose menu we are in */
 static TrayNode *tray_cur_node = NULL;  /* node whose children are listed */
@@ -1763,13 +1760,12 @@ buttonpress(struct wl_listener *listener, void *data)
 					
 					if (net_current_category < 0) {
 						/* Clicked on a category */
-						int cat_idx = content_row + net_scroll_offset;
+						int cat_idx = content_row;
 						if (cat_idx < net_category_count) {
 							net_current_category = cat_idx;
 							net_current_group = -1;
 							net_current_subgroup = -1;
 							net_group_has_sub = 0;
-							net_scroll_offset = 0;
 							net_selected_row = 0;
 							netmenu_build_groups();
 							if (net_group_count == 0)
@@ -1784,7 +1780,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							net_current_group = -1;
 							net_current_subgroup = -1;
 							net_group_has_sub = 0;
-							net_scroll_offset = 0;
 							net_selected_row = 0;
 							updatenetmenu();
 						} else {
@@ -1793,7 +1788,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							if (target < net_group_count) {
 								net_current_group = target;
 								net_current_subgroup = -1;
-								net_scroll_offset = 0;
 								net_selected_row = 0;
 								netmenu_build_subgroups();
 								net_group_has_sub = (net_subgroup_count > 0);
@@ -1807,7 +1801,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							net_current_group = -1;
 							net_current_subgroup = -1;
 							net_group_has_sub = 0;
-							net_scroll_offset = 0;
 							net_selected_row = 0;
 							updatenetmenu();
 						} else {
@@ -1815,7 +1808,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							int target = content_row - 1; /* -1 for Back row */
 							if (target < net_subgroup_count) {
 								net_current_subgroup = target;
-								net_scroll_offset = 0;
 								net_selected_row = 0;
 								updatenetmenu();
 							}
@@ -1836,7 +1828,6 @@ buttonpress(struct wl_listener *listener, void *data)
 								net_current_category = -1;
 								net_current_group = -1;
 							}
-							net_scroll_offset = 0;
 							net_selected_row = 0;
 							updatenetmenu();
 						} else {
@@ -1844,7 +1835,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							const char *cat = net_categories[net_current_category];
 							const char *group = (net_group_count == 0) ? "" : net_groups[net_current_group];
 							const char *sub = (net_current_subgroup >= 0) ? net_subgroups[net_current_subgroup] : "";
-							int e_idx = 0;
 							int display_row = 1;
 							int i;
 							
@@ -1852,15 +1842,12 @@ buttonpress(struct wl_listener *listener, void *data)
 								if (strcmp(net_entries[i].category, cat) == 0 &&
 								    strcmp(net_entries[i].group, group) == 0 &&
 								    strcmp(net_entries[i].subgroup, sub) == 0) {
-									if (e_idx >= net_scroll_offset) {
-										if (display_row == content_row) {
-											/* Found the clicked entry - run it */
-											netmenu_run(&net_entries[i]);
-											return;
-										}
-										display_row++;
+									if (display_row == content_row) {
+										/* Found the clicked entry - run it */
+										netmenu_run(&net_entries[i]);
+										return;
 									}
-									e_idx++;
+									display_row++;
 								}
 							}
 						}
@@ -1921,13 +1908,12 @@ buttonpress(struct wl_listener *listener, void *data)
 
 					if (audio_current_category < 0) {
 						/* Clicked on a category */
-						int cat_idx = content_row + audio_scroll_offset;
+						int cat_idx = content_row;
 						if (cat_idx < audio_category_count) {
 							audio_current_category = cat_idx;
 							audio_current_group = -1;
 							audio_current_subgroup = -1;
 							audio_group_has_sub = 0;
-							audio_scroll_offset = 0;
 							audio_selected_row = 0;
 							audiomenu_build_groups();
 							if (audio_group_count == 0)
@@ -1942,7 +1928,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							audio_current_group = -1;
 							audio_current_subgroup = -1;
 							audio_group_has_sub = 0;
-							audio_scroll_offset = 0;
 							audio_selected_row = 0;
 							updatemenuaudio();
 						} else {
@@ -1951,7 +1936,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							if (target < audio_group_count) {
 								audio_current_group = target;
 								audio_current_subgroup = -1;
-								audio_scroll_offset = 0;
 								audio_selected_row = 0;
 								audiomenu_build_subgroups();
 								audio_group_has_sub = (audio_subgroup_count > 0);
@@ -1965,7 +1949,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							audio_current_group = -1;
 							audio_current_subgroup = -1;
 							audio_group_has_sub = 0;
-							audio_scroll_offset = 0;
 							audio_selected_row = 0;
 							updatemenuaudio();
 						} else {
@@ -1973,7 +1956,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							int target = content_row - 1; /* -1 for Back row */
 							if (target < audio_subgroup_count) {
 								audio_current_subgroup = target;
-								audio_scroll_offset = 0;
 								audio_selected_row = 0;
 								updatemenuaudio();
 							}
@@ -1991,7 +1973,6 @@ buttonpress(struct wl_listener *listener, void *data)
 								audio_current_group = -1;
 							}
 							audio_group_has_sub = 0;
-							audio_scroll_offset = 0;
 							audio_selected_row = 0;
 							updatemenuaudio();
 						} else {
@@ -1999,7 +1980,6 @@ buttonpress(struct wl_listener *listener, void *data)
 							const char *cat = audio_categories[audio_current_category];
 							const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
 							const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
-							int e_idx = 0;
 							int display_row = 1;
 							int i;
 
@@ -2007,15 +1987,12 @@ buttonpress(struct wl_listener *listener, void *data)
 								if (strcmp(audio_entries[i].category, cat) == 0 &&
 								    strcmp(audio_entries[i].group, group) == 0 &&
 								    strcmp(audio_entries[i].subgroup, sub) == 0) {
-									if (e_idx >= audio_scroll_offset) {
-										if (display_row == content_row) {
-											/* Found the clicked entry - run it */
-											audio_run(&audio_entries[i]);
-											return;
-										}
-										display_row++;
+									if (display_row == content_row) {
+										/* Found the clicked entry - run it */
+										audio_run(&audio_entries[i]);
+										return;
 									}
-									e_idx++;
+									display_row++;
 								}
 							}
 						}
@@ -4389,10 +4366,10 @@ netmenu_item_count(void)
 		int count = 1; /* "< Back" item */
 		int i;
 		for (i = 0; i < net_entry_count; i++) {
-			if (strcmp(net_entries[i].category, cat) == 0 &&
-			    strcmp(net_entries[i].group, group) == 0 &&
-			    net_entries[i].subgroup[0] == '\0')
-				count++;
+		if (strcmp(net_entries[i].category, cat) == 0 &&
+		    strcmp(net_entries[i].group, group) == 0 &&
+		    net_entries[i].subgroup[0] == '\0')
+			count++;
 		}
 		return count;
 	} else {
@@ -4403,10 +4380,10 @@ netmenu_item_count(void)
 		int count = 1; /* "< Back" item */
 		int i;
 		for (i = 0; i < net_entry_count; i++) {
-			if (strcmp(net_entries[i].category, cat) == 0 &&
-			    strcmp(net_entries[i].group, group) == 0 &&
-			    strcmp(net_entries[i].subgroup, sub) == 0)
-				count++;
+		if (strcmp(net_entries[i].category, cat) == 0 &&
+		    strcmp(net_entries[i].group, group) == 0 &&
+		    strcmp(net_entries[i].subgroup, sub) == 0)
+			count++;
 		}
 		return count;
 	}
@@ -4422,8 +4399,15 @@ netmenu_cells_h(void)
 
 	if (need_rows < 1)
 		need_rows = 1;
-	if (need_rows > 23)
-		need_rows = 23;
+	/* Dynamic height: the menu grows with its content. Safety cap so it never
+	 * overflows the screen (anchored below the bar at m.y + cell_height). */
+	if (selmon) {
+		int cap = (selmon->m.height - cell_height) / cell_height;
+		if (cap < 3)
+			cap = 3;
+		if (need_rows + 2 > cap)
+			need_rows = cap - 2;
+	}
 	return need_rows + 2;
 }
 
@@ -4636,20 +4620,20 @@ netmenu_build_groups(void)
 
 	net_group_count = 0;
 	for (i = 0; i < net_entry_count; i++) {
-		if (net_current_category < 0 ||
-		    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
-			continue;
-		if (net_entries[i].group[0] == '\0')
-			continue; /* direct entries: no sub-topic */
-		for (gi = 0; gi < net_group_count; gi++) {
-			if (strcmp(net_groups[gi], net_entries[i].group) == 0)
-				break;
-		}
-		if (gi >= net_group_count && net_group_count < MAX_NET_CATEGORIES) {
-			strncpy(net_groups[net_group_count], net_entries[i].group, NET_CAT_LEN - 1);
-			net_groups[net_group_count][NET_CAT_LEN - 1] = '\0';
-			net_group_count++;
-		}
+	if (net_current_category < 0 ||
+	    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
+		continue;
+	if (net_entries[i].group[0] == '\0')
+		continue; /* direct entries: no sub-topic */
+	for (gi = 0; gi < net_group_count; gi++) {
+		if (strcmp(net_groups[gi], net_entries[i].group) == 0)
+			break;
+	}
+	if (gi >= net_group_count && net_group_count < MAX_NET_CATEGORIES) {
+		strncpy(net_groups[net_group_count], net_entries[i].group, NET_CAT_LEN - 1);
+		net_groups[net_group_count][NET_CAT_LEN - 1] = '\0';
+		net_group_count++;
+	}
 	}
 }
 
@@ -4665,23 +4649,23 @@ netmenu_build_subgroups(void)
 
 	net_subgroup_count = 0;
 	for (i = 0; i < net_entry_count; i++) {
-		if (net_current_category < 0 ||
-		    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
-			continue;
-		if (net_entries[i].group[0] == '\0' ||
-		    strcmp(net_entries[i].group, net_groups[net_current_group]) != 0)
-			continue;
-		if (net_entries[i].subgroup[0] == '\0')
-			continue;
-		for (gi = 0; gi < net_subgroup_count; gi++) {
-			if (strcmp(net_subgroups[gi], net_entries[i].subgroup) == 0)
-				break;
-		}
-		if (gi >= net_subgroup_count && net_subgroup_count < MAX_NET_CATEGORIES) {
-			strncpy(net_subgroups[net_subgroup_count], net_entries[i].subgroup, NET_CAT_LEN - 1);
-			net_subgroups[net_subgroup_count][NET_CAT_LEN - 1] = '\0';
-			net_subgroup_count++;
-		}
+	if (net_current_category < 0 ||
+	    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
+		continue;
+	if (net_entries[i].group[0] == '\0' ||
+	    strcmp(net_entries[i].group, net_groups[net_current_group]) != 0)
+		continue;
+	if (net_entries[i].subgroup[0] == '\0')
+		continue;
+	for (gi = 0; gi < net_subgroup_count; gi++) {
+		if (strcmp(net_subgroups[gi], net_entries[i].subgroup) == 0)
+			break;
+	}
+	if (gi >= net_subgroup_count && net_subgroup_count < MAX_NET_CATEGORIES) {
+		strncpy(net_subgroups[net_subgroup_count], net_entries[i].subgroup, NET_CAT_LEN - 1);
+		net_subgroups[net_subgroup_count][NET_CAT_LEN - 1] = '\0';
+		net_subgroup_count++;
+	}
 	}
 }
 
@@ -4943,12 +4927,14 @@ togglenetmenu(const Arg *arg)
 {
 	netmenu_active = !netmenu_active;
 	if (netmenu_active) {
-		/* Only one menu at a time: the audio and app menus share the screen
-		 * with this one, so close them to avoid overlap. */
+		/* Only one menu at a time: the audio, app and tray menus share the
+		 * screen with this one, so close them to avoid overlap. */
 		audiomenu_active = 0;
 		appmenu_active = 0;
+		traymenu_active = 0;
 		updatemenuaudio();
 		updateappmenu();
+		updatetraymenu();
 		net_password_reset();
 		net_current_category = -1;
 		net_current_group = -1;
@@ -4956,7 +4942,6 @@ togglenetmenu(const Arg *arg)
 		net_group_has_sub = 0;
 		net_group_count = 0;
 		net_subgroup_count = 0;
-		net_scroll_offset = 0;
 		net_selected_row = 0;
 		netmenu_last_sub = 0;
 		netmenu_refresh();
@@ -5040,7 +5025,6 @@ static int
 netmenukey(xkb_keysym_t sym)
 {
 	int item_count;
-	int content_rows = netmenu_cells_h() - 2;
 
 	/* Bluetooth pairing dialog: the session lives in bluetooth.c; it tells us
 	 * whether the key was consumed and whether a finished menu-initiated
@@ -5091,7 +5075,6 @@ netmenukey(xkb_keysym_t sym)
 			if (net_group_has_sub) {
 				/* Back to entities view */
 				net_current_subgroup = -1;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
@@ -5103,7 +5086,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
@@ -5111,7 +5093,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			}
@@ -5121,7 +5102,6 @@ netmenukey(xkb_keysym_t sym)
 			net_current_group = -1;
 			net_current_subgroup = -1;
 			net_group_has_sub = 0;
-			net_scroll_offset = 0;
 			net_selected_row = 0;
 			updatenetmenu();
 		} else {
@@ -5134,28 +5114,21 @@ netmenukey(xkb_keysym_t sym)
 	}
 
 	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
-		if (net_selected_row > 0) {
+		if (net_selected_row > 0)
 			net_selected_row--;
-		} else if (net_scroll_offset > 0) {
-			net_scroll_offset--;
-		}
 		updatenetmenu();
 		return 1;
 	}
 
 	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
-		int max_row = (item_count < content_rows) ? item_count - 1 : content_rows - 1;
-		if (net_selected_row < max_row && net_selected_row + net_scroll_offset < item_count - 1) {
+		if (net_selected_row < item_count - 1)
 			net_selected_row++;
-		} else if (net_selected_row + net_scroll_offset < item_count - 1) {
-			net_scroll_offset++;
-		}
 		updatenetmenu();
 		return 1;
 	}
 
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right || sym == XKB_KEY_l) {
-		int selected_idx = net_selected_row + net_scroll_offset;
+		int selected_idx = net_selected_row;
 
 		if (net_current_category < 0) {
 			/* Select a category */
@@ -5164,7 +5137,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				netmenu_build_groups();
 				if (net_group_count == 0)
@@ -5179,7 +5151,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
@@ -5187,7 +5158,6 @@ netmenukey(xkb_keysym_t sym)
 				if (target < net_group_count) {
 					net_current_group = target;
 					net_current_subgroup = -1;
-					net_scroll_offset = 0;
 					net_selected_row = 0;
 					netmenu_build_subgroups();
 					net_group_has_sub = (net_subgroup_count > 0);
@@ -5201,14 +5171,12 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
 				int target = selected_idx - 1; /* -1 for Back row */
 				if (target < net_subgroup_count) {
 					net_current_subgroup = target;
-					net_scroll_offset = 0;
 					net_selected_row = 0;
 					updatenetmenu();
 				}
@@ -5219,14 +5187,12 @@ netmenukey(xkb_keysym_t sym)
 				/* Back to sub-topics / entities / categories */
 				if (net_current_subgroup >= 0) {
 					net_current_subgroup = -1;
-					net_scroll_offset = 0;
 					net_selected_row = 0;
 					updatenetmenu();
 				} else if (net_group_count > 0) {
 					net_current_group = -1;
 					net_current_subgroup = -1;
 					net_group_has_sub = 0;
-					net_scroll_offset = 0;
 					net_selected_row = 0;
 					updatenetmenu();
 				} else {
@@ -5234,7 +5200,6 @@ netmenukey(xkb_keysym_t sym)
 					net_current_group = -1;
 					net_current_subgroup = -1;
 					net_group_has_sub = 0;
-					net_scroll_offset = 0;
 					net_selected_row = 0;
 					updatenetmenu();
 				}
@@ -5247,15 +5212,15 @@ netmenukey(xkb_keysym_t sym)
 				int i;
 
 				for (i = 0; i < net_entry_count; i++) {
-					if (strcmp(net_entries[i].category, cat) == 0 &&
-					    strcmp(net_entries[i].group, group) == 0 &&
-					    strcmp(net_entries[i].subgroup, sub) == 0) {
-						if (e_idx == target) {
-							netmenu_run(&net_entries[i]);
-							return 1;
-						}
-						e_idx++;
+				if (strcmp(net_entries[i].category, cat) == 0 &&
+				    strcmp(net_entries[i].group, group) == 0 &&
+				    strcmp(net_entries[i].subgroup, sub) == 0) {
+					if (e_idx == target) {
+						netmenu_run(&net_entries[i]);
+						return 1;
 					}
+					e_idx++;
+				}
 				}
 			}
 		}
@@ -5267,12 +5232,10 @@ netmenukey(xkb_keysym_t sym)
 			if (net_group_has_sub) {
 				/* Back to entities view */
 				net_current_subgroup = -1;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
 				net_current_subgroup = -1;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			}
@@ -5281,7 +5244,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			} else {
@@ -5289,7 +5251,6 @@ netmenukey(xkb_keysym_t sym)
 				net_current_group = -1;
 				net_current_subgroup = -1;
 				net_group_has_sub = 0;
-				net_scroll_offset = 0;
 				net_selected_row = 0;
 				updatenetmenu();
 			}
@@ -5299,7 +5260,6 @@ netmenukey(xkb_keysym_t sym)
 			net_current_group = -1;
 			net_current_subgroup = -1;
 			net_group_has_sub = 0;
-			net_scroll_offset = 0;
 			net_selected_row = 0;
 			updatenetmenu();
 		}
@@ -5369,8 +5329,15 @@ audiomenu_cells_h(void)
 
 	if (need_rows < 1)
 		need_rows = 1;
-	if (need_rows > 23)
-		need_rows = 23;
+	/* Dynamic height: the menu grows with its content. Safety cap so it never
+	 * overflows the screen (anchored below the bar at m.y + cell_height). */
+	if (selmon) {
+		int cap = (selmon->m.height - cell_height) / cell_height;
+		if (cap < 3)
+			cap = 3;
+		if (need_rows + 2 > cap)
+			need_rows = cap - 2;
+	}
 	return need_rows + 2;
 }
 
@@ -5828,19 +5795,20 @@ togglaudiomenu(const Arg *arg)
 	(void)arg;
 	audiomenu_active = !audiomenu_active;
 	if (audiomenu_active) {
-		/* Only one menu at a time: close the network and app menus so they
-		 * don't overlap this one on screen. */
+		/* Only one menu at a time: close the network, app and tray menus so
+		 * they don't overlap this one on screen. */
 		netmenu_active = 0;
 		appmenu_active = 0;
+		traymenu_active = 0;
 		updatenetmenu();
 		updateappmenu();
+		updatetraymenu();
 		audio_current_category = -1;
 		audio_current_group = -1;
 		audio_current_subgroup = -1;
 		audio_group_has_sub = 0;
 		audio_group_count = 0;
 		audio_subgroup_count = 0;
-		audio_scroll_offset = 0;
 		audio_selected_row = 0;
 		audio_refresh();
 	} else {
@@ -5877,14 +5845,12 @@ audio_run(AudioEntry *e)
 static int
 audiomenukey(xkb_keysym_t sym)
 {
-	int content_rows = audiomenu_cells_h() - 2;
 	int item_count = audiomenu_item_count();
 
 	if (sym == XKB_KEY_Escape) {
 		if (audio_current_subgroup >= 0) {
 			if (audio_group_has_sub) {
 				audio_current_subgroup = -1;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
@@ -5895,7 +5861,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
@@ -5903,7 +5868,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			}
@@ -5912,7 +5876,6 @@ audiomenukey(xkb_keysym_t sym)
 			audio_current_group = -1;
 			audio_current_subgroup = -1;
 			audio_group_has_sub = 0;
-			audio_scroll_offset = 0;
 			audio_selected_row = 0;
 			updatemenuaudio();
 		} else {
@@ -5924,28 +5887,21 @@ audiomenukey(xkb_keysym_t sym)
 	}
 
 	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
-		if (audio_selected_row > 0) {
+		if (audio_selected_row > 0)
 			audio_selected_row--;
-		} else if (audio_scroll_offset > 0) {
-			audio_scroll_offset--;
-		}
 		updatemenuaudio();
 		return 1;
 	}
 
 	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
-		int max_row = (item_count < content_rows) ? item_count - 1 : content_rows - 1;
-		if (audio_selected_row < max_row && audio_selected_row + audio_scroll_offset < item_count - 1) {
+		if (audio_selected_row < item_count - 1)
 			audio_selected_row++;
-		} else if (audio_selected_row + audio_scroll_offset < item_count - 1) {
-			audio_scroll_offset++;
-		}
 		updatemenuaudio();
 		return 1;
 	}
 
 	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right || sym == XKB_KEY_l) {
-		int selected_idx = audio_selected_row + audio_scroll_offset;
+		int selected_idx = audio_selected_row;
 
 		if (audio_current_category < 0) {
 			/* Select a category */
@@ -5954,7 +5910,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				audiomenu_build_groups();
 				if (audio_group_count == 0)
@@ -5969,7 +5924,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
@@ -5977,7 +5931,6 @@ audiomenukey(xkb_keysym_t sym)
 				if (target < audio_group_count) {
 					audio_current_group = target;
 					audio_current_subgroup = -1;
-					audio_scroll_offset = 0;
 					audio_selected_row = 0;
 					audiomenu_build_subgroups();
 					audio_group_has_sub = (audio_subgroup_count > 0);
@@ -5991,14 +5944,12 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
 				int target = selected_idx - 1; /* -1 for Back row */
 				if (target < audio_subgroup_count) {
 					audio_current_subgroup = target;
-					audio_scroll_offset = 0;
 					audio_selected_row = 0;
 					updatemenuaudio();
 				}
@@ -6009,14 +5960,12 @@ audiomenukey(xkb_keysym_t sym)
 				/* Back to sub-topics / entities / categories */
 				if (audio_current_subgroup >= 0) {
 					audio_current_subgroup = -1;
-					audio_scroll_offset = 0;
 					audio_selected_row = 0;
 					updatemenuaudio();
 				} else if (audio_group_count > 0) {
 					audio_current_group = -1;
 					audio_current_subgroup = -1;
 					audio_group_has_sub = 0;
-					audio_scroll_offset = 0;
 					audio_selected_row = 0;
 					updatemenuaudio();
 				} else {
@@ -6024,7 +5973,6 @@ audiomenukey(xkb_keysym_t sym)
 					audio_current_group = -1;
 					audio_current_subgroup = -1;
 					audio_group_has_sub = 0;
-					audio_scroll_offset = 0;
 					audio_selected_row = 0;
 					updatemenuaudio();
 				}
@@ -6056,7 +6004,6 @@ audiomenukey(xkb_keysym_t sym)
 		if (audio_current_subgroup >= 0) {
 			if (audio_group_has_sub) {
 				audio_current_subgroup = -1;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
@@ -6067,7 +6014,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			} else {
@@ -6075,7 +6021,6 @@ audiomenukey(xkb_keysym_t sym)
 				audio_current_group = -1;
 				audio_current_subgroup = -1;
 				audio_group_has_sub = 0;
-				audio_scroll_offset = 0;
 				audio_selected_row = 0;
 				updatemenuaudio();
 			}
@@ -6084,7 +6029,6 @@ audiomenukey(xkb_keysym_t sym)
 			audio_current_group = -1;
 			audio_current_subgroup = -1;
 			audio_group_has_sub = 0;
-			audio_scroll_offset = 0;
 			audio_selected_row = 0;
 			updatemenuaudio();
 		}
@@ -6375,12 +6319,11 @@ updatemenuaudio(void)
 						loading[li], text_color);
 				}
 			}
-			for (row = 0; row < crows && row + audio_scroll_offset < audio_category_count; row++) {
-				int item_idx = row + audio_scroll_offset;
+			for (row = 0; row < crows && row < audio_category_count; row++) {
 				int text_y = (row + 1) * cell_height;
 				int is_selected = (row == audio_selected_row);
 				uint32_t row_fg = is_selected ? highlight_fg : text_color;
-				const char *cat_name = audio_categories[item_idx];
+				const char *cat_name = audio_categories[row];
 
 				if (is_selected) {
 					int px, py;
@@ -6428,27 +6371,25 @@ updatemenuaudio(void)
 
 			/* Show the sub-topics */
 			for (gi = 0; gi < audio_group_count && displayed < crows - 1; gi++) {
-				if (gi >= audio_scroll_offset) {
-					int text_y = (displayed + 2) * cell_height;
-					const char *gn = audio_groups[gi];
+	int text_y = (displayed + 2) * cell_height;
+	const char *gn = audio_groups[gi];
 
-					is_selected = (displayed + 1 == audio_selected_row);
-					row_fg = is_selected ? highlight_fg : text_color;
+	is_selected = (displayed + 1 == audio_selected_row);
+	row_fg = is_selected ? highlight_fg : text_color;
 
-					if (is_selected) {
-						int px, py;
-						for (py = text_y; py < text_y + cell_height; py++) {
-							for (px = cell_width; px < menu_width - cell_width; px++) {
-								pixels[py * menu_width + px] = highlight_bg;
-							}
-						}
-					}
+	if (is_selected) {
+		int px, py;
+		for (py = text_y; py < text_y + cell_height; py++) {
+			for (px = cell_width; px < menu_width - cell_width; px++) {
+				pixels[py * menu_width + px] = highlight_bg;
+			}
+		}
+	}
 
-					render_row_text(pixels, menu_width, menu_height, text_y,
-						gn, row_fg, mtext, is_selected,
-						audio_menu_marquee_px, &audio_menu_marquee_needed);
-					displayed++;
-				}
+	render_row_text(pixels, menu_width, menu_height, text_y,
+		gn, row_fg, mtext, is_selected,
+		audio_menu_marquee_px, &audio_menu_marquee_needed);
+	displayed++;
 			}
 		} else if (audio_group_has_sub && audio_current_subgroup < 0) {
 			/* Show entities (each sink/source) of the selected sub-topic */
@@ -6483,27 +6424,25 @@ updatemenuaudio(void)
 
 			/* Show the entities */
 			for (gi = 0; gi < audio_subgroup_count && displayed < crows - 1; gi++) {
-				if (gi >= audio_scroll_offset) {
-					int text_y = (displayed + 2) * cell_height;
-					const char *sn = audio_subgroups[gi];
+	int text_y = (displayed + 2) * cell_height;
+	const char *sn = audio_subgroups[gi];
 
-					is_selected = (displayed + 1 == audio_selected_row);
-					row_fg = is_selected ? highlight_fg : text_color;
+	is_selected = (displayed + 1 == audio_selected_row);
+	row_fg = is_selected ? highlight_fg : text_color;
 
-					if (is_selected) {
-						int px, py;
-						for (py = text_y; py < text_y + cell_height; py++) {
-							for (px = cell_width; px < menu_width - cell_width; px++) {
-								pixels[py * menu_width + px] = highlight_bg;
-							}
-						}
-					}
+	if (is_selected) {
+		int px, py;
+		for (py = text_y; py < text_y + cell_height; py++) {
+			for (px = cell_width; px < menu_width - cell_width; px++) {
+				pixels[py * menu_width + px] = highlight_bg;
+			}
+		}
+	}
 
-					render_row_text(pixels, menu_width, menu_height, text_y,
-						sn, row_fg, mtext, is_selected,
-						audio_menu_marquee_px, &audio_menu_marquee_needed);
-					displayed++;
-				}
+	render_row_text(pixels, menu_width, menu_height, text_y,
+		sn, row_fg, mtext, is_selected,
+		audio_menu_marquee_px, &audio_menu_marquee_needed);
+	displayed++;
 			}
 		} else {
 			/* Show actions of the selected sub-topic (direct) or of a specific
@@ -6511,7 +6450,6 @@ updatemenuaudio(void)
 			const char *cat = audio_categories[audio_current_category];
 			const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
 			const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
-			int e_idx = 0;
 			int displayed = 0;
 			int is_selected;
 			uint32_t row_fg;
@@ -6545,7 +6483,6 @@ updatemenuaudio(void)
 				if (strcmp(audio_entries[i].category, cat) == 0 &&
 				    strcmp(audio_entries[i].group, group) == 0 &&
 				    strcmp(audio_entries[i].subgroup, sub) == 0) {
-					if (e_idx >= audio_scroll_offset) {
 						int text_y = (displayed + 2) * cell_height;
 						const char *nm = audio_entries[i].name;
 
@@ -6565,8 +6502,6 @@ updatemenuaudio(void)
 							nm, row_fg, mtext, is_selected,
 							audio_menu_marquee_px, &audio_menu_marquee_needed);
 						displayed++;
-					}
-					e_idx++;
 				}
 			}
 		}
@@ -10916,12 +10851,11 @@ updatenetmenu(void)
 						loading[li], text_color);
 				}
 			}
-			for (row = 0; row < crows && row + net_scroll_offset < net_category_count; row++) {
-				int item_idx = row + net_scroll_offset;
+			for (row = 0; row < crows && row < net_category_count; row++) {
 				int text_y = (row + 1) * cell_height;
 				int is_selected = (row == net_selected_row);
 				uint32_t row_fg = is_selected ? highlight_fg : text_color;
-				const char *cat_name = net_categories[item_idx];
+				const char *cat_name = net_categories[row];
 
 				if (is_selected) {
 					int px, py;
@@ -10969,27 +10903,25 @@ updatenetmenu(void)
 
 			/* Show the sub-topics */
 			for (gi = 0; gi < net_group_count && displayed < crows - 1; gi++) {
-				if (gi >= net_scroll_offset) {
-					int text_y = (displayed + 2) * cell_height;
-					const char *gn = net_groups[gi];
+				int text_y = (displayed + 2) * cell_height;
+				const char *gn = net_groups[gi];
 
-					is_selected = (displayed + 1 == net_selected_row);
-					row_fg = is_selected ? highlight_fg : text_color;
+				is_selected = (displayed + 1 == net_selected_row);
+				row_fg = is_selected ? highlight_fg : text_color;
 
-					if (is_selected) {
-						int px, py;
-						for (py = text_y; py < text_y + cell_height; py++) {
-							for (px = cell_width; px < menu_width - cell_width; px++) {
-								pixels[py * menu_width + px] = highlight_bg;
-							}
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
 						}
 					}
-
-					render_row_text(pixels, menu_width, menu_height, text_y,
-						gn, row_fg, mtext, is_selected,
-						netmenu_marquee_px, &netmenu_marquee_needed);
-					displayed++;
 				}
+
+				render_row_text(pixels, menu_width, menu_height, text_y,
+					gn, row_fg, mtext, is_selected,
+					netmenu_marquee_px, &netmenu_marquee_needed);
+				displayed++;
 			}
 		} else if (net_group_has_sub && net_current_subgroup < 0) {
 			/* Show entities (each network/device) of the selected sub-topic */
@@ -11024,27 +10956,25 @@ updatenetmenu(void)
 
 			/* Show the entities */
 			for (gi = 0; gi < net_subgroup_count && displayed < crows - 1; gi++) {
-				if (gi >= net_scroll_offset) {
-					int text_y = (displayed + 2) * cell_height;
-					const char *sn = net_subgroups[gi];
+				int text_y = (displayed + 2) * cell_height;
+				const char *sn = net_subgroups[gi];
 
-					is_selected = (displayed + 1 == net_selected_row);
-					row_fg = is_selected ? highlight_fg : text_color;
+				is_selected = (displayed + 1 == net_selected_row);
+				row_fg = is_selected ? highlight_fg : text_color;
 
-					if (is_selected) {
-						int px, py;
-						for (py = text_y; py < text_y + cell_height; py++) {
-							for (px = cell_width; px < menu_width - cell_width; px++) {
-								pixels[py * menu_width + px] = highlight_bg;
-							}
+				if (is_selected) {
+					int px, py;
+					for (py = text_y; py < text_y + cell_height; py++) {
+						for (px = cell_width; px < menu_width - cell_width; px++) {
+							pixels[py * menu_width + px] = highlight_bg;
 						}
 					}
-
-					render_row_text(pixels, menu_width, menu_height, text_y,
-						sn, row_fg, mtext, is_selected,
-						netmenu_marquee_px, &netmenu_marquee_needed);
-					displayed++;
 				}
+
+				render_row_text(pixels, menu_width, menu_height, text_y,
+					sn, row_fg, mtext, is_selected,
+					netmenu_marquee_px, &netmenu_marquee_needed);
+				displayed++;
 			}
 		} else {
 			/* Show actions of the selected sub-topic (direct) or of a specific
@@ -11052,7 +10982,6 @@ updatenetmenu(void)
 			const char *cat = net_categories[net_current_category];
 			const char *group = (net_group_count == 0) ? "" : net_groups[net_current_group];
 			const char *sub = (net_current_subgroup >= 0) ? net_subgroups[net_current_subgroup] : "";
-			int e_idx = 0;
 			int displayed = 0;
 			int is_selected;
 			uint32_t row_fg;
@@ -11086,7 +11015,6 @@ updatenetmenu(void)
 				if (strcmp(net_entries[i].category, cat) == 0 &&
 				    strcmp(net_entries[i].group, group) == 0 &&
 				    strcmp(net_entries[i].subgroup, sub) == 0) {
-					if (e_idx >= net_scroll_offset) {
 						int text_y = (displayed + 2) * cell_height;
 						const char *nm = net_entries[i].name;
 
@@ -11106,8 +11034,6 @@ updatenetmenu(void)
 							nm, row_fg, mtext, is_selected,
 							netmenu_marquee_px, &netmenu_marquee_needed);
 						displayed++;
-					}
-					e_idx++;
 				}
 			}
 		}
@@ -12524,7 +12450,6 @@ tray_enter_row(int row)
 		tray_cur_node = p->menuroot;
 		tray_level = 1;
 		tray_row = 0;
-		tray_scroll = 0;
 		/* Resolve props here (input handler, safe to block) so the menu path
 		 * is known before deciding between dbusmenu vs "Abrir". */
 		tray_resolve_one(p);
@@ -12576,7 +12501,6 @@ tray_enter_row(int row)
 			tray_cur_node = child;
 			tray_level++;
 			tray_row = 0;
-			tray_scroll = 0;
 			updatetraymenu();
 			return;
 		}
@@ -12609,9 +12533,18 @@ traymenu_cells_h(void)
 		items = tray_items_count;
 	else
 		items = tray_visible_count();
-	if (items < 12)
-		return items + 2;
-	return 14;
+	if (items < 1)
+		items = 1;
+	/* Dynamic height: the menu grows with its content. Safety cap so it never
+	 * overflows the screen (anchored below the bar at m.y + cell_height). */
+	if (selmon) {
+		int cap = (selmon->m.height - cell_height) / cell_height;
+		if (cap < 1)
+			cap = 1;
+		if (items + 2 > cap)
+			items = cap - 2;
+	}
+	return items + 2;
 }
 
 /* ---- rendering ---- */
@@ -12757,10 +12690,6 @@ updatetraymenu(void)
 		TrayItem *p;
 		int r = 0;
 		for (p = tray_items; p; p = p->next) {
-			if (r < tray_scroll) {
-				r++;
-				continue;
-			}
 			if (cur_row >= content_rows)
 				break;
 			tray_menu_row(pixels, menu_width, menu_height, cur_row,
@@ -12778,15 +12707,11 @@ updatetraymenu(void)
 		     ch = ch->sibling) {
 			if (!ch->is_visible)
 				continue;
-			if (r < tray_scroll) {
-				r++;
-				continue;
-			}
 			if (cur_row >= content_rows)
 				break;
 			if (ch->is_sep) {
 				int ci;
-				int text_y = (r - tray_scroll + 1) * cell_height;
+				int text_y = (r + 1) * cell_height;
 				for (ci = 0; ci < menu_width / cell_width - 2; ci++)
 					render_char_to_buffer(pixels, menu_width, menu_height,
 						cell_width + ci * cell_width, text_y, 0x2500,
@@ -12824,7 +12749,6 @@ tray_menu_reset(void)
 	traymenu_active = 0;
 	tray_level = 0;
 	tray_row = 0;
-	tray_scroll = 0;
 	tray_cur_item = NULL;
 	tray_cur_node = NULL;
 }
@@ -12838,10 +12762,17 @@ toggletraymenu(const Arg *arg)
 		updatebars();
 		return;
 	}
+	/* Only one menu at a time: the network, audio and app menus share the
+	 * screen with this one, so close them to avoid overlap. */
 	traymenu_active = 1;
+	netmenu_active = 0;
+	audiomenu_active = 0;
+	appmenu_active = 0;
+	updatenetmenu();
+	updatemenuaudio();
+	updateappmenu();
 	tray_level = 0;
 	tray_row = 0;
-	tray_scroll = 0;
 	tray_cur_item = NULL;
 	tray_cur_node = NULL;
 	updatetraymenu();
@@ -12851,7 +12782,7 @@ toggletraymenu(const Arg *arg)
 static int
 traymenu_key(xkb_keysym_t sym)
 {
-	int items, max_row;
+	int items;
 
 	if (!traymenu_active)
 		return 0;
@@ -12861,7 +12792,6 @@ traymenu_key(xkb_keysym_t sym)
 		if (tray_level > 0) {
 			tray_level--;
 			tray_row = 0;
-			tray_scroll = 0;
 		} else {
 			tray_menu_reset();
 		}
@@ -12873,7 +12803,6 @@ traymenu_key(xkb_keysym_t sym)
 		if (tray_level > 0) {
 			tray_level--;
 			tray_row = 0;
-			tray_scroll = 0;
 			updatetraymenu();
 		}
 		return 1;
@@ -12885,13 +12814,8 @@ traymenu_key(xkb_keysym_t sym)
 		return 1;
 	}
 	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
-		max_row = items < 12 ? items - 1 : 11;
-		if (max_row < 0)
-			max_row = 0;
-		if (tray_row < max_row)
+		if (tray_row < items - 1)
 			tray_row++;
-		else if (items > 0 && tray_scroll < items - max_row - 1)
-			tray_scroll++;
 		updatetraymenu();
 		return 1;
 	}
