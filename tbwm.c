@@ -11940,7 +11940,50 @@ tray_prop_get_string(DBusMessage *reply)
 	return out ? strdup(out) : NULL;
 }
 
-/* synchronous (iface, prop) Get on the item; caller frees the reply */
+/* Extract the title field from a ToolTip property reply. The ToolTip is a
+ * (sa(iiay)ss) struct: icon name (s), pixmap array (a(iiay)), title (s),
+ * subtitle (s). Electron/Chromium leaves Title empty and puts the app name
+ * here, so this is the display name for Discord and friends. */
+static char *
+tray_prop_get_tooltip_title(DBusMessage *reply)
+{
+	DBusMessageIter args, variant, st;
+	int i;
+
+	if (!reply)
+		return NULL;
+	if (!(dbus_message_iter_init(reply, &args) &&
+	    dbus_message_iter_get_arg_type(&args) == DBUS_TYPE_VARIANT))
+		return NULL;
+	dbus_message_iter_recurse(&args, &variant);
+	if (dbus_message_iter_get_arg_type(&variant) != DBUS_TYPE_STRUCT)
+		return NULL;
+	dbus_message_iter_recurse(&variant, &st);
+
+	/* field 0: icon name (s) */
+	if (dbus_message_iter_get_arg_type(&st) != DBUS_TYPE_STRING)
+		return NULL;
+	dbus_message_iter_next(&st);
+	/* field 1: pixmap array (a(iiay)) */
+	if (dbus_message_iter_get_arg_type(&st) != DBUS_TYPE_ARRAY)
+		return NULL;
+	dbus_message_iter_next(&st);
+	/* field 2: title (s) */
+	if (dbus_message_iter_get_arg_type(&st) != DBUS_TYPE_STRING)
+		return NULL;
+	{
+		const char *title = NULL;
+		dbus_message_iter_get_basic(&st, &title);
+		if (title && *title) {
+			char *out = strdup(title);
+			for (i = 0; out && out[i]; i++)
+				if (out[i] == '\n' || out[i] == '\t')
+					out[i] = ' ';
+			return out;
+		}
+	}
+	return NULL;
+}
 static DBusMessage *
 tray_prop_get(TrayItem *it, const char *prop)
 {
@@ -12157,7 +12200,18 @@ retry:
 	r = tray_prop_get(it, "Title");
 	title = tray_prop_get_string(r);
 	if (r) dbus_message_unref(r);
-	if (!title) {
+	if (!title || !*title) {
+		/* Chromium/Electron (Discord) leaves Title empty; use the ToolTip
+		 * title first, then the Id as a last resort. */
+		free(title);
+		title = NULL;
+		r = tray_prop_get(it, "ToolTip");
+		title = tray_prop_get_tooltip_title(r);
+		if (r) dbus_message_unref(r);
+	}
+	if (!title || !*title) {
+		free(title);
+		title = NULL;
 		r = tray_prop_get(it, "Id");
 		title = tray_prop_get_string(r);
 		if (r) dbus_message_unref(r);
