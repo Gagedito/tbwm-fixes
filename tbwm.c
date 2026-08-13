@@ -12268,6 +12268,171 @@ tray_send_empty_reply(DBusConnection *conn, DBusMessage *msg)
 	}
 }
 
+/* ---- watcher introspection / properties (Chromium needs these ---- */
+
+/* Introspection XML for /StatusNotifierWatcher. Chromium/Electron validates
+ * the watcher's interface before registering, so the empty default libdbus
+ * output would block apps like Discord. */
+static const char tray_watcher_introspect_xml[] =
+	"<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object "
+	"Introspection 1.0//EN\"\n"
+	"\"http://www.freedesktop.org/standards/dbus/1.0/"
+	"introspect.dtd\">\n"
+	"<node>\n"
+	"  <interface name=\"org.kde.StatusNotifierWatcher\">\n"
+	"    <method name=\"RegisterStatusNotifierItem\">\n"
+	"      <arg name=\"service\" type=\"s\" direction=\"in\"/>\n"
+	"    </method>\n"
+	"    <method name=\"RegisterStatusNotifierHost\">\n"
+	"      <arg name=\"service\" type=\"s\" direction=\"in\"/>\n"
+	"    </method>\n"
+	"    <method name=\"GetItems\">\n"
+	"      <arg name=\"items\" type=\"as\" direction=\"out\"/>\n"
+	"    </method>\n"
+	"    <signal name=\"StatusNotifierItemRegistered\">\n"
+	"      <arg name=\"service\" type=\"s\"/>\n"
+	"    </signal>\n"
+	"    <signal name=\"StatusNotifierItemUnregistered\">\n"
+	"      <arg name=\"service\" type=\"s\"/>\n"
+	"    </signal>\n"
+	"    <signal name=\"StatusNotifierHostRegistered\">\n"
+	"      <arg name=\"service\" type=\"s\"/>\n"
+	"    </signal>\n"
+	"    <signal name=\"StatusNotifierHostUnregistered\">\n"
+	"      <arg name=\"service\" type=\"s\"/>\n"
+	"    </signal>\n"
+	"    <property name=\"RegisteredStatusNotifierItems\" "
+	"type=\"as\" access=\"read\"/>\n"
+	"    <property name=\"IsStatusNotifierHostRegistered\" "
+	"type=\"b\" access=\"read\"/>\n"
+	"    <property name=\"ProtocolVersion\" type=\"i\" access=\"read\"/>\n"
+	"  </interface>\n"
+	"</node>\n";
+
+/* Append the registered services as an "as" array to the iterator. */
+static void
+tray_watcher_append_items(DBusMessageIter *it)
+{
+	TrayItem *p;
+	DBusMessageIter array;
+
+	dbus_message_iter_open_container(it, DBUS_TYPE_ARRAY,
+		DBUS_TYPE_STRING_AS_STRING, &array);
+	for (p = tray_items; p; p = p->next) {
+		if (p->dead || !p->busname || !p->busname[0])
+			continue;
+		dbus_message_iter_append_basic(&array, DBUS_TYPE_STRING, &p->busname);
+	}
+	dbus_message_iter_close_container(it, &array);
+}
+
+/* Send an org.freedesktop.DBus.Properties reply with one property in a
+ * variant. Returns 1 on success (reply sent or unhandled prop reported). */
+static void
+tray_watcher_prop_get(DBusConnection *conn, DBusMessage *msg,
+                      const char *interface, const char *property)
+{
+	DBusMessage *reply;
+	DBusMessageIter args, variant;
+	int is_watcher_iface = (strcmp(interface, "org.kde.StatusNotifierWatcher") == 0 ||
+		strcmp(interface, "org.freedesktop.StatusNotifierWatcher") == 0 ||
+		strcmp(interface, "org.freedesktop.DBus.Properties") == 0 ||
+		(interface && interface[0] == '\0'));
+	uint32_t proto = 0;
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return;
+	dbus_message_iter_init_append(reply, &args);
+
+	if (is_watcher_iface && strcmp(property, "IsStatusNotifierHostRegistered") == 0) {
+		dbus_bool_t b = TRUE;
+		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "b", &variant);
+		dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &b);
+		dbus_message_iter_close_container(&args, &variant);
+	} else if (is_watcher_iface && strcmp(property, "RegisteredStatusNotifierItems") == 0) {
+		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "as", &variant);
+		tray_watcher_append_items(&variant);
+		dbus_message_iter_close_container(&args, &variant);
+	} else if (is_watcher_iface && strcmp(property, "ProtocolVersion") == 0) {
+		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "i", &variant);
+		dbus_message_iter_append_basic(&variant, DBUS_TYPE_INT32, &proto);
+		dbus_message_iter_close_container(&args, &variant);
+	} else {
+		dbus_message_unref(reply);
+		tray_send_error(conn, msg, "org.freedesktop.DBus.Error.UnknownProperty",
+			"unknown property");
+		return;
+	}
+	dbus_connection_send(conn, reply, NULL);
+	dbus_message_unref(reply);
+}
+
+static void
+tray_watcher_prop_get_all(DBusConnection *conn, DBusMessage *msg, const char *interface)
+{
+	DBusMessage *reply;
+	DBusMessageIter args, dict, entry;
+	dbus_bool_t b = TRUE;
+	uint32_t proto = 0;
+	int is_watcher_iface = (strcmp(interface, "org.kde.StatusNotifierWatcher") == 0 ||
+		strcmp(interface, "org.freedesktop.StatusNotifierWatcher") == 0 ||
+		(interface && interface[0] == '\0'));
+
+	reply = dbus_message_new_method_return(msg);
+	if (!reply)
+		return;
+	dbus_message_iter_init_append(reply, &args);
+	dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
+		DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING DBUS_TYPE_STRING_AS_STRING
+		DBUS_TYPE_VARIANT_AS_STRING DBUS_DICT_ENTRY_END_CHAR_AS_STRING,
+		&dict);
+	if (is_watcher_iface) {
+		/* RegisteredStatusNotifierItems (as) */
+		{
+			DBusMessageIter v;
+			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+			{
+				const char *key = "RegisteredStatusNotifierItems";
+				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
+			}
+			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "as", &v);
+			tray_watcher_append_items(&v);
+			dbus_message_iter_close_container(&entry, &v);
+			dbus_message_iter_close_container(&dict, &entry);
+		}
+		/* IsStatusNotifierHostRegistered (b) */
+		{
+			DBusMessageIter v;
+			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+			{
+				const char *key = "IsStatusNotifierHostRegistered";
+				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
+			}
+			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "b", &v);
+			dbus_message_iter_append_basic(&v, DBUS_TYPE_BOOLEAN, &b);
+			dbus_message_iter_close_container(&entry, &v);
+			dbus_message_iter_close_container(&dict, &entry);
+		}
+		/* ProtocolVersion (i) */
+		{
+			DBusMessageIter v;
+			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
+			{
+				const char *key = "ProtocolVersion";
+				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
+			}
+			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "i", &v);
+			dbus_message_iter_append_basic(&v, DBUS_TYPE_INT32, &proto);
+			dbus_message_iter_close_container(&entry, &v);
+			dbus_message_iter_close_container(&dict, &entry);
+		}
+	}
+	dbus_message_iter_close_container(&args, &dict);
+	dbus_connection_send(conn, reply, NULL);
+	dbus_message_unref(reply);
+}
+
 static DBusHandlerResult
 tray_watcher_handler(DBusConnection *conn, DBusMessage *msg, void *data)
 {
@@ -12318,6 +12483,57 @@ tray_watcher_handler(DBusConnection *conn, DBusMessage *msg, void *data)
 	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
 	    "RegisterStatusNotifierHost")) {
 		tray_send_empty_reply(conn, msg);
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
+	    "GetItems")) {
+		DBusMessage *reply = dbus_message_new_method_return(msg);
+		if (reply) {
+			DBusMessageIter args;
+			dbus_message_iter_init_append(reply, &args);
+			tray_watcher_append_items(&args);
+			dbus_connection_send(conn, reply, NULL);
+			dbus_message_unref(reply);
+		}
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	/* Properties interface: Chromium/Electron reads
+	 * IsStatusNotifierHostRegistered before it will register an item. */
+	if (dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "Get")) {
+		const char *interface = NULL, *property = NULL;
+		if (dbus_message_get_args(msg, NULL,
+		    DBUS_TYPE_STRING, &interface,
+		    DBUS_TYPE_STRING, &property,
+		    DBUS_TYPE_INVALID)) {
+			tray_watcher_prop_get(conn, msg, interface, property);
+			return DBUS_HANDLER_RESULT_HANDLED;
+		}
+		tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "bad args");
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	if (dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "GetAll")) {
+		const char *interface = NULL;
+		if (dbus_message_get_args(msg, NULL,
+		    DBUS_TYPE_STRING, &interface,
+		    DBUS_TYPE_INVALID)) {
+			tray_watcher_prop_get_all(conn, msg, interface);
+			return DBUS_HANDLER_RESULT_HANDLED;
+		}
+		tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "bad args");
+		return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	/* Introspectable: libdbus registers the object path so requests arrive
+	 * here; reply with the full interface XML ourselves. */
+	if (dbus_message_is_method_call(msg, "org.freedesktop.DBus.Introspectable",
+	    "Introspect")) {
+		DBusMessage *reply = dbus_message_new_method_return(msg);
+		if (reply) {
+			const char *xml = tray_watcher_introspect_xml;
+			dbus_message_append_args(reply, DBUS_TYPE_STRING, &xml,
+				DBUS_TYPE_INVALID);
+			dbus_connection_send(conn, reply, NULL);
+			dbus_message_unref(reply);
+		}
 		return DBUS_HANDLER_RESULT_HANDLED;
 	}
 	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;

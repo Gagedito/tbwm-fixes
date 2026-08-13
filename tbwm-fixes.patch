@@ -1717,7 +1717,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..e0538ff 100644
+index a1e049d..793f996 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -1,5 +1,6 @@
@@ -10085,7 +10085,7 @@ index a1e049d..e0538ff 100644
  ";;;; ==================== STATUS BAR ====================\n"
  "\n"
  ";; Show date and time in status bar\n"
-@@ -6328,991 +9503,3523 @@ static const char *default_config_parts[] = {
+@@ -6328,991 +9503,3739 @@ static const char *default_config_parts[] = {
  ";; App menu\n"
  "(bind-key \"M-x\" (lambda () (toggle-appmenu)))\n"
  "\n"
@@ -11639,6 +11639,13 @@ index a1e049d..e0538ff 100644
 +						}
 +					}
 +				}
++
++				for (bi = 0; back[bi] && bi < mtext; bi++) {
++					render_char_to_buffer(pixels, menu_width, menu_height,
++						cell_width + bi * cell_width, text_y,
++						back[bi], row_fg);
++				}
++			}
  
 -";; Fullscreen and floating\n"
 -"(bind-key \"M-f\" (lambda () (toggle-fullscreen)))\n"
@@ -11665,12 +11672,13 @@ index a1e049d..e0538ff 100644
 -"(bind-key \"M-S-ampersand\" (lambda () (tag-window 7)))\n"
 -"(bind-key \"M-S-asterisk\" (lambda () (tag-window 8)))\n"
 -"(bind-key \"M-S-parenleft\" (lambda () (tag-window 9)))\n",
-+				for (bi = 0; back[bi] && bi < mtext; bi++) {
-+					render_char_to_buffer(pixels, menu_width, menu_height,
-+						cell_width + bi * cell_width, text_y,
-+						back[bi], row_fg);
-+				}
-+			}
++			/* Show actions in this sub-topic / entity */
++			for (i = 0; i < net_entry_count && displayed < crows - 1; i++) {
++				if (strcmp(net_entries[i].category, cat) == 0 &&
++				    strcmp(net_entries[i].group, group) == 0 &&
++				    strcmp(net_entries[i].subgroup, sub) == 0) {
++						int text_y = (displayed + 2) * cell_height;
++						const char *nm = net_entries[i].name;
  
 -";; Refresh layout\n"
 -"(bind-key \"M-S-r\" (lambda () (refresh)))\n"
@@ -11786,14 +11794,6 @@ index a1e049d..e0538ff 100644
 -"\n"
 -"(log \"TurboWM config loaded!\")\n",
 -NULL
-+			/* Show actions in this sub-topic / entity */
-+			for (i = 0; i < net_entry_count && displayed < crows - 1; i++) {
-+				if (strcmp(net_entries[i].category, cat) == 0 &&
-+				    strcmp(net_entries[i].group, group) == 0 &&
-+				    strcmp(net_entries[i].subgroup, sub) == 0) {
-+						int text_y = (displayed + 2) * cell_height;
-+						const char *nm = net_entries[i].name;
-+
 +						is_selected = (displayed + 1 == net_selected_row);
 +						row_fg = is_selected ? highlight_fg : text_color;
 +
@@ -11970,9 +11970,16 @@ index a1e049d..e0538ff 100644
 -		s7_eval_c_string(sc, "(bind-key \"M-S-Down\" (lambda () (swap-dir DIR-DOWN)))");
 -	} 
 -}
--
++	snprintf(path, sizeof(path), "%s/theme.scm", dir);
++	mkdir(dir, 0755);
+ 
 -/* ==================== END SCHEME BINDINGS ==================== */
--
++f = fopen(path, "w");
++	if (!f) {
++		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
++		return;
++	}
+ 
 -static const char *foot_config =
 -"# tbwm foot configuration\n"
 -"\n"
@@ -12006,15 +12013,6 @@ index a1e049d..e0538ff 100644
 -"\n"
 -"[tweak]\n"
 -"font-monospace-warn=no\n";
-+	snprintf(path, sizeof(path), "%s/theme.scm", dir);
-+	mkdir(dir, 0755);
- 
-+f = fopen(path, "w");
-+	if (!f) {
-+		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
-+		return;
-+	}
-+
 +	/* Write opaque colors as #RRGGBB and semi-transparent ones as #RRGGBBAA */
 +#define THEME_PERSIST_COLOR(setter, c) do { \
 +	if ((((c) >> 24) & 0xFF) == 0xFF) \
@@ -12037,11 +12035,19 @@ index a1e049d..e0538ff 100644
 +	fclose(f);
 +	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: persisted theme to %s\n", path);
 +}
-+
+ 
 +/* Draw one content row. `row` is 0-based content line under the title bar.
 + * If swatch stays non-NULL, paint a swatch on the right edge. */
  static void
 -setup_foot_config(void)
+-{
+-	char path[1024], dir[512], backup[1024];
+-	char fontdir[512], fontsrc[512], fontdst[1024];
+-	const char *home = getenv("HOME");
+-	FILE *f, *src, *dst;
+-	struct stat st;
+-	char buf[4096];
+-	size_t n;
 +thememenu_row(uint32_t *pixels, int menu_width, int menu_height, int row,
 +              const char *text, int is_selected,
 +              uint32_t text_color, uint32_t hi_bg, uint32_t hi_fg,
@@ -12078,14 +12084,7 @@ index a1e049d..e0538ff 100644
 +/* Render the whole menu into the cached buffer and attach it, centered. */
 +static void
 +updatethememenu(void)
- {
--	char path[1024], dir[512], backup[1024];
--	char fontdir[512], fontsrc[512], fontdst[1024];
--	const char *home = getenv("HOME");
--	FILE *f, *src, *dst;
--	struct stat st;
--	char buf[4096];
--	size_t n;
++{
 +	struct TitleBuffer *tb;
 +	uint32_t *pixels;
 +	int menu_cells_w = 16;
@@ -12293,6 +12292,10 @@ index a1e049d..e0538ff 100644
 -	snprintf(dir, sizeof(dir), "%s/.config/foot", home);
 -	snprintf(path, sizeof(path), "%s/foot.ini", dir);
 -	snprintf(backup, sizeof(backup), "%s/foot.ini.tbwm-backup", dir);
+-
+-	/* Create directory if needed */
+-	if (stat(dir, &st) != 0)
+-		mkdir(dir, 0755);
 +	if (!thememenu_buffer)
 +		thememenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
 +	wlr_scene_node_set_enabled(&thememenu_buffer->node, 1);
@@ -12303,9 +12306,11 @@ index a1e049d..e0538ff 100644
 +	/* buffer is cached for reuse; do not drop */
 +}
  
--	/* Create directory if needed */
--	if (stat(dir, &st) != 0)
--		mkdir(dir, 0755);
+-	/* Back up existing config if it exists and no backup exists yet */
+-	if (stat(path, &st) == 0 && stat(backup, &st) != 0) {
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: backing up existing foot.ini to %s\n", backup);
+-		rename(path, backup);
+-	}
 +static void
 +thememenu_reset_nav(void)
 +{
@@ -12319,21 +12324,6 @@ index a1e049d..e0538ff 100644
 +	thememenu_alpha_buf[0] = '\0';
 +}
  
--	/* Back up existing config if it exists and no backup exists yet */
--	if (stat(path, &st) == 0 && stat(backup, &st) != 0) {
--		tbwm_log(TBWM_LOG_INFO, "tbwm: backing up existing foot.ini to %s\n", backup);
--		rename(path, backup);
--	}
-+static void
-+thememenu_open_palette(int target)
-+{
-+	thememenu_target = target;
-+	thememenu_palette_mode = 1;
-+	thememenu_alpha_mode = 0;
-+	thememenu_reset_nav();
-+	updatethememenu();
-+}
- 
 -	/* Write our config */
 -	f = fopen(path, "w");
 -	if (f) {
@@ -12344,9 +12334,10 @@ index a1e049d..e0538ff 100644
 -		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: could not write foot config\n");
 -	} 
 +static void
-+thememenu_open_targets(void)
++thememenu_open_palette(int target)
 +{
-+	thememenu_palette_mode = 0;
++	thememenu_target = target;
++	thememenu_palette_mode = 1;
 +	thememenu_alpha_mode = 0;
 +	thememenu_reset_nav();
 +	updatethememenu();
@@ -12355,32 +12346,26 @@ index a1e049d..e0538ff 100644
 -static int
 -app_compare(const void *a, const void *b)
 +static void
-+thememenu_close(void)
++thememenu_open_targets(void)
  {
 -	return strcmp(*(const char **)a, *(const char **)b);
-+	thememenu_active = 0;
 +	thememenu_palette_mode = 0;
 +	thememenu_alpha_mode = 0;
 +	thememenu_reset_nav();
 +	updatethememenu();
-+	updatebars();
  }
  
 -void
 -buildappcache(void)
 +static void
-+togglethememenu(const Arg *arg)
++thememenu_close(void)
  {
 -	char *path, *path_copy, *dir;
 -	DIR *d;
 -	struct dirent *ent;
 -	int capacity = 256;
 -	int i, j, dup;
-+	if (thememenu_active) {
-+		thememenu_close();
-+		return;
-+	}
-+	thememenu_active = 1;
++	thememenu_active = 0;
 +	thememenu_palette_mode = 0;
 +	thememenu_alpha_mode = 0;
 +	thememenu_reset_nav();
@@ -12392,6 +12377,23 @@ index a1e049d..e0538ff 100644
 -		for (i = 0; i < app_cache_count; i++)
 -			free(app_cache[i]);
 -		free(app_cache);
++static void
++togglethememenu(const Arg *arg)
++{
++	if (thememenu_active) {
++		thememenu_close();
++		return;
+ 	}
++	thememenu_active = 1;
++	thememenu_palette_mode = 0;
++	thememenu_alpha_mode = 0;
++	thememenu_reset_nav();
++	updatethememenu();
++	updatebars();
++}
+ 
+-	app_cache = ecalloc(capacity, sizeof(char *));
+-	app_cache_count = 0;
 +static int
 +thememenu_key(xkb_keysym_t sym)
 +{
@@ -12447,10 +12449,11 @@ index a1e049d..e0538ff 100644
 +			return 1;
 +		}
 +		return 1; /* consume everything while typing */
- 	}
++	}
  
--	app_cache = ecalloc(capacity, sizeof(char *));
--	app_cache_count = 0;
+-	path = getenv("PATH");
+-	if (!path)
+-		return;
 +	/* Custom alpha input mode: consume digits (0-100) */
 +	if (thememenu_alpha_active) {
 +		if (sym == XKB_KEY_Escape) {
@@ -12492,8 +12495,36 @@ index a1e049d..e0538ff 100644
 +		return 1; /* consume everything while typing */
 +	}
  
--	path = getenv("PATH");
--	if (!path)
+-	path_copy = strdup(path);
+-	dir = strtok(path_copy, ":");
+-	while (dir) {
+-		d = opendir(dir);
+-		if (d) {
+-			while ((ent = readdir(d))) {
+-				if (ent->d_name[0] == '.')
+-					continue;
+-				/* Check for duplicates */
+-				dup = 0;
+-				for (j = 0; j < app_cache_count; j++) {
+-					if (strcmp(app_cache[j], ent->d_name) == 0) {
+-						dup = 1;
+-						break;
+-					}
+-				}
+-				if (dup)
+-					continue;
+-				if (app_cache_count >= capacity) {
+-					size_t new_capacity = capacity * 2;
+-					char **tmp = realloc(app_cache, new_capacity * sizeof(char *));
+-					if (!tmp) {
+-						 tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
+-						/* stop adding further entries to avoid inconsistent state */
+-						break;
+-					}
+-					app_cache = tmp;
+-					capacity = new_capacity;
+-				}
+-				app_cache[app_cache_count++] = strdup(ent->d_name);
 +	if (sym == XKB_KEY_Escape) {
 +		if (thememenu_alpha_mode || thememenu_palette_mode)
 +			thememenu_open_targets();
@@ -12572,24 +12603,45 @@ index a1e049d..e0538ff 100644
 +			} else {
 +				snprintf(thememenu_hex, sizeof(thememenu_hex), "%08x", cur);
 +				thememenu_hex_len = 8;
-+			}
+ 			}
+-			closedir(d);
 +			updatethememenu();
-+		}
+ 		}
+-		dir = strtok(NULL, ":");
 +		return 1;
-+	}
-+
+ 	}
+-	free(path_copy);
+ 
+-	qsort(app_cache, app_cache_count, sizeof(char *), app_compare);
+-	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
 +	return 0; /* let the toggle binding still work for Escape-like keys */
-+}
-+
+ }
+ 
+-int
+-timingtimer(void *data)
 +/* Scheme function: (toggle-thememenu) */
 +static s7_pointer
 +scm_toggle_thememenu(s7_scheme *sc, s7_pointer args)
-+{
+ {
+-	/* Report CPU timing statistics every 500ms */
+-	fprintf(stderr, "[TIMING TICK]\n");
+-	fflush(stderr);
+-	timing_report();
+-	wl_event_source_timer_update(timing_timer, 500);
+-	return 0;
 +	(void)args;
 +	togglethememenu(NULL);
 +	return s7_t(sc);
-+}
-+
+ }
+ 
+-int
+-bartimer(void *data)
+-{
+-	/* Used for clock updates */
+-	updatebars();
+-	wl_event_source_timer_update(bar_timer, 1000);
+-	return 0;
+-}
 +/* ==================== TRAY MENU ====================
 + * A native system-tray menu (opened with [S] / M-S-s). Level 0 lists the
 + * minimized background apps (Discord, Spotify, Steam...) that expose a
@@ -12601,12 +12653,23 @@ index a1e049d..e0538ff 100644
 + * The struct types (TrayNode/TrayItem) and the traymenu/tray globals are
 + * declared at the top of this file; the function bodies live here (after all
 + * dialogs), so only a few prototypes are needed above. */
-+
+ 
+-int
+-scrolltimer(void *data)
 +/* ---- tree helpers ---- */
 +
 +static void
 +tray_node_free(TrayNode *n)
-+{
+ {
+-	Client *c;
+-	int scroll_count = 0;
+-    
+-	/* Handle smooth scrolling for window titlebars and top-bar tabs.
+-	 * Dynamically detect whether anything needs scrolling so we always
+-	 * run the fast tick while any title/tab is scrolling. */
+-	if (!title_scroll_mode) {
+-		wl_event_source_timer_update(scroll_timer, 100);
+-		return 0;
 +	TrayNode *c, *nc;
 +	if (!n)
 +		return;
@@ -12614,15 +12677,30 @@ index a1e049d..e0538ff 100644
 +	for (c = n->children; c; c = nc) {
 +		nc = c->sibling;
 +		tray_node_free(c);
-+	}
+ 	}
 +	free(n);
 +}
-+
+ 
+-	/* Detect whether any client or top-bar tab needs scrolling now. */
+-	int needs_scroll = 0;
+-	wl_list_for_each(c, &clients, link) {
+-		if (c->needs_title_scroll) { needs_scroll = 1; break; }
+-	}
+-	if (!needs_scroll) {
+-		/* Check top-bar tabs per monitor */
+-		Monitor *m;
+-		wl_list_for_each(m, &mons, link) {
+-			int visible_count = 0;
+-			Client *cc;
+-			wl_list_for_each(cc, &clients, link) {
+-				if (VISIBLEON(cc, m)) visible_count++;
+-			}
+-			if (visible_count <= 0) continue;
 +static void
 +tray_item_free_helper(TrayItem *it)
 +{
 +	if (!it)
- 		return;
++		return;
 +	free(it->display);
 +	free(it->busname);
 +	free(it->itempath);
@@ -12631,20 +12709,10 @@ index a1e049d..e0538ff 100644
 +	free(it);
 +}
  
--	path_copy = strdup(path);
--	dir = strtok(path_copy, ":");
--	while (dir) {
--		d = opendir(dir);
--		if (d) {
--			while ((ent = readdir(d))) {
--				if (ent->d_name[0] == '.')
--					continue;
--				/* Check for duplicates */
--				dup = 0;
--				for (j = 0; j < app_cache_count; j++) {
--					if (strcmp(app_cache[j], ent->d_name) == 0) {
--						dup = 1;
--						break;
+-			int width = m->m.width;
+-			int n = 30 * cell_width; /* reserved for date/time */
+-			int tab_area_width = width - /* x start unknown here; approximate */ (n + cell_width*10);
+-			if (tab_area_width <= 0) continue;
 +/* Recursively parse a dbusmenu GetLayout item array into sibling nodes.
 + * `arr` must be an iterator over child structs (id, props dict, child array).
 + * depth guards against a hostile/buggy service nesting menus forever and
@@ -12653,7 +12721,9 @@ index a1e049d..e0538ff 100644
 +tray_parse_items(DBusMessageIter *arr, TrayNode *parent, int depth, int *budget)
 +{
 +	TrayNode *head = NULL, *last = NULL;
-+
+ 
+-			int max_tab_chars = 20;
+-			int tab_width_cells = max_tab_chars + 2;
 +	if (depth > 8 || (budget && *budget <= 0))
 +		return NULL;
 +	while (dbus_message_iter_get_arg_type(arr) == DBUS_TYPE_VARIANT ||
@@ -12668,7 +12738,14 @@ index a1e049d..e0538ff 100644
 +			free(n);
 +			break;
 +		}
-+
+ 
+-			wl_list_for_each(cc, &clients, link) {
+-				if (!VISIBLEON(cc, m)) continue;
+-				const char *title = client_get_title(cc);
+-				if (!title) title = "?";
+-				int title_len = 0; while (title[title_len]) title_len++;
+-				int title_max = tab_width_cells - 2;
+-				if (title_len > title_max - 1) { needs_scroll = 1; break; }
 +		n->parent = parent;
 +		n->enabled = 1;
 +		n->checked = -1;
@@ -12729,23 +12806,12 @@ index a1e049d..e0538ff 100644
 +					} else if (key && strcmp(key, "visible") == 0 &&
 +					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_BOOLEAN) {
 +						dbus_message_iter_get_basic(&val, &n->is_visible);
- 					}
- 				}
--				if (dup)
--					continue;
--				if (app_cache_count >= capacity) {
--					size_t new_capacity = capacity * 2;
--					char **tmp = realloc(app_cache, new_capacity * sizeof(char *));
--					if (!tmp) {
--						 tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
--						/* stop adding further entries to avoid inconsistent state */
--						break;
--					}
--					app_cache = tmp;
--					capacity = new_capacity;
++					}
++				}
 +				if (!dbus_message_iter_next(&prop))
 +					break;
-+			}
+ 			}
+-			if (needs_scroll) break;
 +			/* toggle-type may come before or after toggle-state in the
 +			 * dict (bus order is arbitrary); resolve only once both are
 +			 * seen. */
@@ -12764,7 +12830,7 @@ index a1e049d..e0538ff 100644
 +			char idbuf[16];
 +			snprintf(idbuf, sizeof(idbuf), "(item %d)", n->id);
 +			n->label = strdup(idbuf);
-+		}
+ 		}
 +		{
 +			TrayNode *c;
 +			for (n->child_count = 0, c = n->children; c; c = c->sibling)
@@ -12779,7 +12845,7 @@ index a1e049d..e0538ff 100644
 +
 +		if (!dbus_message_iter_next(arr))
 +			break;
-+	}
+ 	}
 +	return head;
 +}
 +
@@ -12791,7 +12857,11 @@ index a1e049d..e0538ff 100644
 +	DBusMessageIter body, layout, arr;
 +	char *srv = it->busname;
 +	TrayNode *c;
-+
+ 
+-	if (!needs_scroll) {
+-		/* No scrolling needed, check again much later (200ms) */
+-		any_title_needs_scroll = 0;
+-		wl_event_source_timer_update(scroll_timer, 200);
 +	if (it->no_menu || it->dead)
 +		return 0;
 +	if (!srv || !it->menupath || it->menupath[0] != '/')
@@ -12815,8 +12885,29 @@ index a1e049d..e0538ff 100644
 +	dbus_message_unref(msg);
 +	if (!reply) {
 +		tbwm_log(TBWM_LOG_DEBUG, "tray: %s: GetLayout failed\n", it->display);
-+		return 0;
-+	}
+ 		return 0;
+ 	}
+-	any_title_needs_scroll = 1;
+-	
+-	timing_start(TIMING_SCROLLTIMER);
+-	
+-	/* Advance scroll offset - one pixel per tick at 30fps */
+-	title_scroll_offset++;
+-	
+-	/* Update window frames that need scrolling - FAST PATH ONLY */
+-	wl_list_for_each(c, &clients, link) {
+-		if (c->needs_title_scroll) {
+-			/* FAST PATH - GPU panning only, zero memcpy */
+-			if (c->scroll_scene_buf && c->scroll_title_pixels && 
+-			    c->scroll_title_width > 0 && c->scroll_display_width > 0) {
+-				int pixel_offset = title_scroll_offset % c->scroll_title_width;
+-				struct wlr_fbox src_box = {
+-					.x = pixel_offset,
+-					.y = 0,
+-					.width = c->scroll_display_width,
+-					.height = cell_height
+-				};
+-				wlr_scene_buffer_set_source_box(c->scroll_scene_buf, &src_box);
 +
 +	/* body: (uint32 revision, struct{ int32 id, a{sv} props, av children }) */
 +	tray_node_free(it->menuroot);
@@ -12840,21 +12931,22 @@ index a1e049d..e0538ff 100644
 +					it->menuroot->children = tray_parse_items(&arr, it->menuroot, 0, &budget);
 +					for (c = it->menuroot->children; c; c = c->sibling)
 +						it->menuroot->child_count++;
- 				}
--				app_cache[app_cache_count++] = strdup(ent->d_name);
++				}
  			}
--			closedir(d);
+-			scroll_count++;
  		}
--		dir = strtok(NULL, ":");
  	}
--	free(path_copy);
+-	
+-	/* Update the bar tabs only - skip if no visible monitors need it */
+-	if (scroll_count > 0 || any_title_needs_scroll) {
+-		scroll_only_bar_update = 1;
+-		updatebars();
+-		scroll_only_bar_update = 0;
 +	dbus_message_unref(reply);
 +	tbwm_log(TBWM_LOG_INFO, "tray: %s menu fetched\n", it->display);
 +	return it->menuroot != NULL;
 +}
- 
--	qsort(app_cache, app_cache_count, sizeof(char *), app_compare);
--	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
++
 +/* ---- DBus helpers ---- */
 +
 +/* read a single org.freedesktop.DBus.Properties.Get reply (one string) */
@@ -12872,25 +12964,22 @@ index a1e049d..e0538ff 100644
 +		if (dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_STRING ||
 +		    dbus_message_iter_get_arg_type(&variant) == DBUS_TYPE_OBJECT_PATH)
 +			dbus_message_iter_get_basic(&variant, &out);
-+	}
+ 	}
 +	return out ? strdup(out) : NULL;
- }
++}
  
--int
--timingtimer(void *data)
+-	timing_end(TIMING_SCROLLTIMER);
+-	timing_report();
 +/* synchronous (iface, prop) Get on the item; caller frees the reply */
 +static DBusMessage *
 +tray_prop_get(TrayItem *it, const char *prop)
- {
--	/* Report CPU timing statistics every 500ms */
--	fprintf(stderr, "[TIMING TICK]\n");
--	fflush(stderr);
--	timing_report();
--	wl_event_source_timer_update(timing_timer, 500);
--	return 0;
++{
 +	DBusMessage *msg, *reply;
 +	const char *iface = "org.kde.StatusNotifierItem";
-+
+ 
+-	/* 30fps */
+-	wl_event_source_timer_update(scroll_timer, 33);
+-	return 0;
 +	if (!tray_dbus || !it || it->dead || !it->busname || !it->busname[0] ||
 +	    !it->itempath || it->itempath[0] != '/')
 +		return NULL;
@@ -12907,17 +12996,28 @@ index a1e049d..e0538ff 100644
 +	return reply;
  }
  
--int
--bartimer(void *data)
+-void
+-updatebars(void)
 +/* ---- item lifecycle ---- */
 +
 +static int
 +tray_dedupe_name(const char *name)
  {
--	/* Used for clock updates */
--	updatebars();
--	wl_event_source_timer_update(bar_timer, 1000);
--	return 0;
+-	Monitor *m;
+-	
+-	timing_start(TIMING_UPDATEBARS);
+-	
+-	/* Don't update if not fully initialized */
+-	if (!layers[LyrOverlay]) {
+-		timing_end(TIMING_UPDATEBARS);
+-		return;
+-	}
+-	/* Reset scroll flag - will be set by updatebar/updateframe if needed */
+-	any_title_needs_scroll = 0;
+-	wl_list_for_each(m, &mons, link)
+-		updatebar(m);
+-	
+-	timing_end(TIMING_UPDATEBARS);
 +	int count = 1;
 +	TrayItem *p;
 +	for (p = tray_items; p; p = p->next)
@@ -12926,48 +13026,24 @@ index a1e049d..e0538ff 100644
 +	return count;
  }
  
--int
--scrolltimer(void *data)
+-void
+-updateframes(void)
 +static void
 +tray_add_item(const char *service, const char *path)
  {
 -	Client *c;
--	int scroll_count = 0;
--    
--	/* Handle smooth scrolling for window titlebars and top-bar tabs.
--	 * Dynamically detect whether anything needs scrolling so we always
--	 * run the fast tick while any title/tab is scrolling. */
--	if (!title_scroll_mode) {
--		wl_event_source_timer_update(scroll_timer, 100);
--		return 0;
--	}
+-	/* Update all client frames for scrolling titles */
+-	if (!title_scroll_mode)
 +	TrayItem *it, *p;
- 
--	/* Detect whether any client or top-bar tab needs scrolling now. */
--	int needs_scroll = 0;
--	wl_list_for_each(c, &clients, link) {
--		if (c->needs_title_scroll) { needs_scroll = 1; break; }
--	}
--	if (!needs_scroll) {
--		/* Check top-bar tabs per monitor */
--		Monitor *m;
--		wl_list_for_each(m, &mons, link) {
--			int visible_count = 0;
--			Client *cc;
--			wl_list_for_each(cc, &clients, link) {
--				if (VISIBLEON(cc, m)) visible_count++;
--			}
--			if (visible_count <= 0) continue;
++
 +	if (!tray_dbus || !service || !path || !service[0] || !path[0])
-+		return;
+ 		return;
+-	wl_list_for_each(c, &clients, link)
+-		updateframe(c);
 +	for (p = tray_items; p; p = p->next)
 +		if (strcmp(p->busname, service) == 0 && strcmp(p->itempath, path) == 0)
 +			return;
- 
--			int width = m->m.width;
--			int n = 30 * cell_width; /* reserved for date/time */
--			int tab_area_width = width - /* x start unknown here; approximate */ (n + cell_width*10);
--			if (tab_area_width <= 0) continue;
++
 +	it = calloc(1, sizeof(*it));
 +	it->busname = strdup(service);
 +	it->itempath = strdup(path);
@@ -12977,25 +13053,16 @@ index a1e049d..e0538ff 100644
 +	 * property call there would re-enter libdbus (assert/crash). */
 +	it->display = strdup(service);
 +	it->resolved = 0;
- 
--			int max_tab_chars = 20;
--			int tab_width_cells = max_tab_chars + 2;
++
 +	it->next = tray_items;
 +	tray_items = it;
 +	tray_items_count++;
 +	tray_needs_redraw = 1;
 +	tbwm_log(TBWM_LOG_INFO, "tray: + %s (%s) [pending]\n", it->display, it->busname);
-+}
+ }
  
--			wl_list_for_each(cc, &clients, link) {
--				if (!VISIBLEON(cc, m)) continue;
--				const char *title = client_get_title(cc);
--				if (!title) title = "?";
--				int title_len = 0; while (title[title_len]) title_len++;
--				int title_max = tab_width_cells - 2;
--				if (title_len > title_max - 1) { needs_scroll = 1; break; }
--			}
--			if (needs_scroll) break;
+-void
+-togglelauncher(const Arg *arg)
 +static void
 +tray_remove_item_service(const char *service)
 +{
@@ -13010,21 +13077,21 @@ index a1e049d..e0538ff 100644
 +			tray_needs_redraw = 1;
 +			removed = 1;
 +			break;
- 		}
- 	}
++		}
++	}
 +	if (removed && !tray_cur_item)
 +		tray_level = 0;
 +}
- 
--	if (!needs_scroll) {
--		/* No scrolling needed, check again much later (200ms) */
--		any_title_needs_scroll = 0;
--		wl_event_source_timer_update(scroll_timer, 200);
++
 +/* Actually disconnect and free items marked dead. Must run outside any D-Bus
 + * dispatch callback (the NameOwnerChanged filter only flags them). */
 +static void
 +tray_prune_dead(void)
-+{
+ {
+-	launcher_active = !launcher_active;
+-	launcher_input[0] = '\0';
+-	launcher_input_len = 0;
+-	updatebars();
 +	TrayItem *it, *prev = NULL, *next;
 +
 +	for (it = tray_items; it; it = next) {
@@ -13072,7 +13139,7 @@ index a1e049d..e0538ff 100644
 +	char *p;
 +
 +	if (depth > 6)
- 		return 0;
++		return 0;
 +	msg = dbus_message_new_method_call(service, path,
 +		"org.freedesktop.DBus.Introspectable", "Introspect");
 +	if (!msg)
@@ -13096,28 +13163,7 @@ index a1e049d..e0538ff 100644
 +		*out = strdup(path);
 +		free(xml);
 +		return 1;
- 	}
--	any_title_needs_scroll = 1;
--	
--	timing_start(TIMING_SCROLLTIMER);
--	
--	/* Advance scroll offset - one pixel per tick at 30fps */
--	title_scroll_offset++;
--	
--	/* Update window frames that need scrolling - FAST PATH ONLY */
--	wl_list_for_each(c, &clients, link) {
--		if (c->needs_title_scroll) {
--			/* FAST PATH - GPU panning only, zero memcpy */
--			if (c->scroll_scene_buf && c->scroll_title_pixels && 
--			    c->scroll_title_width > 0 && c->scroll_display_width > 0) {
--				int pixel_offset = title_scroll_offset % c->scroll_title_width;
--				struct wlr_fbox src_box = {
--					.x = pixel_offset,
--					.y = 0,
--					.width = c->scroll_display_width,
--					.height = cell_height
--				};
--				wlr_scene_buffer_set_source_box(c->scroll_scene_buf, &src_box);
++	}
 +	/* descend into self-closing <node name="X"/> children */
 +	for (p = xml; (p = strstr(p, "<node name=\"")) != NULL; p = p + 1) {
 +		char *q = p + 12;
@@ -13138,47 +13184,23 @@ index a1e049d..e0538ff 100644
 +			if (tray_probe_node(service, buf, out, depth + 1)) {
 +				free(xml);
 +				return 1;
- 			}
--			scroll_count++;
- 		}
- 	}
--	
--	/* Update the bar tabs only - skip if no visible monitors need it */
--	if (scroll_count > 0 || any_title_needs_scroll) {
--		scroll_only_bar_update = 1;
--		updatebars();
--		scroll_only_bar_update = 0;
--	}
--
--	timing_end(TIMING_SCROLLTIMER);
--	timing_report();
--
--	/* 30fps */
--	wl_event_source_timer_update(scroll_timer, 33);
++			}
++		}
++	}
 +	free(xml);
- 	return 0;
++	return 0;
  }
  
 -void
--updatebars(void)
+-togglerepl(const Arg *arg)
 +static char *
 +tray_find_item_path(const char *service)
  {
--	Monitor *m;
--	
--	timing_start(TIMING_UPDATEBARS);
--	
--	/* Don't update if not fully initialized */
--	if (!layers[LyrOverlay]) {
--		timing_end(TIMING_UPDATEBARS);
--		return;
--	}
--	/* Reset scroll flag - will be set by updatebar/updateframe if needed */
--	any_title_needs_scroll = 0;
--	wl_list_for_each(m, &mons, link)
--		updatebar(m);
--	
--	timing_end(TIMING_UPDATEBARS);
+-	repl_input_active = !repl_input_active;
+-	repl_input[0] = '\0';
+-	repl_input_len = 0;
+-	updatebars();
+-	updaterepl();
 +	char *out = NULL;
 +
 +	if (tray_probe_node(service, "/", &out, 0))
@@ -13186,17 +13208,35 @@ index a1e049d..e0538ff 100644
 +	return NULL;
  }
  
--void
--updateframes(void)
+-/* Map freedesktop category to simplified category */
+-static const char *
+-map_category(const char *cats)
 +/* Resolve Title/Id/Menu for one item. Blocking calls here are safe: callers
 + * only invoke this from the main loop (timer or input handlers), never from a
 + * D-Bus dispatch callback. */
 +static void
 +tray_resolve_one(TrayItem *it)
  {
--	Client *c;
--	/* Update all client frames for scrolling titles */
--	if (!title_scroll_mode)
+-	if (!cats) return "Other";
+-	if (strstr(cats, "AudioVideo") || strstr(cats, "Audio") || strstr(cats, "Video"))
+-		return "Multimedia";
+-	if (strstr(cats, "Development") || strstr(cats, "IDE"))
+-		return "Development";
+-	if (strstr(cats, "Game"))
+-		return "Games";
+-	if (strstr(cats, "Graphics"))
+-		return "Graphics";
+-	if (strstr(cats, "Network") || strstr(cats, "WebBrowser") || strstr(cats, "Email"))
+-		return "Internet";
+-	if (strstr(cats, "Office") || strstr(cats, "WordProcessor") || strstr(cats, "Spreadsheet"))
+-		return "Office";
+-	if (strstr(cats, "Settings") || strstr(cats, "System") || strstr(cats, "Monitor"))
+-		return "System";
+-	if (strstr(cats, "Utility") || strstr(cats, "Accessibility"))
+-		return "Accessories";
+-	if (strstr(cats, "Education") || strstr(cats, "Science"))
+-		return "Education";
+-	return "Other";
 +	DBusMessage *r;
 +	char *title = NULL;
 +	char *menu = NULL;
@@ -13204,18 +13244,8 @@ index a1e049d..e0538ff 100644
 +	int retried = 0;
 +
 +	if (!it || it->resolved || it->dead || !tray_dbus || !it->busname || !it->busname[0])
- 		return;
--	wl_list_for_each(c, &clients, link)
--		updateframe(c);
--}
- 
--void
--togglelauncher(const Arg *arg)
--{
--	launcher_active = !launcher_active;
--	launcher_input[0] = '\0';
--	launcher_input_len = 0;
--	updatebars();
++		return;
++
 +retry:
 +	r = tray_prop_get(it, "Title");
 +	title = tray_prop_get_string(r);
@@ -13267,18 +13297,18 @@ index a1e049d..e0538ff 100644
 +		it->no_menu ? " [no menu]" : "");
  }
  
--void
--togglerepl(const Arg *arg)
+-/* Find or create category, returns index */
+-static int
+-find_or_create_category(const char *name)
 +/* Fetch Title/Id/Menu for items whose props are still unknown. Runs from the
 + * main loop timer, never from a D-Bus dispatch callback. */
 +static void
 +tray_resolve_items(void)
  {
--	repl_input_active = !repl_input_active;
--	repl_input[0] = '\0';
--	repl_input_len = 0;
--	updatebars();
--	updaterepl();
+-	int i;
+-	for (i = 0; i < category_count; i++) {
+-		if (strcmp(categories[i].name, name) == 0)
+-			return i;
 +	static TrayItem *next = NULL;
 +	TrayItem *it;
 +
@@ -13286,7 +13316,12 @@ index a1e049d..e0538ff 100644
 +		next = tray_items;
 +		if (!next)
 +			return;
-+	}
+ 	}
+-	if (category_count < MAX_CATEGORIES) {
+-		strncpy(categories[category_count].name, name, CAT_NAME_LEN - 1);
+-		categories[category_count].name[CAT_NAME_LEN - 1] = '\0';
+-		categories[category_count].app_count = 0;
+-		return category_count++;
 +	for (it = next; it; it = it->next) {
 +		next = it;
 +		if (it->resolved || it->dead)
@@ -13294,81 +13329,17 @@ index a1e049d..e0538ff 100644
 +		tray_resolve_one(it);
 +		next = it->next ? it->next : tray_items;
 +		break;
-+	}
-+	if (!it)
-+		next = tray_items;
- }
- 
--/* Map freedesktop category to simplified category */
--static const char *
--map_category(const char *cats)
-+static void
-+tray_cleanup(void)
- {
--	if (!cats) return "Other";
--	if (strstr(cats, "AudioVideo") || strstr(cats, "Audio") || strstr(cats, "Video"))
--		return "Multimedia";
--	if (strstr(cats, "Development") || strstr(cats, "IDE"))
--		return "Development";
--	if (strstr(cats, "Game"))
--		return "Games";
--	if (strstr(cats, "Graphics"))
--		return "Graphics";
--	if (strstr(cats, "Network") || strstr(cats, "WebBrowser") || strstr(cats, "Email"))
--		return "Internet";
--	if (strstr(cats, "Office") || strstr(cats, "WordProcessor") || strstr(cats, "Spreadsheet"))
--		return "Office";
--	if (strstr(cats, "Settings") || strstr(cats, "System") || strstr(cats, "Monitor"))
--		return "System";
--	if (strstr(cats, "Utility") || strstr(cats, "Accessibility"))
--		return "Accessories";
--	if (strstr(cats, "Education") || strstr(cats, "Science"))
--		return "Education";
--	return "Other";
-+	TrayItem *it, *nit;
-+	for (it = tray_items; it; it = nit) {
-+		nit = it->next;
-+		tray_item_free_helper(it);
-+	}
-+	tray_items = NULL;
-+	tray_items_count = 0;
-+	traymenu_active = 0;
-+	tray_cur_item = NULL;
-+	tray_cur_node = NULL;
-+	tray_level = 0;
- }
- 
--/* Find or create category, returns index */
--static int
--find_or_create_category(const char *name)
-+/* ---- watcher object (org.kde.StatusNotifierWatcher) ---- */
-+
-+static void
-+tray_send_error(DBusConnection *conn, DBusMessage *msg, const char *name,
-+                const char *text)
- {
--	int i;
--	for (i = 0; i < category_count; i++) {
--		if (strcmp(categories[i].name, name) == 0)
--			return i;
--	}
--	if (category_count < MAX_CATEGORIES) {
--		strncpy(categories[category_count].name, name, CAT_NAME_LEN - 1);
--		categories[category_count].name[CAT_NAME_LEN - 1] = '\0';
--		categories[category_count].app_count = 0;
--		return category_count++;
-+	DBusMessage *reply = dbus_message_new_error(msg, name, text);
-+	if (reply) {
-+		dbus_connection_send(conn, reply, NULL);
-+		dbus_message_unref(reply);
  	}
 -	return -1;
++	if (!it)
++		next = tray_items;
  }
  
 -/* Parse a single .desktop file */
  static void
 -parse_desktop_file(const char *path)
--{
++tray_cleanup(void)
+ {
 -	FILE *f;
 -	char line[512];
 -	char name[APP_NAME_LEN] = "";
@@ -13419,6 +13390,52 @@ index a1e049d..e0538ff 100644
 -			nodisplay = 1;
 -		} else if (strncmp(line, "Hidden=true", 11) == 0) {
 -			nodisplay = 1;
+-		}
++	TrayItem *it, *nit;
++	for (it = tray_items; it; it = nit) {
++		nit = it->next;
++		tray_item_free_helper(it);
+ 	}
+-	fclose(f);
+-	
+-	/* Add to list if valid */
+-	if (name[0] && exec[0] && !nodisplay && app_entry_count < MAX_APPS) {
+-		const char *cat = map_category(cats);
+-		int cat_idx = find_or_create_category(cat);
+-		
+-		strncpy(app_entries[app_entry_count].name, name, APP_NAME_LEN - 1);
+-		app_entries[app_entry_count].name[APP_NAME_LEN - 1] = '\0';
+-		strncpy(app_entries[app_entry_count].exec, exec, APP_EXEC_LEN - 1);
+-		app_entries[app_entry_count].exec[APP_EXEC_LEN - 1] = '\0';
+-		strncpy(app_entries[app_entry_count].category, cat, CAT_NAME_LEN - 1);
+-		app_entries[app_entry_count].category[CAT_NAME_LEN - 1] = '\0';
+-		
+-		if (cat_idx >= 0)
+-			categories[cat_idx].app_count++;
+-		
+-		app_entry_count++;
++	tray_items = NULL;
++	tray_items_count = 0;
++	traymenu_active = 0;
++	tray_cur_item = NULL;
++	tray_cur_node = NULL;
++	tray_level = 0;
++}
++
++/* ---- watcher object (org.kde.StatusNotifierWatcher) ---- */
++
++static void
++tray_send_error(DBusConnection *conn, DBusMessage *msg, const char *name,
++                const char *text)
++{
++	DBusMessage *reply = dbus_message_new_error(msg, name, text);
++	if (reply) {
++		dbus_connection_send(conn, reply, NULL);
++		dbus_message_unref(reply);
++	}
++}
++
++static void
 +tray_send_empty_reply(DBusConnection *conn, DBusMessage *msg)
 +{
 +	DBusMessage *reply = dbus_message_new_method_return(msg);
@@ -13426,6 +13443,186 @@ index a1e049d..e0538ff 100644
 +		dbus_connection_send(conn, reply, NULL);
 +		dbus_message_unref(reply);
 +	}
++}
++
++/* ---- watcher introspection / properties (Chromium needs these ---- */
++
++/* Introspection XML for /StatusNotifierWatcher. Chromium/Electron validates
++ * the watcher's interface before registering, so the empty default libdbus
++ * output would block apps like Discord. */
++static const char tray_watcher_introspect_xml[] =
++	"<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object "
++	"Introspection 1.0//EN\"\n"
++	"\"http://www.freedesktop.org/standards/dbus/1.0/"
++	"introspect.dtd\">\n"
++	"<node>\n"
++	"  <interface name=\"org.kde.StatusNotifierWatcher\">\n"
++	"    <method name=\"RegisterStatusNotifierItem\">\n"
++	"      <arg name=\"service\" type=\"s\" direction=\"in\"/>\n"
++	"    </method>\n"
++	"    <method name=\"RegisterStatusNotifierHost\">\n"
++	"      <arg name=\"service\" type=\"s\" direction=\"in\"/>\n"
++	"    </method>\n"
++	"    <method name=\"GetItems\">\n"
++	"      <arg name=\"items\" type=\"as\" direction=\"out\"/>\n"
++	"    </method>\n"
++	"    <signal name=\"StatusNotifierItemRegistered\">\n"
++	"      <arg name=\"service\" type=\"s\"/>\n"
++	"    </signal>\n"
++	"    <signal name=\"StatusNotifierItemUnregistered\">\n"
++	"      <arg name=\"service\" type=\"s\"/>\n"
++	"    </signal>\n"
++	"    <signal name=\"StatusNotifierHostRegistered\">\n"
++	"      <arg name=\"service\" type=\"s\"/>\n"
++	"    </signal>\n"
++	"    <signal name=\"StatusNotifierHostUnregistered\">\n"
++	"      <arg name=\"service\" type=\"s\"/>\n"
++	"    </signal>\n"
++	"    <property name=\"RegisteredStatusNotifierItems\" "
++	"type=\"as\" access=\"read\"/>\n"
++	"    <property name=\"IsStatusNotifierHostRegistered\" "
++	"type=\"b\" access=\"read\"/>\n"
++	"    <property name=\"ProtocolVersion\" type=\"i\" access=\"read\"/>\n"
++	"  </interface>\n"
++	"</node>\n";
++
++/* Append the registered services as an "as" array to the iterator. */
++static void
++tray_watcher_append_items(DBusMessageIter *it)
++{
++	TrayItem *p;
++	DBusMessageIter array;
++
++	dbus_message_iter_open_container(it, DBUS_TYPE_ARRAY,
++		DBUS_TYPE_STRING_AS_STRING, &array);
++	for (p = tray_items; p; p = p->next) {
++		if (p->dead || !p->busname || !p->busname[0])
++			continue;
++		dbus_message_iter_append_basic(&array, DBUS_TYPE_STRING, &p->busname);
+ 	}
++	dbus_message_iter_close_container(it, &array);
+ }
+ 
+-/* Scan directory for .desktop files */
++/* Send an org.freedesktop.DBus.Properties reply with one property in a
++ * variant. Returns 1 on success (reply sent or unhandled prop reported). */
+ static void
+-scan_desktop_dir(const char *dir)
+-{
+-	DIR *d;
+-	struct dirent *entry;
+-	char path[512];
+-	
+-	d = opendir(dir);
+-	if (!d) return;
+-	
+-	while ((entry = readdir(d)) != NULL) {
+-		int len = strlen(entry->d_name);
+-		if (len > 8 && strcmp(entry->d_name + len - 8, ".desktop") == 0) {
+-			snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+-			parse_desktop_file(path);
++tray_watcher_prop_get(DBusConnection *conn, DBusMessage *msg,
++                      const char *interface, const char *property)
++{
++	DBusMessage *reply;
++	DBusMessageIter args, variant;
++	int is_watcher_iface = (strcmp(interface, "org.kde.StatusNotifierWatcher") == 0 ||
++		strcmp(interface, "org.freedesktop.StatusNotifierWatcher") == 0 ||
++		strcmp(interface, "org.freedesktop.DBus.Properties") == 0 ||
++		(interface && interface[0] == '\0'));
++	uint32_t proto = 0;
++
++	reply = dbus_message_new_method_return(msg);
++	if (!reply)
++		return;
++	dbus_message_iter_init_append(reply, &args);
++
++	if (is_watcher_iface && strcmp(property, "IsStatusNotifierHostRegistered") == 0) {
++		dbus_bool_t b = TRUE;
++		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "b", &variant);
++		dbus_message_iter_append_basic(&variant, DBUS_TYPE_BOOLEAN, &b);
++		dbus_message_iter_close_container(&args, &variant);
++	} else if (is_watcher_iface && strcmp(property, "RegisteredStatusNotifierItems") == 0) {
++		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "as", &variant);
++		tray_watcher_append_items(&variant);
++		dbus_message_iter_close_container(&args, &variant);
++	} else if (is_watcher_iface && strcmp(property, "ProtocolVersion") == 0) {
++		dbus_message_iter_open_container(&args, DBUS_TYPE_VARIANT, "i", &variant);
++		dbus_message_iter_append_basic(&variant, DBUS_TYPE_INT32, &proto);
++		dbus_message_iter_close_container(&args, &variant);
++	} else {
++		dbus_message_unref(reply);
++		tray_send_error(conn, msg, "org.freedesktop.DBus.Error.UnknownProperty",
++			"unknown property");
++		return;
++	}
++	dbus_connection_send(conn, reply, NULL);
++	dbus_message_unref(reply);
++}
++
++static void
++tray_watcher_prop_get_all(DBusConnection *conn, DBusMessage *msg, const char *interface)
++{
++	DBusMessage *reply;
++	DBusMessageIter args, dict, entry;
++	dbus_bool_t b = TRUE;
++	uint32_t proto = 0;
++	int is_watcher_iface = (strcmp(interface, "org.kde.StatusNotifierWatcher") == 0 ||
++		strcmp(interface, "org.freedesktop.StatusNotifierWatcher") == 0 ||
++		(interface && interface[0] == '\0'));
++
++	reply = dbus_message_new_method_return(msg);
++	if (!reply)
++		return;
++	dbus_message_iter_init_append(reply, &args);
++	dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
++		DBUS_DICT_ENTRY_BEGIN_CHAR_AS_STRING DBUS_TYPE_STRING_AS_STRING
++		DBUS_TYPE_VARIANT_AS_STRING DBUS_DICT_ENTRY_END_CHAR_AS_STRING,
++		&dict);
++	if (is_watcher_iface) {
++		/* RegisteredStatusNotifierItems (as) */
++		{
++			DBusMessageIter v;
++			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
++			{
++				const char *key = "RegisteredStatusNotifierItems";
++				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
++			}
++			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "as", &v);
++			tray_watcher_append_items(&v);
++			dbus_message_iter_close_container(&entry, &v);
++			dbus_message_iter_close_container(&dict, &entry);
++		}
++		/* IsStatusNotifierHostRegistered (b) */
++		{
++			DBusMessageIter v;
++			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
++			{
++				const char *key = "IsStatusNotifierHostRegistered";
++				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
++			}
++			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "b", &v);
++			dbus_message_iter_append_basic(&v, DBUS_TYPE_BOOLEAN, &b);
++			dbus_message_iter_close_container(&entry, &v);
++			dbus_message_iter_close_container(&dict, &entry);
+ 		}
++		/* ProtocolVersion (i) */
++		{
++			DBusMessageIter v;
++			dbus_message_iter_open_container(&dict, DBUS_TYPE_DICT_ENTRY, NULL, &entry);
++			{
++				const char *key = "ProtocolVersion";
++				dbus_message_iter_append_basic(&entry, DBUS_TYPE_STRING, &key);
++			}
++			dbus_message_iter_open_container(&entry, DBUS_TYPE_VARIANT, "i", &v);
++			dbus_message_iter_append_basic(&v, DBUS_TYPE_INT32, &proto);
++			dbus_message_iter_close_container(&entry, &v);
++			dbus_message_iter_close_container(&dict, &entry);
++		}
++	}
++	dbus_message_iter_close_container(&args, &dict);
++	dbus_connection_send(conn, reply, NULL);
++	dbus_message_unref(reply);
 +}
 +
 +static DBusHandlerResult
@@ -13471,56 +13668,74 @@ index a1e049d..e0538ff 100644
 +			tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, err.message);
 +			dbus_error_free(&err);
 +			return DBUS_HANDLER_RESULT_HANDLED;
- 		}
++		}
 +		tray_send_empty_reply(conn, msg);
 +		return DBUS_HANDLER_RESULT_HANDLED;
- 	}
--	fclose(f);
--	
--	/* Add to list if valid */
--	if (name[0] && exec[0] && !nodisplay && app_entry_count < MAX_APPS) {
--		const char *cat = map_category(cats);
--		int cat_idx = find_or_create_category(cat);
--		
--		strncpy(app_entries[app_entry_count].name, name, APP_NAME_LEN - 1);
--		app_entries[app_entry_count].name[APP_NAME_LEN - 1] = '\0';
--		strncpy(app_entries[app_entry_count].exec, exec, APP_EXEC_LEN - 1);
--		app_entries[app_entry_count].exec[APP_EXEC_LEN - 1] = '\0';
--		strncpy(app_entries[app_entry_count].category, cat, CAT_NAME_LEN - 1);
--		app_entries[app_entry_count].category[CAT_NAME_LEN - 1] = '\0';
--		
--		if (cat_idx >= 0)
--			categories[cat_idx].app_count++;
--		
--		app_entry_count++;
++	}
 +	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
 +	    "RegisterStatusNotifierHost")) {
 +		tray_send_empty_reply(conn, msg);
 +		return DBUS_HANDLER_RESULT_HANDLED;
- 	}
++	}
++	if (dbus_message_is_method_call(msg, "org.kde.StatusNotifierWatcher",
++	    "GetItems")) {
++		DBusMessage *reply = dbus_message_new_method_return(msg);
++		if (reply) {
++			DBusMessageIter args;
++			dbus_message_iter_init_append(reply, &args);
++			tray_watcher_append_items(&args);
++			dbus_connection_send(conn, reply, NULL);
++			dbus_message_unref(reply);
++		}
++		return DBUS_HANDLER_RESULT_HANDLED;
++	}
++	/* Properties interface: Chromium/Electron reads
++	 * IsStatusNotifierHostRegistered before it will register an item. */
++	if (dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "Get")) {
++		const char *interface = NULL, *property = NULL;
++		if (dbus_message_get_args(msg, NULL,
++		    DBUS_TYPE_STRING, &interface,
++		    DBUS_TYPE_STRING, &property,
++		    DBUS_TYPE_INVALID)) {
++			tray_watcher_prop_get(conn, msg, interface, property);
++			return DBUS_HANDLER_RESULT_HANDLED;
++		}
++		tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "bad args");
++		return DBUS_HANDLER_RESULT_HANDLED;
++	}
++	if (dbus_message_is_method_call(msg, DBUS_INTERFACE_PROPERTIES, "GetAll")) {
++		const char *interface = NULL;
++		if (dbus_message_get_args(msg, NULL,
++		    DBUS_TYPE_STRING, &interface,
++		    DBUS_TYPE_INVALID)) {
++			tray_watcher_prop_get_all(conn, msg, interface);
++			return DBUS_HANDLER_RESULT_HANDLED;
++		}
++		tray_send_error(conn, msg, DBUS_ERROR_INVALID_ARGS, "bad args");
++		return DBUS_HANDLER_RESULT_HANDLED;
++	}
++	/* Introspectable: libdbus registers the object path so requests arrive
++	 * here; reply with the full interface XML ourselves. */
++	if (dbus_message_is_method_call(msg, "org.freedesktop.DBus.Introspectable",
++	    "Introspect")) {
++		DBusMessage *reply = dbus_message_new_method_return(msg);
++		if (reply) {
++			const char *xml = tray_watcher_introspect_xml;
++			dbus_message_append_args(reply, DBUS_TYPE_STRING, &xml,
++				DBUS_TYPE_INVALID);
++			dbus_connection_send(conn, reply, NULL);
++			dbus_message_unref(reply);
++		}
++		return DBUS_HANDLER_RESULT_HANDLED;
++	}
 +	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
- }
- 
--/* Scan directory for .desktop files */
--static void
--scan_desktop_dir(const char *dir)
++}
++
 +/* ---- bus signal filter: drop items whose owner vanished ---- */
 +
 +static DBusHandlerResult
 +tray_filter(DBusConnection *conn, DBusMessage *msg, void *data)
- {
--	DIR *d;
--	struct dirent *entry;
--	char path[512];
--	
--	d = opendir(dir);
--	if (!d) return;
--	
--	while ((entry = readdir(d)) != NULL) {
--		int len = strlen(entry->d_name);
--		if (len > 8 && strcmp(entry->d_name + len - 8, ".desktop") == 0) {
--			snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
--			parse_desktop_file(path);
++{
 +	const char *sender, *path, *iface, *member;
 +	(void)conn; (void)data;
 +
@@ -13540,22 +13755,17 @@ index a1e049d..e0538ff 100644
 +		    DBUS_TYPE_INVALID)) {
 +			if (newowner == NULL || newowner[0] == '\0')
 +				tray_remove_item_service(name);
- 		}
++		}
 +		return DBUS_HANDLER_RESULT_HANDLED;
- 	}
--	closedir(d);
++	}
 +	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
- }
- 
--/* Compare apps by name for sorting */
--static int
--appentry_compare(const void *a, const void *b)
++}
++
 +/* ---- menu actions ---- */
 +
 +static void
 +tray_activate_app(TrayItem *it)
- {
--	return strcasecmp(((AppEntry*)a)->name, ((AppEntry*)b)->name);
++{
 +	DBusMessage *msg;
 +	int x = 0, y = 0;
 +	if (!tray_dbus || !it->busname || !it->busname[0])
@@ -13571,9 +13781,8 @@ index a1e049d..e0538ff 100644
 +	dbus_connection_send(tray_dbus, msg, NULL);
 +	dbus_message_unref(msg);
 +	dbus_connection_flush(tray_dbus);
- }
- 
--/* Compare categories by name for sorting */
++}
++
 +static void
 +tray_activate_node(TrayItem *it, TrayNode *node)
 +{
@@ -13597,19 +13806,21 @@ index a1e049d..e0538ff 100644
 +		dbus_message_iter_append_basic(&sub, DBUS_TYPE_INT32, &int0);
 +		dbus_message_iter_close_container(&iter, &sub);
 +		dbus_message_iter_append_basic(&iter, DBUS_TYPE_UINT32, &ts);
-+	}
+ 	}
+-	closedir(d);
 +	dbus_connection_send(tray_dbus, msg, NULL);
 +	dbus_message_unref(msg);
 +	dbus_connection_flush(tray_dbus);
-+}
-+
+ }
+ 
+-/* Compare apps by name for sorting */
 +/* ---- menu navigation ---- */
 +
  static int
--cat_compare(const void *a, const void *b)
+-appentry_compare(const void *a, const void *b)
 +tray_visible_count(void)
  {
--	return strcasecmp(((CategoryEntry*)a)->name, ((CategoryEntry*)b)->name);
+-	return strcasecmp(((AppEntry*)a)->name, ((AppEntry*)b)->name);
 +	int c = 0;
 +	if (tray_level == 0)
 +		return tray_items_count;
@@ -13627,11 +13838,15 @@ index a1e049d..e0538ff 100644
 +				c++;
 +	}
 +	return c;
-+}
-+
+ }
+ 
+-/* Compare categories by name for sorting */
+-static int
+-cat_compare(const void *a, const void *b)
 +static TrayNode *
 +tray_row_node(int row, int *was_sep)
-+{
+ {
+-	return strcasecmp(((CategoryEntry*)a)->name, ((CategoryEntry*)b)->name);
 +	TrayNode *ch;
 +	int i = 0;
 +	if (was_sep)
@@ -14443,7 +14658,7 @@ index a1e049d..e0538ff 100644
  }
  
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
-@@ -7412,9 +13119,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +13335,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -14455,7 +14670,7 @@ index a1e049d..e0538ff 100644
  		return 1;
  	}
  
-@@ -7497,7 +13206,7 @@ updaterepl(void)
+@@ -7497,7 +13422,7 @@ updaterepl(void)
  
  		/* Fill with background color */
  		for (i = 0; i < width * height; i++)
@@ -14464,7 +14679,7 @@ index a1e049d..e0538ff 100644
  
  		/* Calculate visible lines (leave space for bar at top) */
  		visible_lines = (height - cell_height) / cell_height;
-@@ -7596,7 +13305,7 @@ updatebar(Monitor *m)
+@@ -7596,7 +13521,7 @@ updatebar(Monitor *m)
  	/* Fill background - skip if scroll-only update */
  	if (!scroll_only_bar_update) {
  		for (i = 0; i < width * cell_height; i++)
@@ -14473,7 +14688,7 @@ index a1e049d..e0538ff 100644
  	}
  
  	x = 0;
-@@ -7643,37 +13352,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +13568,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -14536,7 +14751,7 @@ index a1e049d..e0538ff 100644
  			}
  		}
  	} else {
-@@ -7687,7 +13396,7 @@ updatebar(Monitor *m)
+@@ -7687,7 +13612,7 @@ updatebar(Monitor *m)
  				fg = RGB_TO_ARGB(cfg_bar_color);
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + btn_cells * cell_width && px < width; px++) {
@@ -14545,7 +14760,7 @@ index a1e049d..e0538ff 100644
  					}
  				}
  			} else {
-@@ -7726,7 +13435,7 @@ updatebar(Monitor *m)
+@@ -7726,7 +13651,7 @@ updatebar(Monitor *m)
  			if (bg != RGB_TO_ARGB(cfg_bar_color)) {
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + 3 * cell_width && px < width; px++) {
@@ -14554,7 +14769,7 @@ index a1e049d..e0538ff 100644
  					}
  				}
  			}
-@@ -7809,7 +13518,7 @@ render_tabs:
+@@ -7809,7 +13734,7 @@ render_tabs:
  				if (is_focused || (scroll_only_bar_update && needs_scroll)) {
  					for (py = 0; py < cell_height; py++) {
  						for (px = x; px < x + actual_tab_width && px < width; px++) {
@@ -14563,7 +14778,7 @@ index a1e049d..e0538ff 100644
  						}
  					}
  				}
-@@ -7884,66 +13593,207 @@ render_tabs:
+@@ -7884,66 +13809,207 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -14812,7 +15027,7 @@ index a1e049d..e0538ff 100644
  				}
  			}
  		}
-@@ -8204,12 +14054,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8204,12 +14270,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -14827,7 +15042,7 @@ index a1e049d..e0538ff 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8222,11 +14073,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8222,11 +14289,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			px = x + cg->bitmap_left + gx;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -14851,7 +15066,7 @@ index a1e049d..e0538ff 100644
  		}
  	}
  }
-@@ -8238,12 +14096,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8238,12 +14312,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -14866,7 +15081,7 @@ index a1e049d..e0538ff 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8256,11 +14115,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8256,11 +14331,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			if (px < clip_left || px >= clip_right) continue;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -14890,7 +15105,7 @@ index a1e049d..e0538ff 100644
  		}
  	}
  }
-@@ -8305,7 +14171,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
+@@ -8305,7 +14387,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
  	
  	pixels = c->scroll_title_pixels;
  	for (i = 0; i < total_width * cell_height; i++)
@@ -14899,7 +15114,7 @@ index a1e049d..e0538ff 100644
  	
  	/* Render title characters TWICE (uses glyph cache - fast) */
  	pos = 0;
-@@ -8572,7 +14438,7 @@ updateframe(Client *c)
+@@ -8572,7 +14654,7 @@ updateframe(Client *c)
  	
  	/* Clear buffer */
  	for (i = 0; i < width * cell_height; i++)
@@ -14908,7 +15123,7 @@ index a1e049d..e0538ff 100644
  
  	/* Format: ╔═ title ═╗ with horizontal lines filling the rest */
  	render_char_to_buffer(pixels, width, cell_height, 0, 0, tl_char, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8774,7 +14640,7 @@ updateframe(Client *c)
+@@ -8774,7 +14856,7 @@ updateframe(Client *c)
  		
  		/* Clear buffer */
  		for (i = 0; i < width * cell_height; i++)
@@ -14917,7 +15132,7 @@ index a1e049d..e0538ff 100644
  
  		render_char_to_buffer(pixels, width, cell_height, 0, 0, bl_char, RGB_TO_ARGB(cfg_border_line_color));
  		
-@@ -8812,7 +14678,7 @@ updateframe(Client *c)
+@@ -8812,7 +14894,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -14926,7 +15141,7 @@ index a1e049d..e0538ff 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8847,7 +14713,7 @@ updateframe(Client *c)
+@@ -8847,7 +14929,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -14935,7 +15150,7 @@ index a1e049d..e0538ff 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -9377,8 +15243,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9377,8 +15459,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
  			continue;
  
@@ -14944,7 +15159,7 @@ index a1e049d..e0538ff 100644
  		if (node->type == WLR_SCENE_NODE_BUFFER) {
  			struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(
  					wlr_scene_buffer_from_node(node));
-@@ -9394,8 +15258,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9394,8 +15474,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		}
  	}
  
@@ -14953,7 +15168,7 @@ index a1e049d..e0538ff 100644
  	if (psurface) *psurface = surface;
  	if (pc) *pc = c;
  	if (pl) *pl = l;
-@@ -9561,6 +15423,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +15639,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  
