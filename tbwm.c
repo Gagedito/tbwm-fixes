@@ -13651,6 +13651,11 @@ render_tabs:
 				/* 1-cell gap before the audio button */
 				x += cell_width;
 
+				/* Reset the color: the [S] button above may have changed nfg to
+				 * the bar color for its active highlight, which would make the
+				 * audio button invisible if it leaked through. */
+				nfg = RGB_TO_ARGB(cfg_bar_text_color);
+
 				/* Audio menu button */
 				if (audiomenu_active) {
 					int px, py;
