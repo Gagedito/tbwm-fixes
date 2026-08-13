@@ -10385,12 +10385,14 @@ toggleappmenu(const Arg *arg)
 {
 	appmenu_active = !appmenu_active;
 	if (appmenu_active) {
-		/* Only one menu at a time: close the audio and network menus so they
-		 * don't overlap this one on screen. */
+		/* Only one menu at a time: close the audio, network and tray menus so
+		 * they don't overlap this one on screen. */
 		audiomenu_active = 0;
 		netmenu_active = 0;
+		tray_menu_reset();
 		updatemenuaudio();
 		updatenetmenu();
+		updatetraymenu();
 		load_applications();
 		menu_current_category = -1;
 		menu_scroll_offset = 0;
