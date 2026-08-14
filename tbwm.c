@@ -344,6 +344,7 @@ static void destroykeyboardgroup(struct wl_listener *listener, void *data);
 static Monitor *dirtomon(enum wlr_direction dir);
 static DwindleNode *dwindle_create(Client *c);
 static void dwindle_remove(Client *c);
+static int dwindle_validate(void);
 static void dwindle_arrange(Monitor *m, uint32_t tags);
 static void dwindle_recalc(DwindleNode *node);
 static DwindleNode *dwindle_find_root(Monitor *m, uint32_t tags);
@@ -3298,6 +3299,26 @@ dwindle_free(DwindleNode *node)
 	dwindle_node_count--;
 }
 
+/* Remove orphaned pool slots (nodes with neither a client nor children) that
+ * the swap inside dwindle_free can leave behind when freeing two adjacent
+ * nodes (leaf + its parent). Without this the pool slowly fills with inert
+ * nodes until dwindle_alloc reports "out of nodes". */
+static void
+dwindle_compact(void)
+{
+	int i;
+	DwindleNode *n;
+
+restart:
+	for (i = 0; i < dwindle_node_count; i++) {
+		n = &dwindle_nodes[i];
+		if (!n->client && !n->children[0] && !n->children[1]) {
+			dwindle_free(n);
+			goto restart;
+		}
+	}
+}
+
 /* Find the root node for a monitor/tags combination */
 DwindleNode *
 dwindle_find_root(Monitor *m, uint32_t tags)
@@ -3307,7 +3328,10 @@ dwindle_find_root(Monitor *m, uint32_t tags)
 	
 	for (i = 0; i < dwindle_node_count; i++) {
 		n = &dwindle_nodes[i];
-		if (n->mon == m && (n->tags & tags) && n->parent == NULL)
+		/* Skip orphan internal nodes (no client and no children) left behind by
+		 * the swap inside dwindle_free: they must never be treated as a root. */
+		if (n->mon == m && (n->tags & tags) && n->parent == NULL &&
+				(n->client || n->children[0] || n->children[1]))
 			return n;
 	}
 	return NULL;
@@ -3473,6 +3497,38 @@ dwindle_create(Client *c)
 	return node;
 }
 
+/* Debug helper: check dwindle tree invariants. Logs a warning and returns
+ * non-zero if the tree is corrupted (self references, duplicated children or
+ * leaves with children). Cheap: the pool is bounded by MAX_DWINDLE_NODES. */
+static int
+dwindle_validate(void)
+{
+	int i, broken = 0;
+	DwindleNode *n;
+
+	for (i = 0; i < dwindle_node_count; i++) {
+		n = &dwindle_nodes[i];
+		if (n->children[0] && n->children[0] == n->children[1]) {
+			tbwm_log(TBWM_LOG_ERROR, "dwindle: node %p references the same child twice\n", (void *)n);
+			broken = 1;
+		}
+		if (n->children[0] == n || n->children[1] == n) {
+			tbwm_log(TBWM_LOG_ERROR, "dwindle: node %p references itself as child\n", (void *)n);
+			broken = 1;
+		}
+		if (n->client && (n->children[0] || n->children[1])) {
+			tbwm_log(TBWM_LOG_ERROR, "dwindle: leaf node %p has children\n", (void *)n);
+			broken = 1;
+		}
+		if (n->client && n->client->dwindle != n) {
+			tbwm_log(TBWM_LOG_ERROR, "dwindle: client %p dwindle=%p mismatch node %p\n",
+					(void *)n->client, (void *)n->client->dwindle, (void *)n);
+			broken = 1;
+		}
+	}
+	return broken;
+}
+
 /* Remove a client from the dwindle tree */
 void
 dwindle_remove(Client *c)
@@ -3487,7 +3543,11 @@ dwindle_remove(Client *c)
 	
 	if (!parent) {
 		/* This was the root - just free it */
+		node->children[0] = node->children[1] = NULL;
+		node->client = NULL;
 		dwindle_free(node);
+		dwindle_compact();
+		dwindle_validate();
 		return;
 	}
 	
@@ -3495,7 +3555,17 @@ dwindle_remove(Client *c)
 	sibling = (parent->children[0] == node) 
 		? parent->children[1] : parent->children[0];
 	
-	if (!sibling) {
+	/* Sibling takes over parent's position (or the slot is unlinked) */
+	if (sibling) {
+		sibling->box = parent->box;
+		sibling->parent = parent->parent;
+		if (parent->parent) {
+			if (parent->parent->children[0] == parent)
+				parent->parent->children[0] = sibling;
+			else
+				parent->parent->children[1] = sibling;
+		}
+	} else {
 		/* No sibling, just remove parent too */
 		if (parent->parent) {
 			if (parent->parent->children[0] == parent)
@@ -3503,36 +3573,25 @@ dwindle_remove(Client *c)
 			else
 				parent->parent->children[1] = NULL;
 		}
-		/* Detach node from parent so the swap inside dwindle_free does not
-		 * copy a stale child reference back into the slot being released. */
-		if (parent->children[0] == node)
-			parent->children[0] = NULL;
-		else
-			parent->children[1] = NULL;
-		dwindle_free(node);
-		dwindle_free(parent);
-		return;
 	}
 	
-	/* Sibling takes over parent's position */
-	sibling->box = parent->box;
-	sibling->parent = parent->parent;
+	/* Fully detach both nodes from the tree. If any child reference is left on
+	 * the parent, the swap inside dwindle_free copies it into the slot being
+	 * released and re-parents the surviving sibling there, leaving it referenced
+	 * twice (the remaining window keeps occupying half the screen) and opening
+	 * the door to self-referencing nodes that crash dwindle_recalc with
+	 * infinite recursion. */
+	node->parent = NULL;
+	node->children[0] = node->children[1] = NULL;
+	node->client = NULL;
+	parent->parent = NULL;
+	parent->children[0] = parent->children[1] = NULL;
+	parent->client = NULL;
 	
-	if (parent->parent) {
-		if (parent->parent->children[0] == parent)
-			parent->parent->children[0] = sibling;
-		else
-			parent->parent->children[1] = sibling;
-	}
-	/* Let the sibling occupy the slot that referenced node so the struct
-	 * copied around by dwindle_free never carries a self-referencing child. */
-	if (parent->children[0] == node)
-		parent->children[0] = sibling;
-	else
-		parent->children[1] = sibling;
-	
-	dwindle_free(node);
 	dwindle_free(parent);
+	dwindle_free(node);
+	dwindle_compact();
+	dwindle_validate();
 }
 
 /* Arrange all dwindle windows on a monitor */
