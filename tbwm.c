@@ -1237,6 +1237,10 @@ static struct wlr_box sgeom;
 static struct wl_list mons;
 static Monitor *selmon;
 
+/* Set while a keybinding is being processed if it spawned a process, so the
+ * keyboard repeat timer is not armed and the process is not spawned repeatedly. */
+static int kb_spawned = 0;
+
 /* forward declarations for listeners (ensure available for static initializers) */
 static void axisnotify(struct wl_listener *listener, void *data);
 static void buttonpress(struct wl_listener *listener, void *data);
@@ -3499,8 +3503,14 @@ dwindle_remove(Client *c)
 			else
 				parent->parent->children[1] = NULL;
 		}
-		dwindle_free(parent);
+		/* Detach node from parent so the swap inside dwindle_free does not
+		 * copy a stale child reference back into the slot being released. */
+		if (parent->children[0] == node)
+			parent->children[0] = NULL;
+		else
+			parent->children[1] = NULL;
 		dwindle_free(node);
+		dwindle_free(parent);
 		return;
 	}
 	
@@ -3514,9 +3524,15 @@ dwindle_remove(Client *c)
 		else
 			parent->parent->children[1] = sibling;
 	}
+	/* Let the sibling occupy the slot that referenced node so the struct
+	 * copied around by dwindle_free never carries a self-referencing child. */
+	if (parent->children[0] == node)
+		parent->children[0] = sibling;
+	else
+		parent->children[1] = sibling;
 	
-	dwindle_free(parent);
 	dwindle_free(node);
+	dwindle_free(parent);
 }
 
 /* Arrange all dwindle windows on a monitor */
@@ -6766,13 +6782,14 @@ keypress(struct wl_listener *listener, void *data)
 	/* On _press_ if there is no active screen locker,
 	 * attempt to process a compositor keybinding. */
 	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+		kb_spawned = 0;
 		for (i = 0; i < nsyms; i++)
 			handled = keybinding(mods, syms[i]) || handled;
 	}
 
 	/* Don't enable key repeat if we're now in screenshot mode (spawn-grab was called)
 	 * or if the keybinding spawned a process - we don't want to spawn it repeatedly. */
-	if (handled && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
+	if (handled && !kb_spawned && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
 		group->mods = mods;
 		group->keysyms = syms;
 		group->nsyms = nsyms;
@@ -8185,6 +8202,7 @@ spawn(const Arg *arg)
 		((char **)arg->v)[0],
 		getenv("DISPLAY") ? getenv("DISPLAY") : "(none)",
 		getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(none)");
+	kb_spawned = 1;
 	if (fork() == 0) {
 		dup2(STDERR_FILENO, STDOUT_FILENO);
 		setsid();
@@ -8252,6 +8270,7 @@ static s7_pointer scm_spawn(s7_scheme *sc, s7_pointer args)
 		execlp("/bin/sh", "/bin/sh", "-c", cmd, NULL);
 		_exit(EXIT_FAILURE);
 	}
+	kb_spawned = 1;
 	return s7_t(sc);
 }
 

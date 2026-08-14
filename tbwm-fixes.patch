@@ -1745,7 +1745,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..353d3fd 100644
+index a1e049d..427ff3b 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -1,5 +1,6 @@
@@ -2220,7 +2220,18 @@ index a1e049d..353d3fd 100644
  static int locked;
  static void *exclusive_focus;
  static struct wl_display *dpy;
-@@ -1045,8 +1339,9 @@ applyrules(Client *c)
+@@ -943,6 +1237,10 @@ static struct wlr_box sgeom;
+ static struct wl_list mons;
+ static Monitor *selmon;
+ 
++/* Set while a keybinding is being processed if it spawned a process, so the
++ * keyboard repeat timer is not armed and the process is not spawned repeatedly. */
++static int kb_spawned = 0;
++
+ /* forward declarations for listeners (ensure available for static initializers) */
+ static void axisnotify(struct wl_listener *listener, void *data);
+ static void buttonpress(struct wl_listener *listener, void *data);
+@@ -1045,8 +1343,9 @@ applyrules(Client *c)
  	/* rule matching */
  	const char *appid, *title;
  	uint32_t newtags = 0;
@@ -2231,7 +2242,7 @@ index a1e049d..353d3fd 100644
  	Monitor *mon = selmon, *m;
  
  	appid = client_get_appid(c);
-@@ -1064,6 +1359,21 @@ applyrules(Client *c)
+@@ -1064,6 +1363,21 @@ applyrules(Client *c)
  			}
  		}
  	}
@@ -2253,7 +2264,7 @@ index a1e049d..353d3fd 100644
  
  	c->isfloating |= client_is_float_type(c);
  	setmon(c, mon, newtags);
-@@ -1304,6 +1614,87 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1304,6 +1618,87 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -2341,7 +2352,7 @@ index a1e049d..353d3fd 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1766,278 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1770,278 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -2620,7 +2631,7 @@ index a1e049d..353d3fd 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1591,6 +2254,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+@@ -1591,6 +2258,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
  	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
  }
  
@@ -2689,7 +2700,7 @@ index a1e049d..353d3fd 100644
  void
  cleanup(void)
  {
-@@ -1606,6 +2331,13 @@ cleanup(void)
+@@ -1606,6 +2335,13 @@ cleanup(void)
  		kill(-child_pid, SIGTERM);
  		waitpid(child_pid, NULL, 0);
  	}
@@ -2703,7 +2714,7 @@ index a1e049d..353d3fd 100644
  	wlr_xcursor_manager_destroy(cursor_mgr);
  
  	/* Clean up glyph cache bitmaps */
-@@ -1633,6 +2365,58 @@ cleanup(void)
+@@ -1633,6 +2369,58 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -2762,7 +2773,7 @@ index a1e049d..353d3fd 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +2466,6 @@ cleanup(void)
+@@ -1682,9 +2470,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -2772,7 +2783,7 @@ index a1e049d..353d3fd 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -2406,7 +3187,9 @@ destroynotify(struct wl_listener *listener, void *data)
+@@ -2406,7 +3191,9 @@ destroynotify(struct wl_listener *listener, void *data)
  		free(c->scroll_title_pixels);
  		c->scroll_title_pixels = NULL;
  	}
@@ -2783,7 +2794,40 @@ index a1e049d..353d3fd 100644
  	if (c->scroll_scene_buf) {
  		wlr_scene_buffer_set_buffer(c->scroll_scene_buf, NULL);
  		c->scroll_scene_buf = NULL;
-@@ -3191,9 +3974,10 @@ void
+@@ -2716,8 +3503,14 @@ dwindle_remove(Client *c)
+ 			else
+ 				parent->parent->children[1] = NULL;
+ 		}
+-		dwindle_free(parent);
++		/* Detach node from parent so the swap inside dwindle_free does not
++		 * copy a stale child reference back into the slot being released. */
++		if (parent->children[0] == node)
++			parent->children[0] = NULL;
++		else
++			parent->children[1] = NULL;
+ 		dwindle_free(node);
++		dwindle_free(parent);
+ 		return;
+ 	}
+ 	
+@@ -2731,9 +3524,15 @@ dwindle_remove(Client *c)
+ 		else
+ 			parent->parent->children[1] = sibling;
+ 	}
++	/* Let the sibling occupy the slot that referenced node so the struct
++	 * copied around by dwindle_free never carries a self-referencing child. */
++	if (parent->children[0] == node)
++		parent->children[0] = sibling;
++	else
++		parent->children[1] = sibling;
+ 	
+-	dwindle_free(parent);
+ 	dwindle_free(node);
++	dwindle_free(parent);
+ }
+ 
+ /* Arrange all dwindle windows on a monitor */
+@@ -3191,9 +3990,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -2797,7 +2841,7 @@ index a1e049d..353d3fd 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +4150,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +4166,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -2823,7 +2867,7 @@ index a1e049d..353d3fd 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +4178,9 @@ launcher_get_match(int index)
+@@ -3382,9 +4194,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -2835,7 +2879,7 @@ index a1e049d..353d3fd 100644
  			count++;
  		}
  	}
-@@ -3586,2662 +4382,5083 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,2677 +4398,5101 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -2960,9 +3004,23 @@ index a1e049d..353d3fd 100644
 -		if (match_count > 0) {
 -			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
 -			updatebars();
+-		}
+-		return 1;
+-	}
 +		if (!line[0])
 +			continue;
-+
+ 
+-	/* Regular character input */
+-	if (sym >= 0x20 && sym <= 0x7e &&
+-	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
+-		launcher_input[launcher_input_len++] = (char)sym;
+-		launcher_input[launcher_input_len] = '\0';
+-		launcher_selection = 0;
+-		updatebars();
+-
+-		/* Auto-run if only one match */
+-		if (launcher_match_count() == 1) {
+-			runlauncher();
 +		{
 +			char *t = line;
 +			while (nt < 6) {
@@ -2977,24 +3035,13 @@ index a1e049d..353d3fd 100644
 -		return 1;
 -	}
  
--	/* Regular character input */
--	if (sym >= 0x20 && sym <= 0x7e &&
--	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
--		launcher_input[launcher_input_len++] = (char)sym;
--		launcher_input[launcher_input_len] = '\0';
--		launcher_selection = 0;
--		updatebars();
+-	return 1; /* Consume all keys in launcher mode */
 +		/* Lines with fewer than 4 fields cannot be parsed in either layout.
 +		 * tok[] is zero-initialized, but skip them defensively instead of
 +		 * strncpy'ing empty/positional data. */
 +		if (nt < 4)
 +			continue;
- 
--		/* Auto-run if only one match */
--		if (launcher_match_count() == 1) {
--			runlauncher();
--		}
--		return 1;
++
 +		/* Detect legacy vs new layout */
 +		if (nt >= 5 &&
 +		    (strcmp(tok[3], "Conectar") == 0 || strcmp(tok[3], "Desconectar") == 0 ||
@@ -3023,9 +3070,7 @@ index a1e049d..353d3fd 100644
 +		dst[n].name[NET_NAME_LEN - 1] = '\0';
 +		dst[n].exec[NET_EXEC_LEN - 1] = '\0';
 +		n++;
- 	}
--
--	return 1; /* Consume all keys in launcher mode */
++	}
 +	return n;
  }
  
@@ -3193,11 +3238,11 @@ index a1e049d..353d3fd 100644
 -
 -	int handled = 0;
 -	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
--
--	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
 +	int j;
 +	int ci;
  
+-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+-
 -	/* If in screenshot-grab mode, don't run compositor keybindings; forward
 -	 * keyboard events to the seat so the screenshot client can receive keys. */
 -	if (screenshot_mode) {
@@ -3325,9 +3370,14 @@ index a1e049d..353d3fd 100644
  	int i;
 -	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
 -		return 0;
- 
+-
 -	wl_event_source_timer_update(group->key_repeat_source,
 -			1000 / group->wlr_group->keyboard.repeat_info.rate);
+-
+-	for (i = 0; i < group->nsyms; i++)
+-		keybinding(group->mods, group->keysyms[i]);
+ 
+-	return 0;
 +	net_subgroup_count = 0;
 +	for (i = 0; i < net_entry_count; i++) {
 +	if (net_current_category < 0 ||
@@ -3348,15 +3398,18 @@ index a1e049d..353d3fd 100644
 +		net_subgroup_count++;
 +	}
 +	}
-+}
+ }
  
--	for (i = 0; i < group->nsyms; i++)
--		keybinding(group->mods, group->keysyms[i]);
+-void
+-killclient(const Arg *arg)
 +/* Stop an in-flight asynchronous load: remove the event source, close the
 + * pipe and kill/reap the child. */
 +static void
 +netmenu_cancel_load(void)
-+{
+ {
+-	Client *sel = focustop(selmon);
+-	if (sel)
+-		client_send_close(sel);
 +	if (netmenu_source) {
 +		wl_event_source_remove(netmenu_source);
 +		netmenu_source = NULL;
@@ -3370,9 +3423,17 @@ index a1e049d..353d3fd 100644
 +		waitpid(netmenu_child_pid, NULL, WNOHANG);
 +		netmenu_child_pid = -1;
 +	}
-+}
+ }
  
--	return 0;
+-void
+-locksession(struct wl_listener *listener, void *data)
+-{
+-	struct wlr_session_lock_v1 *session_lock = data;
+-	SessionLock *lock;
+-	wlr_scene_node_set_enabled(&locked_bg->node, 1);
+-	if (cur_lock) {
+-		wlr_session_lock_v1_destroy(session_lock);
+-		return;
 +/* Re-parse the accumulated netmenu output and re-render, preserving the
 + * user's navigation position by name. Called while the child is still
 + * streaming output (incremental render, so "Buscar dispositivos" grows item
@@ -3416,7 +3477,9 @@ index a1e049d..353d3fd 100644
 +				break;
 +			}
 +		}
-+	}
+ 	}
+-	lock = session_lock->data = ecalloc(1, sizeof(*lock));
+-	focusclient(NULL, 0);
 +	netmenu_build_groups();
 +	if (keep && net_current_category >= 0) {
 +		net_current_group = -1;
@@ -3440,18 +3503,16 @@ index a1e049d..353d3fd 100644
 +	}
 +	if (netmenu_active)
 +		updatenetmenu();
- }
++}
  
--void
--killclient(const Arg *arg)
+-	lock->scene = wlr_scene_tree_create(layers[LyrBlock]);
+-	cur_lock = lock->lock = session_lock;
+-	locked = 1;
 +/* Read netmenu command output as it arrives; finalize when the child closes
 + * the pipe (EOF). Never blocks the event loop. */
 +static int
 +netmenu_read_cb(int fd, uint32_t mask, void *data)
- {
--	Client *sel = focustop(selmon);
--	if (sel)
--		client_send_close(sel);
++{
 +	char buf[4096];
 +	ssize_t r;
 +	int done = 0;
@@ -3479,11 +3540,15 @@ index a1e049d..353d3fd 100644
 +	}
 +	if (r == 0)
 +		done = 1;
-+
+ 
+-	LISTEN(&session_lock->events.new_surface, &lock->new_surface, createlocksurface);
+-	LISTEN(&session_lock->events.destroy, &lock->destroy, destroysessionlock);
+-	LISTEN(&session_lock->events.unlock, &lock->unlock, unlocksession);
 +	if (done) {
 +		/* A reload invalidates any in-progress password entry */
 +		net_password_reset();
-+
+ 
+-	wlr_session_lock_v1_send_locked(session_lock);
 +		/* Child finished */
 +		if (netmenu_source) {
 +			wl_event_source_remove(netmenu_source);
@@ -3504,46 +3569,73 @@ index a1e049d..353d3fd 100644
  }
  
 -void
--locksession(struct wl_listener *listener, void *data)
+-mapnotify(struct wl_listener *listener, void *data)
 +/* Start an asynchronous load of the netmenu data. The command runs in a
 + * forked child; its stdout is read through a non-blocking pipe in the
 + * Wayland event loop, so this returns immediately. */
 +static void
 +netmenu_refresh(void)
  {
--	struct wlr_session_lock_v1 *session_lock = data;
--	SessionLock *lock;
--	wlr_scene_node_set_enabled(&locked_bg->node, 1);
--	if (cur_lock) {
--		wlr_session_lock_v1_destroy(session_lock);
+-	/* Called when the surface is mapped, or ready to display on-screen. */
+-	Client *p = NULL;
+-	Client *w, *c = wl_container_of(listener, c, map);
+-	Monitor *m;
 +	int p[2];
 +	int flags;
 +	pid_t pid;
-+
+ 
+-	/* Create scene tree for this client */
+-	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
+-	/* Enabled later by a call to arrange() */
+-	wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
+-	c->scene_surface = c->type == XDGShell
+-			? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
+-			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
+-	c->scene->node.data = c->scene_surface->node.data = c;
 +	netmenu_cancel_load();
 +	netmenu_out_len = 0;
 +	netmenu_out[0] = '\0';
-+
+ 
+-	client_get_geometry(c, &c->geom);
 +	if (netmenu_cmd[0] == '\0')
 +		return;
-+
+ 
+-	/* Handle unmanaged clients first so we can return prior create borders */
+-	if (client_is_unmanaged(c)) {
+-		/* Unmanaged clients always are floating */
+-		file_debug_log("tbwm: reparent map unmanaged: client=%p title=\"%s\" parent=%p -> %p\n",
+-				c, client_get_title(c), c->scene->node.parent, (void*)layers[LyrFloat]);
+-		safe_scene_node_reparent(&c->scene->node, layers[LyrFloat], "xwayland/new surface reparent to float");
+-		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
+-		client_set_size(c, c->geom.width, c->geom.height);
+-		if (client_wants_focus(c)) {
+-			focusclient(c, 1);
+-			exclusive_focus = c;
+-		}
+-		goto unset_fullscreen;
 +	if (pipe(p) < 0) {
 +		tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: pipe() failed: %s\n", strerror(errno));
- 		return;
++		return;
  	}
--	lock = session_lock->data = ecalloc(1, sizeof(*lock));
--	focusclient(NULL, 0);
  
--	lock->scene = wlr_scene_tree_create(layers[LyrBlock]);
--	cur_lock = lock->lock = session_lock;
--	locked = 1;
+-	/* Frame buffers will be created by updateframe() */
+-	c->frame_top = NULL;
+-	c->frame_bottom = NULL;
+-	c->frame_left = NULL;
+-	c->frame_right = NULL;
+-	c->dwindle = NULL;
+-
+-	/* Initialize client geometry with room for text frame (1 cell each side) */
+-	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
+-	c->geom.width += 2 * cell_width;
+-	c->geom.height += 2 * cell_height;
 +	flags = fcntl(p[0], F_GETFL, 0);
 +	if (flags >= 0)
 +		fcntl(p[0], F_SETFL, flags | O_NONBLOCK);
  
--	LISTEN(&session_lock->events.new_surface, &lock->new_surface, createlocksurface);
--	LISTEN(&session_lock->events.destroy, &lock->destroy, destroysessionlock);
--	LISTEN(&session_lock->events.unlock, &lock->unlock, unlocksession);
+-	/* Insert this client into client lists (at end for tiling order, front for focus) */
+-	wl_list_insert(clients.prev, &c->link);
+-	wl_list_insert(&fstack, &c->flink);
 +	/* When focused on a search sub-topic, rescan only that section so the
 +	 * refresh is short and streams quickly (tbwm-network bt / wifi instead
 +	 * of the full two-category command). */
@@ -3563,7 +3655,15 @@ index a1e049d..353d3fd 100644
 +		else
 +			snprintf(cmd, sizeof(cmd), "%s", netmenu_cmd);
  
--	wlr_session_lock_v1_send_locked(session_lock);
+-	/* Set initial monitor, tags, floating status, and focus:
+-	 * we always consider floating, clients that have parent and thus
+-	 * we set the same tags and monitor as its parent.
+-	 * If there is no parent, apply rules */
+-	if ((p = client_get_parent(c))) {
+-		c->isfloating = 1;
+-		setmon(c, p->mon, p->tags);
+-	} else {
+-		applyrules(c);
 +		pid = fork();
 +		if (pid < 0) {
 +			tbwm_log(TBWM_LOG_WARN, "tbwm: netmenu: fork() failed: %s\n", strerror(errno));
@@ -3581,8 +3681,14 @@ index a1e049d..353d3fd 100644
 +			execl("/bin/sh", "/bin/sh", "-c", cmd, (char *)NULL);
 +			_exit(127);
 +		}
-+	}
-+
+ 	}
+-	printstatus();
+ 
+-unset_fullscreen:
+-	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
+-	wl_list_for_each(w, &clients, link) {
+-		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
+-			setfullscreen(w, 0);
 +	/* Parent */
 +	close(p[1]);
 +	netmenu_pipe_fd = p[0];
@@ -3595,100 +3701,91 @@ index a1e049d..353d3fd 100644
 +		netmenu_child_pid = -1;
 +		kill(pid, SIGTERM);
 +		waitpid(pid, NULL, WNOHANG);
-+	}
+ 	}
+-
+-	/* Ensure top layers remain above after a new client maps,
+-	 * but keep LyrFS at the very top so fullscreen covers the bar. */
+-	safe_raise_tree(layers[LyrOverlay], "mapnotify LyrOverlay");
+-	safe_raise_tree(layers[LyrTop], "mapnotify LyrTop");
+-	safe_raise_tree(layers[LyrFS], "mapnotify LyrFS");
  }
  
 -void
--mapnotify(struct wl_listener *listener, void *data)
+-maximizenotify(struct wl_listener *listener, void *data)
 +/* Return 1 while the network menu is focused on a "search" sub-topic (e.g.
 + * "Buscar red" / "Buscar dispositivos") so we keep rescanning, 0 otherwise. */
 +static int
 +netmenu_scan_is_active(void)
  {
--	/* Called when the surface is mapped, or ready to display on-screen. */
--	Client *p = NULL;
--	Client *w, *c = wl_container_of(listener, c, map);
--	Monitor *m;
--
--	/* Create scene tree for this client */
--	c->scene = client_surface(c)->data = wlr_scene_tree_create(layers[LyrTile]);
--	/* Enabled later by a call to arrange() */
--	wlr_scene_node_set_enabled(&c->scene->node, client_is_unmanaged(c));
--	c->scene_surface = c->type == XDGShell
--			? wlr_scene_xdg_surface_create(c->scene, c->surface.xdg)
--			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
--	c->scene->node.data = c->scene_surface->node.data = c;
--
--	client_get_geometry(c, &c->geom);
--
--	/* Handle unmanaged clients first so we can return prior create borders */
--	if (client_is_unmanaged(c)) {
--		/* Unmanaged clients always are floating */
--		file_debug_log("tbwm: reparent map unmanaged: client=%p title=\"%s\" parent=%p -> %p\n",
--				c, client_get_title(c), c->scene->node.parent, (void*)layers[LyrFloat]);
--		safe_scene_node_reparent(&c->scene->node, layers[LyrFloat], "xwayland/new surface reparent to float");
--		wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
--		client_set_size(c, c->geom.width, c->geom.height);
--		if (client_wants_focus(c)) {
--			focusclient(c, 1);
--			exclusive_focus = c;
--		}
--		goto unset_fullscreen;
+-	/* This event is raised when a client would like to maximize itself,
+-	 * typically because the user clicked on the maximize button on
+-	 * client-side decorations. tbwm doesn't support maximization, but
+-	 * to conform to xdg-shell protocol we still must send a configure.
+-	 * Since xdg-shell protocol v5 we should ignore request of unsupported
+-	 * capabilities, just schedule a empty configure when the client uses <5
+-	 * protocol version
+-	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply. */
+-	Client *c = wl_container_of(listener, c, maximize);
+-	if (c->surface.xdg->initialized
+-			&& wl_resource_get_version(c->surface.xdg->toplevel->resource)
+-					< XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION)
+-		wlr_xdg_surface_schedule_configure(c->surface.xdg);
 +	if (!netmenu_active || net_current_category < 0 || net_current_group < 0)
 +		return 0;
 +	{
 +		const char *g = net_groups[net_current_group];
 +		return (strcmp(g, "Buscar red") == 0 || strcmp(g, "Buscar dispositivos") == 0);
- 	}
-+}
++	}
+ }
  
--	/* Frame buffers will be created by updateframe() */
--	c->frame_top = NULL;
--	c->frame_bottom = NULL;
--	c->frame_left = NULL;
--	c->frame_right = NULL;
--	c->dwindle = NULL;
--
--	/* Initialize client geometry with room for text frame (1 cell each side) */
--	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
--	c->geom.width += 2 * cell_width;
--	c->geom.height += 2 * cell_height;
--
--	/* Insert this client into client lists (at end for tiling order, front for focus) */
--	wl_list_insert(clients.prev, &c->link);
--	wl_list_insert(&fstack, &c->flink);
--
--	/* Set initial monitor, tags, floating status, and focus:
--	 * we always consider floating, clients that have parent and thus
--	 * we set the same tags and monitor as its parent.
--	 * If there is no parent, apply rules */
--	if ((p = client_get_parent(c))) {
--		c->isfloating = 1;
--		setmon(c, p->mon, p->tags);
--	} else {
--		applyrules(c);
+-void
+-monocle(Monitor *m)
 +/* Auto-rescan keepalive: while the user stays on a search sub-topic, re-run the
 + * netmenu command so new networks/devices keep appearing. Stops on exit. */
 +static int
 +netmenu_scan_keepalive(void *data)
-+{
+ {
+-	Client *c;
+-	int n = 0;
+-
+-	wl_list_for_each(c, &clients, link) {
+-		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
+-			continue;
+-		resize(c, m->w, 0);
+-		n++;
 +	(void)data;
 +	if (netmenu_scan_is_active() && netmenu_child_pid <= 0) {
 +		netmenu_refresh();
  	}
--	printstatus();
+-	if (n)
+-		snprintf(m->ltsymbol, LENGTH(m->ltsymbol), "[%d]", n);
+-	if ((c = focustop(m)))
+-		safe_raise_node(&c->scene->node, "dwindle/new_parent raise");
 +	/* Re-arm while on a search sub-topic even if the previous refresh is
 +	 * still running, so the next fire picks it up as soon as it finishes. */
 +	if (netmenu_scan_is_active())
 +		wl_event_source_timer_update(net_scan_timer, 8000);
 +	return 1;
-+}
+ }
  
--unset_fullscreen:
--	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
--	wl_list_for_each(w, &clients, link) {
--		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
--			setfullscreen(w, 0);
+-void
+-motionabsolute(struct wl_listener *listener, void *data)
+-{
+-	/* This event is forwarded by the cursor when a pointer emits an _absolute_
+-	 * motion event, from 0..1 on each axis. This happens, for example, when
+-	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
+-	 * move the mouse over the window. You could enter the window from any edge,
+-	 * so we have to warp the mouse there. Also, some hardware emits these events. */
+-	struct wlr_pointer_motion_absolute_event *event = data;
+-	double lx, ly, dx, dy;
+-
+-	if (!event->time_msec) /* this is 0 with virtual pointers */
+-		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
+-
+-	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
+-	dx = lx - cursor->x;
+-	dy = ly - cursor->y;
+-	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
 +static void
 +togglenetmenu(const Arg *arg)
 +{
@@ -3716,51 +3813,37 @@ index a1e049d..353d3fd 100644
 +		netmenu_cancel_load();
 +		net_password_reset();
 +		blt_stop();
- 	}
--
--	/* Ensure top layers remain above after a new client maps,
--	 * but keep LyrFS at the very top so fullscreen covers the bar. */
--	safe_raise_tree(layers[LyrOverlay], "mapnotify LyrOverlay");
--	safe_raise_tree(layers[LyrTop], "mapnotify LyrTop");
--	safe_raise_tree(layers[LyrFS], "mapnotify LyrFS");
++	}
 +	updatenetmenu();
 +	updatebars();
  }
  
 -void
--maximizenotify(struct wl_listener *listener, void *data)
+-motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
+-		double dx_unaccel, double dy_unaccel)
 +static void
 +net_password_reset(void)
  {
--	/* This event is raised when a client would like to maximize itself,
--	 * typically because the user clicked on the maximize button on
--	 * client-side decorations. tbwm doesn't support maximization, but
--	 * to conform to xdg-shell protocol we still must send a configure.
--	 * Since xdg-shell protocol v5 we should ignore request of unsupported
--	 * capabilities, just schedule a empty configure when the client uses <5
--	 * protocol version
--	 * wlr_xdg_surface_schedule_configure() is used to send an empty reply. */
--	Client *c = wl_container_of(listener, c, maximize);
--	if (c->surface.xdg->initialized
--			&& wl_resource_get_version(c->surface.xdg->toplevel->resource)
--					< XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION)
--		wlr_xdg_surface_schedule_configure(c->surface.xdg);
+-	double sx = 0, sy = 0, sx_confined, sy_confined;
+-	Client *c = NULL, *w = NULL;
+-	LayerSurface *l = NULL;
+-	struct wlr_surface *surface = NULL;
+-	struct wlr_pointer_constraint_v1 *constraint;
 +	net_password_mode = 0;
 +	net_password_len = 0;
 +	net_password[0] = '\0';
- }
++}
  
--void
--monocle(Monitor *m)
--{
--	Client *c;
--	int n = 0;
+-	/* Find the client under the pointer and send the event along. */
+-	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
  
--	wl_list_for_each(c, &clients, link) {
--		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
--			continue;
--		resize(c, m->w, 0);
--		n++;
+-	if (cursor_mode == CurPressed && !seat->drag
+-			&& surface != seat->pointer_state.focused_surface
+-			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
+-		c = w;
+-		surface = seat->pointer_state.focused_surface;
+-		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
+-		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
 +/* Run an entry's command, or switch to password entry if it needs one. */
 +static void
 +netmenu_run(NetEntry *e)
@@ -3776,10 +3859,6 @@ index a1e049d..353d3fd 100644
 +		updatenetmenu();
 +		return;
  	}
--	if (n)
--		snprintf(m->ltsymbol, LENGTH(m->ltsymbol), "[%d]", n);
--	if ((c = focustop(m)))
--		safe_raise_node(&c->scene->node, "dwindle/new_parent raise");
 +	if (e->btpair) {
 +		blt_start(e->exec, e->name);
 +		return; /* menu stays open showing the pairing dialog */
@@ -3791,10 +3870,16 @@ index a1e049d..353d3fd 100644
 +	netmenu_active = 0;
 +	updatenetmenu();
 +	updatebars();
- }
++}
  
--void
--motionabsolute(struct wl_listener *listener, void *data)
+-	/* time is 0 in internal calls meant to restore pointer focus. */
+-	if (time) {
+-		wlr_relative_pointer_manager_v1_send_relative_motion(
+-				relative_pointer_mgr, seat, (uint64_t)time * 1000,
+-				dx, dy, dx_unaccel, dy_unaccel);
+-
+-		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
+-			cursorconstrain(constraint);
 +/* Build "nmcli dev wifi connect 'SSID' password 'escaped'" and run it. */
 +static void
 +netmenu_connect_with_password(void)
@@ -3824,21 +3909,24 @@ index a1e049d..353d3fd 100644
 +	updatenetmenu();
 +	updatebars();
 +}
-+
+ 
+-		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
+-			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
+-			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
+-				sx = cursor->x - c->geom.x - c->bw;
+-				sy = cursor->y - c->geom.y - c->bw;
+-				if (wlr_region_confine(&active_constraint->region, sx, sy,
+-						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
+-					dx = sx_confined - sx;
+-					dy = sy_confined - sy;
+-				}
 +static int
 +netmenukey(xkb_keysym_t sym)
- {
--	/* This event is forwarded by the cursor when a pointer emits an _absolute_
--	 * motion event, from 0..1 on each axis. This happens, for example, when
--	 * wlroots is running under a Wayland window rather than KMS+DRM, and you
--	 * move the mouse over the window. You could enter the window from any edge,
--	 * so we have to warp the mouse there. Also, some hardware emits these events. */
--	struct wlr_pointer_motion_absolute_event *event = data;
--	double lx, ly, dx, dy;
++{
 +	int item_count;
  
--	if (!event->time_msec) /* this is 0 with virtual pointers */
--		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
+-				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
+-					return;
 +	/* Bluetooth pairing dialog: the session lives in bluetooth.c; it tells us
 +	 * whether the key was consumed and whether a finished menu-initiated
 +	 * pairing should close the menu. */
@@ -3848,24 +3936,54 @@ index a1e049d..353d3fd 100644
 +			if (btk == BLKEY_CLOSE_MENU) {
 +				netmenu_active = 0;
 +				updatebars();
-+			}
+ 			}
 +			updatenetmenu();
 +			return 1;
-+		}
+ 		}
 +	}
  
--	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
--	dx = lx - cursor->x;
--	dy = ly - cursor->y;
--	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
--}
+-		wlr_cursor_move(cursor, device, dx, dy);
+-		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+-
+-		/* If compositor entered screenshot-grab mode, forward motion only to the
+-		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
+-		if (screenshot_mode) {
+-			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+-			if (cursor && cursor_mgr)
+-				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
+-			return;
 +	/* Password entry mode: consume everything, only a few keys act */
 +	if (net_password_mode) {
 +		if (sym == XKB_KEY_Escape || sym == XKB_KEY_Left || sym == XKB_KEY_h) {
 +			net_password_reset();
 +			updatenetmenu();
 +			return 1;
-+		}
+ 		}
+-
+-		/* Update selmon (even while dragging a window) */
+-		if (sloppyfocus)
+-			selmon = xytomon(cursor->x, cursor->y);
+-		
+-		/* Update menu hover selection */
+-		if (appmenu_active && selmon) {
+-			int menu_x = selmon->m.x;
+-			int menu_y = selmon->m.y + cell_height;
+-			int menu_w = 25 * cell_width;
+-			int menu_h = 25 * cell_height;
+-			
+-			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
+-			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
+-				int rel_y = (int)(cursor->y - menu_y);
+-				int hovered_row = rel_y / cell_height;
+-				
+-				/* Row 0 is title bar, rows 1-23 are content */
+-				if (hovered_row >= 1 && hovered_row <= 23) {
+-					int new_selected = hovered_row - 1; /* 0-indexed content row */
+-					if (new_selected != menu_selected_row) {
+-						menu_selected_row = new_selected;
+-						updateappmenu();
+-					}
+-				}
 +		if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
 +			netmenu_connect_with_password();
 +			return 1;
@@ -3874,7 +3992,7 @@ index a1e049d..353d3fd 100644
 +			if (net_password_len > 0) {
 +				net_password[--net_password_len] = '\0';
 +				updatenetmenu();
-+			}
+ 			}
 +			return 1;
 +		}
 +		if (sym >= 0x20 && sym <= 0x7e &&
@@ -3882,23 +4000,40 @@ index a1e049d..353d3fd 100644
 +			net_password[net_password_len++] = (char)sym;
 +			net_password[net_password_len] = '\0';
 +			updatenetmenu();
-+		}
+ 		}
 +		return 1;
-+	}
+ 	}
  
--void
--motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
--		double dx_unaccel, double dy_unaccel)
--{
--	double sx = 0, sy = 0, sx_confined, sy_confined;
--	Client *c = NULL, *w = NULL;
--	LayerSurface *l = NULL;
--	struct wlr_surface *surface = NULL;
--	struct wlr_pointer_constraint_v1 *constraint;
+-	/* Update drag icon's position */
+-	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
 +	item_count = netmenu_item_count();
  
--	/* Find the client under the pointer and send the event along. */
--	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+-	/* If we are currently grabbing the mouse, handle and return */
+-	if (cursor_mode == CurMove) {
+-		/* Move the grabbed client to the new position, snapped to grid */
+-		int new_x = (int)round(cursor->x) - grabcx;
+-		int new_y = (int)round(cursor->y) - grabcy;
+-		new_x = (new_x / cell_width) * cell_width;
+-		new_y = (new_y / cell_height) * cell_height;
+-		resize(grabc, (struct wlr_box){.x = new_x, .y = new_y,
+-			.width = grabc->geom.width, .height = grabc->geom.height}, 1);
+-		return;
+-	} else if (cursor_mode == CurResize) {
+-		if (grabc->isfloating) {
+-			/* Floating: direct resize */
+-			resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
+-				.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
+-		} else if (grabc->dwindle && grabc->dwindle->parent) {
+-			/* Tiled: adjust split ratio of parent node */
+-			DwindleNode *parent = grabc->dwindle->parent;
+-			DwindleNode *root;
+-			int is_first_child = (parent->children[0] == grabc->dwindle);
+-			float new_ratio;
+-			
+-			if (parent->split_horizontal) {
+-				/* Horizontal split: adjust based on cursor X relative to parent box */
+-				int cursor_rel = (int)round(cursor->x) - parent->box.x;
+-				new_ratio = (float)cursor_rel / (float)parent->box.width;
 +	if (sym == XKB_KEY_Escape) {
 +		if (net_current_subgroup >= 0) {
 +			if (net_group_has_sub) {
@@ -3906,9 +4041,16 @@ index a1e049d..353d3fd 100644
 +				net_current_subgroup = -1;
 +				net_selected_row = 0;
 +				updatenetmenu();
-+			} else {
+ 			} else {
+-				/* Vertical split: adjust based on cursor Y relative to parent box */
+-				int cursor_rel = (int)round(cursor->y) - parent->box.y;
+-				new_ratio = (float)cursor_rel / (float)parent->box.height;
 +				net_current_subgroup = -1;
-+			}
+ 			}
+-			
+-			/* If we're resizing the second child, invert the ratio interpretation */
+-			if (!is_first_child) {
+-				/* Cursor position is now the end of child[0], so ratio is still correct */
 +		} else if (net_current_group >= 0) {
 +			/* Back to sub-topics (or direct entries fall to categories) */
 +			if (net_group_count > 0) {
@@ -3924,7 +4066,18 @@ index a1e049d..353d3fd 100644
 +				net_group_has_sub = 0;
 +				net_selected_row = 0;
 +				updatenetmenu();
-+			}
+ 			}
+-			
+-			/* Clamp ratio */
+-			if (new_ratio < 0.1f) new_ratio = 0.1f;
+-			if (new_ratio > 0.9f) new_ratio = 0.9f;
+-			
+-			parent->split_ratio = new_ratio;
+-			
+-			/* Find root and recalculate entire tree */
+-			root = parent;
+-			while (root->parent) root = root->parent;
+-			dwindle_recalc(root);
 +		} else if (net_current_category >= 0) {
 +			/* Back to categories */
 +			net_current_category = -1;
@@ -3938,29 +4091,25 @@ index a1e049d..353d3fd 100644
 +			netmenu_active = 0;
 +			updatenetmenu();
 +			updatebars();
-+		}
+ 		}
+-		return;
 +		return 1;
-+	}
+ 	}
  
--	if (cursor_mode == CurPressed && !seat->drag
--			&& surface != seat->pointer_state.focused_surface
--			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
--		c = w;
--		surface = seat->pointer_state.focused_surface;
--		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
--		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
+-	/* If there's no client surface under the cursor, set the cursor image to a
+-	 * default. This is what makes the cursor image appear when you move it
+-	 * off of a client or over its border. */
+-	if (!surface && !seat->drag)
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 +	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
 +		if (net_selected_row > 0)
 +			net_selected_row--;
 +		updatenetmenu();
 +		return 1;
- 	}
++	}
  
--	/* time is 0 in internal calls meant to restore pointer focus. */
--	if (time) {
--		wlr_relative_pointer_manager_v1_send_relative_motion(
--				relative_pointer_mgr, seat, (uint64_t)time * 1000,
--				dx, dy, dx_unaccel, dy_unaccel);
+-	pointerfocus(c, surface, sx, sy, time);
+-}
 +	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
 +		if (net_selected_row < item_count - 1)
 +			net_selected_row++;
@@ -3968,20 +4117,22 @@ index a1e049d..353d3fd 100644
 +		return 1;
 +	}
  
--		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
--			cursorconstrain(constraint);
+-void
+-motionrelative(struct wl_listener *listener, void *data)
+-{
+-	/* This event is forwarded by the cursor when a pointer emits a _relative_
+-	 * pointer motion event (i.e. a delta) */
+-	struct wlr_pointer_motion_event *event = data;
+-	/* The cursor doesn't move unless we tell it to. The cursor automatically
+-	 * handles constraining the motion to the output layout, as well as any
+-	 * special configuration applied for the specific input device which
+-	 * generated the event. You can pass NULL for the device if you want to move
+-	 * the cursor around without any input. */
+-	motionnotify(event->time_msec, &event->pointer->base, event->delta_x, event->delta_y,
+-			event->unaccel_dx, event->unaccel_dy);
 +	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right || sym == XKB_KEY_l) {
 +		int selected_idx = net_selected_row;
- 
--		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
--			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
--			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
--				sx = cursor->x - c->geom.x - c->bw;
--				sy = cursor->y - c->geom.y - c->bw;
--				if (wlr_region_confine(&active_constraint->region, sx, sy,
--						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
--					dx = sx_confined - sx;
--					dy = sy_confined - sy;
++
 +		if (net_current_category < 0) {
 +			/* Select a category */
 +			if (selected_idx < net_category_count) {
@@ -4054,7 +4205,7 @@ index a1e049d..353d3fd 100644
 +					net_group_has_sub = 0;
 +					net_selected_row = 0;
 +					updatenetmenu();
- 				}
++				}
 +			} else {
 +				const char *cat = net_categories[net_current_category];
 +				const char *group = (net_group_count == 0) ? "" : net_groups[net_current_group];
@@ -4062,9 +4213,7 @@ index a1e049d..353d3fd 100644
 +				int e_idx = 0;
 +				int target = selected_idx - 1; /* -1 for Back row */
 +				int i;
- 
--				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
--					return;
++
 +				for (i = 0; i < net_entry_count; i++) {
 +				if (strcmp(net_entries[i].category, cat) == 0 &&
 +				    strcmp(net_entries[i].group, group) == 0 &&
@@ -4076,21 +4225,11 @@ index a1e049d..353d3fd 100644
 +					e_idx++;
 +				}
 +				}
- 			}
- 		}
++			}
++		}
 +		return 1;
 +	}
- 
--		wlr_cursor_move(cursor, device, dx, dy);
--		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
--
--		/* If compositor entered screenshot-grab mode, forward motion only to the
--		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
--		if (screenshot_mode) {
--			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
--			if (cursor && cursor_mgr)
--				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
--			return;
++
 +	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
 +		if (net_current_subgroup >= 0) {
 +			if (net_group_has_sub) {
@@ -4126,95 +4265,42 @@ index a1e049d..353d3fd 100644
 +			net_group_has_sub = 0;
 +			net_selected_row = 0;
 +			updatenetmenu();
- 		}
++		}
 +		return 1;
 +	}
- 
--		/* Update selmon (even while dragging a window) */
--		if (sloppyfocus)
--			selmon = xytomon(cursor->x, cursor->y);
--		
--		/* Update menu hover selection */
--		if (appmenu_active && selmon) {
--			int menu_x = selmon->m.x;
--			int menu_y = selmon->m.y + cell_height;
--			int menu_w = 25 * cell_width;
--			int menu_h = 25 * cell_height;
--			
--			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
--			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
--				int rel_y = (int)(cursor->y - menu_y);
--				int hovered_row = rel_y / cell_height;
--				
--				/* Row 0 is title bar, rows 1-23 are content */
--				if (hovered_row >= 1 && hovered_row <= 23) {
--					int new_selected = hovered_row - 1; /* 0-indexed content row */
--					if (new_selected != menu_selected_row) {
--						menu_selected_row = new_selected;
--						updateappmenu();
--					}
--				}
--			}
--		}
--	}
++
 +	/* Don't consume unhandled keys - allows the toggle binding to work */
 +	return 0;
-+}
+ }
  
--	/* Update drag icon's position */
--	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
+-void
+-moveresize(const Arg *arg)
+-{
+-	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+-		return;
+-	xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
+-	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
+-		return;
 +/* ==================== AUDIO MENU ====================
 + * Volume / output selection / microphones, fed by audiomenu_cmd (default
 + * "tbwm-audio-menu"). Unlike the network menu, running an action keeps the
 + * menu open and re-runs the helper so the new state is shown immediately. */
  
--	/* If we are currently grabbing the mouse, handle and return */
--	if (cursor_mode == CurMove) {
--		/* Move the grabbed client to the new position, snapped to grid */
--		int new_x = (int)round(cursor->x) - grabcx;
--		int new_y = (int)round(cursor->y) - grabcy;
--		new_x = (new_x / cell_width) * cell_width;
--		new_y = (new_y / cell_height) * cell_height;
--		resize(grabc, (struct wlr_box){.x = new_x, .y = new_y,
--			.width = grabc->geom.width, .height = grabc->geom.height}, 1);
--		return;
--	} else if (cursor_mode == CurResize) {
--		if (grabc->isfloating) {
--			/* Floating: direct resize */
--			resize(grabc, (struct wlr_box){.x = grabc->geom.x, .y = grabc->geom.y,
--				.width = (int)round(cursor->x) - grabc->geom.x, .height = (int)round(cursor->y) - grabc->geom.y}, 1);
--		} else if (grabc->dwindle && grabc->dwindle->parent) {
--			/* Tiled: adjust split ratio of parent node */
--			DwindleNode *parent = grabc->dwindle->parent;
--			DwindleNode *root;
--			int is_first_child = (parent->children[0] == grabc->dwindle);
--			float new_ratio;
--			
--			if (parent->split_horizontal) {
--				/* Horizontal split: adjust based on cursor X relative to parent box */
--				int cursor_rel = (int)round(cursor->x) - parent->box.x;
--				new_ratio = (float)cursor_rel / (float)parent->box.width;
--			} else {
--				/* Vertical split: adjust based on cursor Y relative to parent box */
--				int cursor_rel = (int)round(cursor->y) - parent->box.y;
--				new_ratio = (float)cursor_rel / (float)parent->box.height;
--			}
--			
--			/* If we're resizing the second child, invert the ratio interpretation */
--			if (!is_first_child) {
--				/* Cursor position is now the end of child[0], so ratio is still correct */
--			}
--			
--			/* Clamp ratio */
--			if (new_ratio < 0.1f) new_ratio = 0.1f;
--			if (new_ratio > 0.9f) new_ratio = 0.9f;
--			
--			parent->split_ratio = new_ratio;
--			
--			/* Find root and recalculate entire tree */
--			root = parent;
--			while (root->parent) root = root->parent;
--			dwindle_recalc(root);
+-	switch (cursor_mode = arg->ui) {
+-	case CurMove:
+-		/* Calculate grab offset BEFORE making floating (which may shrink window) */
+-		grabcx = (int)round(cursor->x) - grabc->geom.x;
+-		grabcy = (int)round(cursor->y) - grabc->geom.y;
+-		if (!grabc->isfloating) {
+-			/* Make floating, then restore position so cursor stays at same spot */
+-			setfloating(grabc, 1);
+-			/* Reposition so cursor stays at same relative position */
+-			grabc->geom.x = (int)round(cursor->x) - grabcx;
+-			grabc->geom.y = (int)round(cursor->y) - grabcy;
+-			/* Update grab offset for new (possibly smaller) size */
+-			if (grabcx > grabc->geom.width) grabcx = grabc->geom.width / 2;
+-			if (grabcy > grabc->geom.height) grabcy = grabc->geom.height / 2;
+-			resize(grabc, grabc->geom, 1);
 +/* premul_argb / RGB_TO_ARGB are defined further down; declare them here so
 + * the audio menu render (defined before them) can use them. */
 +static inline uint32_t premul_argb(uint32_t argb);
@@ -4242,7 +4328,15 @@ index a1e049d..353d3fd 100644
 +			    audio_entries[i].subgroup[0] == '\0')
 +				count++;
  		}
--		return;
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
+-		break;
+-	case CurResize:
+-		/* Resizing: for floating windows, resize directly
+-		 * For tiled windows, adjust split ratios */
+-		if (grabc->isfloating) {
+-			wlr_cursor_warp_closest(cursor, NULL,
+-					grabc->geom.x + grabc->geom.width,
+-					grabc->geom.y + grabc->geom.height);
 +		return count;
 +	} else {
 +		const char *cat = audio_categories[audio_current_category];
@@ -4255,80 +4349,28 @@ index a1e049d..353d3fd 100644
 +			    strcmp(audio_entries[i].group, group) == 0 &&
 +			    strcmp(audio_entries[i].subgroup, sub) == 0)
 +				count++;
-+		}
+ 		}
+-		/* Store initial geometry for calculating delta */
+-		grabcx = grabc->geom.width;
+-		grabcy = grabc->geom.height;
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
+-		break;
 +		return count;
  	}
--
--	/* If there's no client surface under the cursor, set the cursor image to a
--	 * default. This is what makes the cursor image appear when you move it
--	 * off of a client or over its border. */
--	if (!surface && !seat->drag)
--		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
--
--	pointerfocus(c, surface, sx, sy, time);
--}
--
--void
--motionrelative(struct wl_listener *listener, void *data)
--{
--	/* This event is forwarded by the cursor when a pointer emits a _relative_
--	 * pointer motion event (i.e. a delta) */
--	struct wlr_pointer_motion_event *event = data;
--	/* The cursor doesn't move unless we tell it to. The cursor automatically
--	 * handles constraining the motion to the output layout, as well as any
--	 * special configuration applied for the specific input device which
--	 * generated the event. You can pass NULL for the device if you want to move
--	 * the cursor around without any input. */
--	motionnotify(event->time_msec, &event->pointer->base, event->delta_x, event->delta_y,
--			event->unaccel_dx, event->unaccel_dy);
  }
  
 -void
--moveresize(const Arg *arg)
+-outputmgrapply(struct wl_listener *listener, void *data)
 +/* Height of the audio menu in cells, fitted to its current content so there
 + * is no empty vertical space below the items. Min 3 cells (frame + 1 row),
 + * max 25 cells (23 content rows, the old fixed size). */
 +static int
 +audiomenu_cells_h(void)
  {
--	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
--		return;
--	xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
--	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
--		return;
+-	struct wlr_output_configuration_v1 *config = data;
+-	outputmgrapplyortest(config, 0);
 +	int need_rows = audiomenu_item_count();
- 
--	switch (cursor_mode = arg->ui) {
--	case CurMove:
--		/* Calculate grab offset BEFORE making floating (which may shrink window) */
--		grabcx = (int)round(cursor->x) - grabc->geom.x;
--		grabcy = (int)round(cursor->y) - grabc->geom.y;
--		if (!grabc->isfloating) {
--			/* Make floating, then restore position so cursor stays at same spot */
--			setfloating(grabc, 1);
--			/* Reposition so cursor stays at same relative position */
--			grabc->geom.x = (int)round(cursor->x) - grabcx;
--			grabc->geom.y = (int)round(cursor->y) - grabcy;
--			/* Update grab offset for new (possibly smaller) size */
--			if (grabcx > grabc->geom.width) grabcx = grabc->geom.width / 2;
--			if (grabcy > grabc->geom.height) grabcy = grabc->geom.height / 2;
--			resize(grabc, grabc->geom, 1);
--		}
--		wlr_cursor_set_xcursor(cursor, cursor_mgr, "all-scroll");
--		break;
--	case CurResize:
--		/* Resizing: for floating windows, resize directly
--		 * For tiled windows, adjust split ratios */
--		if (grabc->isfloating) {
--			wlr_cursor_warp_closest(cursor, NULL,
--					grabc->geom.x + grabc->geom.width,
--					grabc->geom.y + grabc->geom.height);
--		}
--		/* Store initial geometry for calculating delta */
--		grabcx = grabc->geom.width;
--		grabcy = grabc->geom.height;
--		wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
--		break;
++
 +	if (need_rows < 1)
 +		need_rows = 1;
 +	/* Dynamic height: the menu grows with its content. Safety cap so it never
@@ -4339,41 +4381,18 @@ index a1e049d..353d3fd 100644
 +			cap = 3;
 +		if (need_rows + 2 > cap)
 +			need_rows = cap - 2;
- 	}
++	}
 +	return need_rows + 2;
  }
  
 -void
--outputmgrapply(struct wl_listener *listener, void *data)
+-outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
 +/* Does `s` start with one of the audio action verbs? Action names can carry
 + * suffixes (e.g. "Subir 5%"), so this is a prefix match; the read-only status
 + * rows (legacy 4-column lines) start with '[' or a device name and never
 + * collide with these verbs. */
 +static int
 +audiomenu_is_action(const char *s)
- {
--	struct wlr_output_configuration_v1 *config = data;
--	outputmgrapplyortest(config, 0);
-+	static const char *const verbs[] = {
-+		"Subir", "Bajar", "Silenciar", "Elegir", "Mutear", "Info", "Mic silencio"
-+	};
-+	size_t i;
-+
-+	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
-+		if (strncmp(s, verbs[i], strlen(verbs[i])) == 0)
-+			return 1;
-+	}
-+	return 0;
- }
- 
--void
--outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
-+/* Parse a NUL-terminated audiomenu payload into dst[] and return the entry
-+ * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>exec".
-+ * The legacy format "Category<TAB>Group<TAB>Name<TAB>exec" is still detected
-+ * (used for the read-only "Volumen" status label). */
-+static int
-+audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
  {
 -	/*
 -	 * Called when a client such as wlr-randr requests a change in output
@@ -4383,21 +4402,51 @@ index a1e049d..353d3fd 100644
 -	 */
 -	struct wlr_output_configuration_head_v1 *config_head;
 -	int ok = 1;
-+	const char *p = out;
-+	int n = 0;
++	static const char *const verbs[] = {
++		"Subir", "Bajar", "Silenciar", "Elegir", "Mutear", "Info", "Mic silencio"
++	};
++	size_t i;
  
 -	wl_list_for_each(config_head, &config->heads, link) {
 -		struct wlr_output *wlr_output = config_head->state.output;
 -		Monitor *m = wlr_output->data;
 -		struct wlr_output_state state;
++	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
++		if (strncmp(s, verbs[i], strlen(verbs[i])) == 0)
++			return 1;
++	}
++	return 0;
++}
+ 
+-		/* Ensure displays previously disabled by wlr-output-power-management-v1
+-		 * are properly handled*/
+-		m->asleep = 0;
++/* Parse a NUL-terminated audiomenu payload into dst[] and return the entry
++ * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>exec".
++ * The legacy format "Category<TAB>Group<TAB>Name<TAB>exec" is still detected
++ * (used for the read-only "Volumen" status label). */
++static int
++audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
++{
++	const char *p = out;
++	int n = 0;
+ 
+-		wlr_output_state_init(&state);
+-		wlr_output_state_set_enabled(&state, config_head->state.enabled);
+-		if (!config_head->state.enabled)
+-			goto apply_or_test;
 +	while (n < max && *p) {
 +		char line[512];
 +		char *tok[6] = {0};
 +		int nt = 0;
  
--		/* Ensure displays previously disabled by wlr-output-power-management-v1
--		 * are properly handled*/
--		m->asleep = 0;
+-		if (config_head->state.mode)
+-			wlr_output_state_set_mode(&state, config_head->state.mode);
+-		else
+-			wlr_output_state_set_custom_mode(&state,
+-					config_head->state.custom_mode.width,
+-					config_head->state.custom_mode.height,
+-					config_head->state.custom_mode.refresh);
 +		{
 +			const char *eol = strchr(p, '\n');
 +			size_t len = eol ? (size_t)(eol - p) : strlen(p);
@@ -4408,20 +4457,16 @@ index a1e049d..353d3fd 100644
 +			p = eol ? eol + 1 : p + len;
 +		}
  
--		wlr_output_state_init(&state);
--		wlr_output_state_set_enabled(&state, config_head->state.enabled);
--		if (!config_head->state.enabled)
--			goto apply_or_test;
+-		wlr_output_state_set_transform(&state, config_head->state.transform);
+-		wlr_output_state_set_scale(&state, config_head->state.scale);
+-		wlr_output_state_set_adaptive_sync_enabled(&state,
+-				config_head->state.adaptive_sync_enabled);
 +		if (!line[0])
 +			continue;
  
--		if (config_head->state.mode)
--			wlr_output_state_set_mode(&state, config_head->state.mode);
--		else
--			wlr_output_state_set_custom_mode(&state,
--					config_head->state.custom_mode.width,
--					config_head->state.custom_mode.height,
--					config_head->state.custom_mode.refresh);
+-apply_or_test:
+-		ok &= test ? wlr_output_test_state(wlr_output, &state)
+-				: wlr_output_commit_state(wlr_output, &state);
 +		{
 +			char *t = line;
 +			while (nt < 6) {
@@ -4434,19 +4479,19 @@ index a1e049d..353d3fd 100644
 +			}
 +		}
  
--		wlr_output_state_set_transform(&state, config_head->state.transform);
--		wlr_output_state_set_scale(&state, config_head->state.scale);
--		wlr_output_state_set_adaptive_sync_enabled(&state,
--				config_head->state.adaptive_sync_enabled);
+-		/* Don't move monitors if position wouldn't change. This avoids
+-		 * wlroots marking the output as manually configured.
+-		 * wlr_output_layout_add does not like disabled outputs */
+-		if (!test && wlr_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
+-			wlr_output_layout_add(output_layout, wlr_output,
+-					config_head->state.x, config_head->state.y);
 +		/* Lines with fewer than 4 fields cannot be parsed in either layout.
 +		 * tok[] is zero-initialized, but skip them defensively instead of
 +		 * strncpy'ing empty/positional data. */
 +		if (nt < 4)
 +			continue;
  
--apply_or_test:
--		ok &= test ? wlr_output_test_state(wlr_output, &state)
--				: wlr_output_commit_state(wlr_output, &state);
+-		wlr_output_state_finish(&state);
 +		if (nt >= 5 && audiomenu_is_action(tok[3])) {
 +			/* new: cat group subgroup action exec */
 +			strncpy(dst[n].category, tok[0], AUDIO_CAT_LEN - 1);
@@ -4468,16 +4513,15 @@ index a1e049d..353d3fd 100644
 +		dst[n].name[AUDIO_NAME_LEN - 1] = '\0';
 +		dst[n].exec[AUDIO_EXEC_LEN - 1] = '\0';
 +		n++;
-+	}
+ 	}
 +	return n;
 +}
  
--		/* Don't move monitors if position wouldn't change. This avoids
--		 * wlroots marking the output as manually configured.
--		 * wlr_output_layout_add does not like disabled outputs */
--		if (!test && wlr_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
--			wlr_output_layout_add(output_layout, wlr_output,
--					config_head->state.x, config_head->state.y);
+-	if (ok)
+-		wlr_output_configuration_v1_send_succeeded(config);
+-	else
+-		wlr_output_configuration_v1_send_failed(config);
+-	wlr_output_configuration_v1_destroy(config);
 +/* Rebuild audio_categories from the current audio_entries, preserving the
 + * existing category order so the list never reorders between refreshes. */
 +static void
@@ -4489,20 +4533,13 @@ index a1e049d..353d3fd 100644
 +	int ci;
 +	int j;
  
--		wlr_output_state_finish(&state);
--	}
-+	for (i = 0; i < oldn; i++)
-+		strcpy(old[i], audio_categories[i]);
- 
--	if (ok)
--		wlr_output_configuration_v1_send_succeeded(config);
--	else
--		wlr_output_configuration_v1_send_failed(config);
--	wlr_output_configuration_v1_destroy(config);
-+	audio_category_count = 0;
- 
 -	/* https://codeberg.org/tbwm/tbwm/issues/577 */
 -	updatemons(NULL, NULL);
++	for (i = 0; i < oldn; i++)
++		strcpy(old[i], audio_categories[i]);
++
++	audio_category_count = 0;
++
 +	for (i = 0; i < oldn; i++) {
 +		int has = 0;
 +		for (ci = 0; ci < audio_entry_count; ci++) {
@@ -5106,12 +5143,18 @@ index a1e049d..353d3fd 100644
 -	client_set_bounds(c, geo.width, geo.height);
 -	c->geom = geo;
 -	applybounds(c, bbox);
--
--	/* Frame is 1 cell on each side (top has title, others are box chars) */
--	frame_inset = c->isfullscreen ? 0 : cell_width;
 +	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
 +		if (audio_selected_row > 0)
 +			audio_selected_row--;
++		updatemenuaudio();
++		return 1;
++	}
+ 
+-	/* Frame is 1 cell on each side (top has title, others are box chars) */
+-	frame_inset = c->isfullscreen ? 0 : cell_width;
++	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
++		if (audio_selected_row < item_count - 1)
++			audio_selected_row++;
 +		updatemenuaudio();
 +		return 1;
 +	}
@@ -5121,68 +5164,11 @@ index a1e049d..353d3fd 100644
 -	/* Content is inset by 1 cell on left and 1 cell on top */
 -	wlr_scene_node_set_position(&c->scene_surface->node, frame_inset, 
 -			c->isfullscreen ? 0 : cell_height);
-+	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
-+		if (audio_selected_row < item_count - 1)
-+			audio_selected_row++;
-+		updatemenuaudio();
-+		return 1;
-+	}
- 
--	/* Update text frame */
--	updateframe(c);
 +	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter || sym == XKB_KEY_Right || sym == XKB_KEY_l) {
 +		int selected_idx = audio_selected_row;
  
--	/* Content size is window size minus frame (1 cell each side) */
--	c->resize = client_set_size(c, 
--			c->geom.width - (c->isfullscreen ? 0 : 2 * cell_width),
--			c->geom.height - (c->isfullscreen ? 0 : 2 * cell_height));
--	if (c->isfullscreen)
--		file_debug_log("RESIZE [%s]: fullscreen size set to %dx%d, scene pos=(%d,%d), surface pos=(%d,%d)\n",
--			client_get_title(c),
--			c->geom.width - (c->isfullscreen ? 0 : 2 * cell_width),
--			c->geom.height - (c->isfullscreen ? 0 : 2 * cell_height),
--			c->geom.x, c->geom.y, frame_inset, c->isfullscreen ? 0 : cell_height);
--	client_get_clip(c, &clip);
--	if (c->isfullscreen)
--		file_debug_log("RESIZE [%s]: fullscreen clip = {%d, %d, %d, %d}, xdg geom = {%d, %d, %d, %d}\n",
--			client_get_title(c),
--			clip.x, clip.y, clip.width, clip.height,
--			c->surface.xdg->geometry.x, c->surface.xdg->geometry.y,
--			c->surface.xdg->geometry.width, c->surface.xdg->geometry.height);
--	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
--}
--
--void
--run(char *startup_cmd)
--{
--	/* Add a Unix socket to the Wayland display. */
--	const char *socket = wl_display_add_socket_auto(dpy);
--	if (!socket)
--		die("startup: display_add_socket_auto");
--	if (setenv("WAYLAND_DISPLAY", socket, 1) != 0)
--		die("startup: setenv WAYLAND_DISPLAY failed");
--	tbwm_log(TBWM_LOG_INFO, "tbwm: WAYLAND_DISPLAY=%s DISPLAY=%s\n", socket, getenv("DISPLAY") ? getenv("DISPLAY") : "(none)");
--
--	/* Start capturing stderr into the REPL pipe so runtime WARNING/ERROR from
--	 * libraries and our own code can be forwarded into the desktop REPL.
--	 * Create a non-blocking pipe and make the write end the process's stderr. */
--	{
--		int p[2];
--		if (pipe(p) == 0) {
--			repl_stderr_fd = p[0];
--			repl_stderr_wfd = p[1];
--			/* Make read end non-blocking */
--			int flags = fcntl(repl_stderr_fd, F_GETFL, 0);
--			if (flags >= 0)
--				fcntl(repl_stderr_fd, F_SETFL, flags | O_NONBLOCK);
--			/* Replace STDERR with write end of pipe so fprintf(stderr,..) goes there */
--			if (dup2(repl_stderr_wfd, STDERR_FILENO) < 0) {
--				/* fall back: keep stderr as-is */
--				close(repl_stderr_fd);
--				repl_stderr_fd = -1;
--				close(repl_stderr_wfd);
--				repl_stderr_wfd = -1;
+-	/* Update text frame */
+-	updateframe(c);
 +		if (audio_current_category < 0) {
 +			/* Select a category */
 +			if (selected_idx < audio_category_count) {
@@ -5206,11 +5192,7 @@ index a1e049d..353d3fd 100644
 +				audio_group_has_sub = 0;
 +				audio_selected_row = 0;
 +				updatemenuaudio();
- 			} else {
--				/* Register event source to read from the pipe in the Wayland event loop */
--				struct wl_event_loop *ev = wl_display_get_event_loop(dpy);
--				repl_stderr_source = wl_event_loop_add_fd(ev, repl_stderr_fd,
--					WL_EVENT_READABLE, repl_stderr_cb, NULL);
++			} else {
 +				int target = selected_idx - 1; /* -1 for Back row */
 +				if (target < audio_group_count) {
 +					audio_current_group = target;
@@ -5267,7 +5249,62 @@ index a1e049d..353d3fd 100644
 +				int e_idx = 0;
 +				int target = selected_idx - 1; /* -1 for Back row */
 +				int i;
-+
+ 
+-	/* Content size is window size minus frame (1 cell each side) */
+-	c->resize = client_set_size(c, 
+-			c->geom.width - (c->isfullscreen ? 0 : 2 * cell_width),
+-			c->geom.height - (c->isfullscreen ? 0 : 2 * cell_height));
+-	if (c->isfullscreen)
+-		file_debug_log("RESIZE [%s]: fullscreen size set to %dx%d, scene pos=(%d,%d), surface pos=(%d,%d)\n",
+-			client_get_title(c),
+-			c->geom.width - (c->isfullscreen ? 0 : 2 * cell_width),
+-			c->geom.height - (c->isfullscreen ? 0 : 2 * cell_height),
+-			c->geom.x, c->geom.y, frame_inset, c->isfullscreen ? 0 : cell_height);
+-	client_get_clip(c, &clip);
+-	if (c->isfullscreen)
+-		file_debug_log("RESIZE [%s]: fullscreen clip = {%d, %d, %d, %d}, xdg geom = {%d, %d, %d, %d}\n",
+-			client_get_title(c),
+-			clip.x, clip.y, clip.width, clip.height,
+-			c->surface.xdg->geometry.x, c->surface.xdg->geometry.y,
+-			c->surface.xdg->geometry.width, c->surface.xdg->geometry.height);
+-	wlr_scene_subsurface_tree_set_clip(&c->scene_surface->node, &clip);
+-}
+-
+-void
+-run(char *startup_cmd)
+-{
+-	/* Add a Unix socket to the Wayland display. */
+-	const char *socket = wl_display_add_socket_auto(dpy);
+-	if (!socket)
+-		die("startup: display_add_socket_auto");
+-	if (setenv("WAYLAND_DISPLAY", socket, 1) != 0)
+-		die("startup: setenv WAYLAND_DISPLAY failed");
+-	tbwm_log(TBWM_LOG_INFO, "tbwm: WAYLAND_DISPLAY=%s DISPLAY=%s\n", socket, getenv("DISPLAY") ? getenv("DISPLAY") : "(none)");
+-
+-	/* Start capturing stderr into the REPL pipe so runtime WARNING/ERROR from
+-	 * libraries and our own code can be forwarded into the desktop REPL.
+-	 * Create a non-blocking pipe and make the write end the process's stderr. */
+-	{
+-		int p[2];
+-		if (pipe(p) == 0) {
+-			repl_stderr_fd = p[0];
+-			repl_stderr_wfd = p[1];
+-			/* Make read end non-blocking */
+-			int flags = fcntl(repl_stderr_fd, F_GETFL, 0);
+-			if (flags >= 0)
+-				fcntl(repl_stderr_fd, F_SETFL, flags | O_NONBLOCK);
+-			/* Replace STDERR with write end of pipe so fprintf(stderr,..) goes there */
+-			if (dup2(repl_stderr_wfd, STDERR_FILENO) < 0) {
+-				/* fall back: keep stderr as-is */
+-				close(repl_stderr_fd);
+-				repl_stderr_fd = -1;
+-				close(repl_stderr_wfd);
+-				repl_stderr_wfd = -1;
+-			} else {
+-				/* Register event source to read from the pipe in the Wayland event loop */
+-				struct wl_event_loop *ev = wl_display_get_event_loop(dpy);
+-				repl_stderr_source = wl_event_loop_add_fd(ev, repl_stderr_fd,
+-					WL_EVENT_READABLE, repl_stderr_cb, NULL);
 +				for (i = 0; i < audio_entry_count; i++) {
 +					if (strcmp(audio_entries[i].category, cat) == 0 &&
 +					    strcmp(audio_entries[i].group, group) == 0 &&
@@ -5353,16 +5390,57 @@ index a1e049d..353d3fd 100644
 -	/* At this point the outputs are initialized, choose initial selmon based on
 -	 * cursor position, and set default cursor image */
 -	selmon = xytomon(cursor->x, cursor->y);
-+	/* Don't consume unhandled keys - allows the toggle binding to work */
-+	return 0;
-+}
- 
+-
 -	/* TODO hack to get cursor to display in its initial location (100, 100)
 -	 * instead of (0, 0) and then jumping. Still may not be fully
 -	 * initialized, as the image/coordinates are not transformed for the
 -	 * monitor when displayed here */
 -	wlr_cursor_warp_closest(cursor, NULL, cursor->x, cursor->y);
 -	wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
+-
+-	/* Start bar update timer */
+-	bar_timer = wl_event_loop_add_timer(event_loop, bartimer, NULL);
+-	wl_event_source_timer_update(bar_timer, 1000);
+-
+-	/* Start scroll timer (33ms = ~30fps for smooth scrolling) */
+-	scroll_timer = wl_event_loop_add_timer(event_loop, scrolltimer, NULL);
+-	wl_event_source_timer_update(scroll_timer, 33);
+-
+-	/* Start timing report timer (every 500ms) */
+-	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
+-	wl_event_source_timer_update(timing_timer, 500);
+-
+-	/* Run on-startup commands from config */
+-	run_startup_commands();
+-
+-	/* Run the Wayland event loop. This does not return until you exit the
+-	 * compositor. Starting the backend rigged up all of the necessary event
+-	 * loop configuration to listen to libinput events, DRM events, generate
+-	 * frame events at the refresh rate, and so on. */
+-	wl_display_run(dpy);
++	/* Don't consume unhandled keys - allows the toggle binding to work */
++	return 0;
+ }
+ 
+-void
+-setcursor(struct wl_listener *listener, void *data)
+-{
+-	/* This event is raised by the seat when a client provides a cursor image */
+-	struct wlr_seat_pointer_request_set_cursor_event *event = data;
+-	/* If we're "grabbing" the cursor, don't use the client's image, we will
+-	 * restore it after "grabbing" sending a leave event, followed by a enter
+-	 * event, which will result in the client requesting set the cursor surface */
+-	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+-		return;
+-	/* This can be sent by any client, so we check to make sure this one
+-	 * actually has pointer focus first. If so, we can tell the cursor to
+-	 * use the provided surface as the cursor image. It will set the
+-	 * hardware cursor on the output that it's currently on and continue to
+-	 * do so as the cursor moves between outputs. */
+-	if (event->seat_client == seat->pointer_state.focused_client)
+-		wlr_cursor_set_surface(cursor, event->surface,
+-				event->hotspot_x, event->hotspot_y);
+-}
 +/* Draw a row's text as a marquee: the string first rests at its normal
 + * left-aligned position for hold_px ticks (~0.7s at 30fps) so the beginning
 + * is readable, then it pans left continuously as a seamless ticker (the text
@@ -5393,9 +5471,18 @@ index a1e049d..353d3fd 100644
 +		left_edge = cell_width - off;
 +	}
  
--	/* Start bar update timer */
--	bar_timer = wl_event_loop_add_timer(event_loop, bartimer, NULL);
--	wl_event_source_timer_update(bar_timer, 1000);
+-void
+-setcursorshape(struct wl_listener *listener, void *data)
+-{
+-	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
+-	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+-		return;
+-	/* This can be sent by any client, so we check to make sure this one
+-	 * actually has pointer focus first. If so, we can tell the cursor to
+-	 * use the provided cursor shape. */
+-	if (event->seat_client == seat->pointer_state.focused_client)
+-		wlr_cursor_set_xcursor(cursor, cursor_mgr,
+-				wlr_cursor_shape_v1_name(event->shape));
 +	for (i = 0; i < len; i++) {
 +		int x = left_edge + i * cell_width;
 +		if (x >= cell_width && x < cell_width + visible_px) {
@@ -5408,11 +5495,10 @@ index a1e049d..353d3fd 100644
 +					(unsigned char)text[i], fg);
 +		}
 +	}
-+}
+ }
  
--	/* Start scroll timer (33ms = ~30fps for smooth scrolling) */
--	scroll_timer = wl_event_loop_add_timer(event_loop, scrolltimer, NULL);
--	wl_event_source_timer_update(scroll_timer, 33);
+-void
+-setfloating(Client *c, int floating)
 +/* Draw a content row. If it is the selected row and the text overflows the
 + * content area, use the marquee and flag that scrolling is needed; otherwise
 + * draw the truncated static text as before. marquee_px is the caller's pixel
@@ -5421,27 +5507,91 @@ index a1e049d..353d3fd 100644
 +render_row_text(uint32_t *pixels, int menu_width, int menu_height,
 +		int text_y, const char *text, uint32_t fg, int mtext, int is_selected,
 +		int marquee_px, int *marquee_needed)
-+{
+ {
+-	Client *p = client_get_parent(c);
+-	int was_floating = c->isfloating;
+-	c->isfloating = floating;
+-	
+-	/* Handle dwindle tree updates */
+-	if (floating && !was_floating && c->dwindle) {
+-		/* Becoming floating: remove from dwindle tree */
+-		dwindle_remove(c);
+-	}
+-	/* Note: becoming tiled handled in dwindle() arrange function */
+-	
+-	/* If in floating layout do not change the client's layer */
+-	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
 +	int ci;
- 
--	/* Start timing report timer (every 500ms) */
--	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
--	wl_event_source_timer_update(timing_timer, 500);
++
 +	if (is_selected && (int)strlen(text) > mtext) {
 +		render_scrolling_row(pixels, menu_width, menu_height, text_y, text, fg,
 +			marquee_px, mtext);
 +		if (marquee_needed)
 +			*marquee_needed = 1;
-+		return;
-+	}
+ 		return;
+-	
+-	/* Shrink window when becoming floating */
+-	if (floating && !was_floating) {
+-		struct wlr_box newgeom;
+-		int new_w, new_h;
+-		/* Shrink to 60% of current size, snap to grid */
+-		new_w = (c->geom.width * 3 / 5);
+-		new_h = (c->geom.height * 3 / 5);
+-		/* Snap to grid */
+-		new_w = (new_w / cell_width) * cell_width;
+-		new_h = (new_h / cell_height) * cell_height;
+-		/* Minimum size */
+-		if (new_w < cell_width * 20) new_w = cell_width * 20;
+-		if (new_h < cell_height * 10) new_h = cell_height * 10;
+-		/* Center in the old position */
+-		newgeom.x = c->geom.x + (c->geom.width - new_w) / 2;
+-		newgeom.y = c->geom.y + (c->geom.height - new_h) / 2;
+-		newgeom.width = new_w;
+-		newgeom.height = new_h;
+-		/* Snap position to grid */
+-		newgeom.x = (newgeom.x / cell_width) * cell_width;
+-		newgeom.y = (newgeom.y / cell_height) * cell_height;
+-		resize(c, newgeom, 1);
+ 	}
+-	
+-	{
+-		struct wlr_scene_tree *target = layers[c->isfullscreen || (p && p->isfullscreen) ? LyrFS : c->isfloating ? LyrFloat : LyrTile];
+-		safe_scene_node_reparent(&c->scene->node, target, "dwindle/create parent reparent");
 +	for (ci = 0; text[ci] && ci < mtext; ci++) {
 +		render_char_to_buffer(pixels, menu_width, menu_height,
 +			cell_width + ci * cell_width, text_y, (unsigned char)text[ci], fg);
-+	}
-+}
+ 	}
+-	arrange(c->mon);
+-	printstatus();
+ }
  
--	/* Run on-startup commands from config */
--	run_startup_commands();
+-void
+-setfullscreen(Client *c, int fullscreen)
+-{
+-	c->isfullscreen = fullscreen;
+-	if (!c->mon || !client_surface(c)->mapped)
+-		return;
+-	c->bw = fullscreen ? 0 : cfg_borderpx;
+-	client_set_fullscreen(c, fullscreen);
+-	    safe_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
+-		    ? LyrFS : c->isfloating ? LyrFloat : LyrTile], "setfullscreen/reparent");
+-	/* Ensure fullscreen layer is above top/overlay so it truly covers the bar */
+-	safe_raise_tree(layers[LyrFS], "setfullscreen LyrFS");
+-
+-	if (fullscreen) {
+-		c->prev = c->geom;
+-		resize(c, c->mon->m, 0);
+-	} else {
+-		/* restore previous size instead of arrange for floating windows since
+-		 * client positions are set by the user and cannot be recalculated */
+-		resize(c, c->prev, 0);
+-	}
+-	arrange(c->mon);
+-	updatebar(c->mon);  /* Update bar visibility */
+-	/* Ensure bar visibility follows config immediately for this monitor */
+-	if (c->mon && c->mon->bar) {
+-		if (cfg_bar_autohide)
+-			wlr_scene_node_set_enabled(&c->mon->bar->node, !fullscreen);
 +/* Compute the horizontal centers (monitor-local pixels) of the [S], [A] and
 + * [N] bar buttons for monitor m, using the same right-aligned layout priority
 + * that updatebar renders: battery+date/time > status text > date/time > buttons. */
@@ -5494,17 +5644,14 @@ index a1e049d..353d3fd 100644
 +			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_dl;
 +		else if (cfg_show_time)
 +			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells + 3 + n_tl;
-+		else
+ 		else
+-			wlr_scene_node_set_enabled(&c->mon->bar->node, 1);
 +			right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
 +	} else {
 +		right_chars = sbtn_cells + 1 + abtn_cells + 1 + nbtn_cells;
-+	}
- 
--	/* Run the Wayland event loop. This does not return until you exit the
--	 * compositor. Starting the backend rigged up all of the necessary event
--	 * loop configuration to listen to libinput events, DRM events, generate
--	 * frame events at the refresh rate, and so on. */
--	wl_display_run(dpy);
+ 	}
+-	printstatus();
++
 +	right_x = m->m.width - right_chars * cell_width;
 +	if (right_x < 0)
 +		right_x = 0;
@@ -5514,26 +5661,20 @@ index a1e049d..353d3fd 100644
  }
  
 -void
--setcursor(struct wl_listener *listener, void *data)
+-setlayout(const Arg *arg)
 +/* Horizontal x for a menu centered on a bar button, clamped to the monitor. */
 +static int
 +centered_menu_x(Monitor *m, int button_center, int menu_width)
  {
--	/* This event is raised by the seat when a client provides a cursor image */
--	struct wlr_seat_pointer_request_set_cursor_event *event = data;
--	/* If we're "grabbing" the cursor, don't use the client's image, we will
--	 * restore it after "grabbing" sending a leave event, followed by a enter
--	 * event, which will result in the client requesting set the cursor surface */
--	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+-	if (!selmon)
 -		return;
--	/* This can be sent by any client, so we check to make sure this one
--	 * actually has pointer focus first. If so, we can tell the cursor to
--	 * use the provided surface as the cursor image. It will set the
--	 * hardware cursor on the output that it's currently on and continue to
--	 * do so as the cursor moves between outputs. */
--	if (event->seat_client == seat->pointer_state.focused_client)
--		wlr_cursor_set_surface(cursor, event->surface,
--				event->hotspot_x, event->hotspot_y);
+-	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
+-		selmon->sellt ^= 1;
+-	if (arg && arg->v)
+-		selmon->lt[selmon->sellt] = (Layout *)arg->v;
+-	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, LENGTH(selmon->ltsymbol));
+-	arrange(selmon);
+-	printstatus();
 +	int mx = m->m.x + button_center - menu_width / 2;
 +	if (mx < m->m.x)
 +		mx = m->m.x;
@@ -5544,16 +5685,21 @@ index a1e049d..353d3fd 100644
 +	return mx;
  }
  
+-/* arg > 1.0 will set mfact absolutely */
 -void
--setcursorshape(struct wl_listener *listener, void *data)
+-setmfact(const Arg *arg)
 +/* Audio menu (volume / outputs / microphones): a flat text list fed by
 + * audiomenu_cmd. Same layout as the network menu, minus the pairing/password
 + * views. Actions run their command and refresh, keeping the menu open. */
 +static void
 +updatemenuaudio(void)
  {
--	struct wlr_cursor_shape_manager_v1_request_set_shape_event *event = data;
--	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
+-	float f;
+-
+-	if (!arg || !selmon || !selmon->lt[selmon->sellt]->arrange)
+-		return;
+-	f = arg->f < 1.0f ? arg->f + selmon->mfact : arg->f - 1.0f;
+-	if (f < 0.1 || f > 0.9)
 +	struct TitleBuffer *tb;
 +	uint32_t *pixels;
 +	int menu_cells_w = 25;
@@ -5574,55 +5720,20 @@ index a1e049d..353d3fd 100644
 +		audio_menu_marquee_needed = 0;
 +		audio_menu_marquee_px = 0;
  		return;
--	/* This can be sent by any client, so we check to make sure this one
--	 * actually has pointer focus first. If so, we can tell the cursor to
--	 * use the provided cursor shape. */
--	if (event->seat_client == seat->pointer_state.focused_client)
--		wlr_cursor_set_xcursor(cursor, cursor_mgr,
--				wlr_cursor_shape_v1_name(event->shape));
+-	selmon->mfact = f;
+-	arrange(selmon);
 -}
 -
 -void
--setfloating(Client *c, int floating)
+-setmon(Client *c, Monitor *m, uint32_t newtags)
 -{
--	Client *p = client_get_parent(c);
--	int was_floating = c->isfloating;
--	c->isfloating = floating;
--	
--	/* Handle dwindle tree updates */
--	if (floating && !was_floating && c->dwindle) {
--		/* Becoming floating: remove from dwindle tree */
--		dwindle_remove(c);
- 	}
--	/* Note: becoming tiled handled in dwindle() arrange function */
--	
--	/* If in floating layout do not change the client's layer */
--	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
+-	Monitor *oldmon = c->mon;
++	}
+ 
+-	if (oldmon == m)
 -		return;
--	
--	/* Shrink window when becoming floating */
--	if (floating && !was_floating) {
--		struct wlr_box newgeom;
--		int new_w, new_h;
--		/* Shrink to 60% of current size, snap to grid */
--		new_w = (c->geom.width * 3 / 5);
--		new_h = (c->geom.height * 3 / 5);
--		/* Snap to grid */
--		new_w = (new_w / cell_width) * cell_width;
--		new_h = (new_h / cell_height) * cell_height;
--		/* Minimum size */
--		if (new_w < cell_width * 20) new_w = cell_width * 20;
--		if (new_h < cell_height * 10) new_h = cell_height * 10;
--		/* Center in the old position */
--		newgeom.x = c->geom.x + (c->geom.width - new_w) / 2;
--		newgeom.y = c->geom.y + (c->geom.height - new_h) / 2;
--		newgeom.width = new_w;
--		newgeom.height = new_h;
--		/* Snap position to grid */
--		newgeom.x = (newgeom.x / cell_width) * cell_width;
--		newgeom.y = (newgeom.y / cell_height) * cell_height;
--		resize(c, newgeom, 1);
-+
+-	c->mon = m;
+-	c->prev = c->geom;
 +	/* The height is content-fitted, so recreate the cached buffer when the
 +	 * number of rows changed (mirrors the shutdown cleanup). */
 +	if (audiomenu_tb && audiomenu_tb->base.height != menu_height) {
@@ -5630,12 +5741,17 @@ index a1e049d..353d3fd 100644
 +			wlr_scene_buffer_set_buffer(audiomenu_buffer, NULL);
 +		wlr_buffer_drop(&audiomenu_tb->base);
 +		audiomenu_tb = NULL;
- 	}
--	
--	{
--		struct wlr_scene_tree *target = layers[c->isfullscreen || (p && p->isfullscreen) ? LyrFS : c->isfloating ? LyrFloat : LyrTile];
--		safe_scene_node_reparent(&c->scene->node, target, "dwindle/create parent reparent");
-+
++	}
+ 
+-	/* Scene graph sends surface leave/enter events on move and resize */
+-	if (oldmon)
+-		arrange(oldmon);
+-	if (m) {
+-		/* Make sure window actually overlaps with the monitor */
+-		resize(c, c->geom, 0);
+-		c->tags = newtags ? newtags : m->tagset[m->seltags]; /* assign tags of target monitor */
+-		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
+-		setfloating(c, c->isfloating);
 +	if (!audiomenu_tb) {
 +		audiomenu_tb = ecalloc(1, sizeof(*audiomenu_tb));
 +		audiomenu_tb->stride = menu_width * 4;
@@ -5643,53 +5759,53 @@ index a1e049d..353d3fd 100644
 +		wlr_buffer_init(&audiomenu_tb->base, &titlebuf_impl, menu_width, menu_height);
 +		titlebuf_alloc_count++;
  	}
--	arrange(c->mon);
--	printstatus();
+-	focusclient(focustop(selmon), 1);
 -}
 +	tb = audiomenu_tb;
 +	pixels = tb->data;
  
 -void
--setfullscreen(Client *c, int fullscreen)
+-setpsel(struct wl_listener *listener, void *data)
 -{
--	c->isfullscreen = fullscreen;
--	if (!c->mon || !client_surface(c)->mapped)
--		return;
--	c->bw = fullscreen ? 0 : cfg_borderpx;
--	client_set_fullscreen(c, fullscreen);
--	    safe_scene_node_reparent(&c->scene->node, layers[c->isfullscreen
--		    ? LyrFS : c->isfloating ? LyrFloat : LyrTile], "setfullscreen/reparent");
--	/* Ensure fullscreen layer is above top/overlay so it truly covers the bar */
--	safe_raise_tree(layers[LyrFS], "setfullscreen LyrFS");
+-	/* This event is raised by the seat when a client wants to set the selection,
+-	 * usually when the user copies something. wlroots allows compositors to
+-	 * ignore such requests if they so choose, but in tbwm we always honor them
+-	 */
+-	struct wlr_seat_request_set_primary_selection_event *event = data;
+-	wlr_seat_set_primary_selection(seat, event->source, event->serial);
+-}
 +	/* Reset the marquee flag; it is re-set below if the selected row overflows */
 +	audio_menu_marquee_needed = 0;
  
--	if (fullscreen) {
--		c->prev = c->geom;
--		resize(c, c->mon->m, 0);
--	} else {
--		/* restore previous size instead of arrange for floating windows since
--		 * client positions are set by the user and cannot be recalculated */
--		resize(c, c->prev, 0);
+-void
+-setsel(struct wl_listener *listener, void *data)
+-{
+-	/* This event is raised by the seat when a client wants to set the selection,
+-	 * usually when the user copies something. wlroots allows compositors to
+-	 * ignore such requests if they so choose, but in tbwm we always honor them
+-	 */
+-	struct wlr_seat_request_set_selection_event *event = data;
+-	wlr_seat_set_selection(seat, event->source, event->serial);
+-}
 +	/* Restart the marquee from position 0 whenever the selection moves */
 +	menu_marquee_begin(&audio_menu_marquee_px, &audio_menu_marquee_selkey,
 +		((audio_current_category + 3) * 100000) +
 +		((audio_current_group + 3) * 1000) +
 +		((audio_current_subgroup + 3) * 10) + audio_selected_row);
-+
+ 
+-void
+-setup(void)
+-{
+-	int drm_fd, i, sig[] = {SIGCHLD, SIGINT, SIGTERM, SIGPIPE};
+-	struct sigaction sa = {.sa_flags = SA_RESTART, .sa_handler = handlesig};
+-	sigemptyset(&sa.sa_mask);
 +	/* Fill entire background with content color first */
 +	for (i = 0; i < menu_width * menu_height; i++) {
 +		pixels[i] = content_bg;
- 	}
--	arrange(c->mon);
--	updatebar(c->mon);  /* Update bar visibility */
--	/* Ensure bar visibility follows config immediately for this monitor */
--	if (c->mon && c->mon->bar) {
--		if (cfg_bar_autohide)
--			wlr_scene_node_set_enabled(&c->mon->bar->node, !fullscreen);
--		else
--			wlr_scene_node_set_enabled(&c->mon->bar->node, 1);
-+
++	}
+ 
+-	for (i = 0; i < (int)LENGTH(sig); i++)
+-		sigaction(sig[i], &sa, NULL);
 +	/* Draw frame background for border cells */
 +	for (y = 0; y < cell_height; y++) {
 +		for (x = 0; x < menu_width; x++) {
@@ -5710,34 +5826,25 @@ index a1e049d..353d3fd 100644
 +		for (x = (menu_cells_w - 1) * cell_width; x < menu_width; x++) {
 +			pixels[y * menu_width + x] = frame_bg;
 +		}
- 	}
--	printstatus();
--}
++	}
  
--void
--setlayout(const Arg *arg)
--{
--	if (!selmon)
--		return;
--	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
--		selmon->sellt ^= 1;
--	if (arg && arg->v)
--		selmon->lt[selmon->sellt] = (Layout *)arg->v;
--	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, LENGTH(selmon->ltsymbol));
--	arrange(selmon);
--	printstatus();
--}
+-	wlr_log_init(cfg_log_level, NULL);
+-	setupgrid();
+-	buildappcache();
+-	setup_foot_config();
 +	/* Draw box-drawing characters for the frame */
 +	render_char_to_buffer(pixels, menu_width, menu_height, 0, 0, 0x2554, line_color);
 +	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, 0, 0x2557, line_color);
 +	render_char_to_buffer(pixels, menu_width, menu_height, 0, (menu_cells_h - 1) * cell_height, 0x255A, line_color);
 +	render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, (menu_cells_h - 1) * cell_height, 0x255D, line_color);
  
--/* arg > 1.0 will set mfact absolutely */
--void
--setmfact(const Arg *arg)
--{
--	float f;
+-	/* Initialize s7 Scheme interpreter */
+-	sc = s7_init();
+-	if (!sc) {
+-		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: failed to initialize s7 Scheme\n");
+-	} else {
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: s7 Scheme %s initialized\n", S7_VERSION);
+-		setup_scheme();
 +	/* Top edge with title */
 +	{
 +		const char *title = "Audio";
@@ -5762,25 +5869,19 @@ index a1e049d..353d3fd 100644
 +	/* Right edge */
 +	for (row = 1; row < menu_cells_h - 1; row++) {
 +		render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
-+	}
+ 	}
  
--	if (!arg || !selmon || !selmon->lt[selmon->sellt]->arrange)
--		return;
--	f = arg->f < 1.0f ? arg->f + selmon->mfact : arg->f - 1.0f;
--	if (f < 0.1 || f > 0.9)
--		return;
--	selmon->mfact = f;
--	arrange(selmon);
--}
+-	/* Initialize comprehensive CPU profiling */
+-	timing_init();
 +	/* Draw content: categories, sub-topics or entries */
 +	{
 +		int crows = menu_cells_h - 2;
 +		int mtext = menu_cells_w - 2;
  
--void
--setmon(Client *c, Monitor *m, uint32_t newtags)
--{
--	Monitor *oldmon = c->mon;
+-	/* The Wayland display is managed by libwayland. It handles accepting
+-	 * clients from the Unix socket, manging Wayland globals, and so on. */
+-	dpy = wl_display_create();
+-	event_loop = wl_display_get_event_loop(dpy);
 +		if (audio_current_category < 0) {
 +			/* Show categories */
 +			if (audio_category_count == 0 && audiomenu_child_pid > 0) {
@@ -5799,10 +5900,13 @@ index a1e049d..353d3fd 100644
 +				uint32_t row_fg = is_selected ? highlight_fg : text_color;
 +				const char *cat_name = audio_categories[row];
  
--	if (oldmon == m)
--		return;
--	c->mon = m;
--	c->prev = c->geom;
+-	/* Setup eventfd to safely communicate signals into the Wayland event loop */
+-	signal_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+-	if (signal_fd >= 0) {
+-		signal_fd_source = wl_event_loop_add_fd(event_loop, signal_fd, WL_EVENT_READABLE, signal_fd_cb, NULL);
+-	} else {
+-		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: eventfd() failed: %s\n", strerror(errno));
+-	} 
 +				if (is_selected) {
 +					int px, py;
 +					for (py = text_y; py < text_y + cell_height; py++) {
@@ -5812,18 +5916,6 @@ index a1e049d..353d3fd 100644
 +					}
 +				}
  
--	/* Scene graph sends surface leave/enter events on move and resize */
--	if (oldmon)
--		arrange(oldmon);
--	if (m) {
--		/* Make sure window actually overlaps with the monitor */
--		resize(c, c->geom, 0);
--		c->tags = newtags ? newtags : m->tagset[m->seltags]; /* assign tags of target monitor */
--		setfullscreen(c, c->isfullscreen); /* This will call arrange(c->mon) */
--		setfloating(c, c->isfloating);
--	}
--	focusclient(focustop(selmon), 1);
--}
 +				render_row_text(pixels, menu_width, menu_height, text_y,
 +					cat_name, row_fg, mtext, is_selected,
 +					audio_menu_marquee_px, &audio_menu_marquee_needed);
@@ -5835,141 +5927,19 @@ index a1e049d..353d3fd 100644
 +			int is_selected;
 +			uint32_t row_fg;
  
--void
--setpsel(struct wl_listener *listener, void *data)
--{
--	/* This event is raised by the seat when a client wants to set the selection,
--	 * usually when the user copies something. wlroots allows compositors to
--	 * ignore such requests if they so choose, but in tbwm we always honor them
--	 */
--	struct wlr_seat_request_set_primary_selection_event *event = data;
--	wlr_seat_set_primary_selection(seat, event->source, event->serial);
--}
-+			/* First row: "< Back" */
-+			is_selected = (audio_selected_row == 0);
-+			row_fg = is_selected ? highlight_fg : text_color;
-+			{
-+				int text_y = cell_height;
-+				const char *back = "< Back";
-+				int bi;
- 
--void
--setsel(struct wl_listener *listener, void *data)
--{
--	/* This event is raised by the seat when a client wants to set the selection,
--	 * usually when the user copies something. wlroots allows compositors to
--	 * ignore such requests if they so choose, but in tbwm we always honor them
--	 */
--	struct wlr_seat_request_set_selection_event *event = data;
--	wlr_seat_set_selection(seat, event->source, event->serial);
--}
-+				if (is_selected) {
-+					int px, py;
-+					for (py = text_y; py < text_y + cell_height; py++) {
-+						for (px = cell_width; px < menu_width - cell_width; px++) {
-+							pixels[py * menu_width + px] = highlight_bg;
-+						}
-+					}
-+				}
- 
--void
--setup(void)
--{
--	int drm_fd, i, sig[] = {SIGCHLD, SIGINT, SIGTERM, SIGPIPE};
--	struct sigaction sa = {.sa_flags = SA_RESTART, .sa_handler = handlesig};
--	sigemptyset(&sa.sa_mask);
-+				for (bi = 0; back[bi] && bi < mtext; bi++) {
-+					render_char_to_buffer(pixels, menu_width, menu_height,
-+						cell_width + bi * cell_width, text_y,
-+						back[bi], row_fg);
-+				}
-+			}
- 
--	for (i = 0; i < (int)LENGTH(sig); i++)
--		sigaction(sig[i], &sa, NULL);
-+			/* Show the sub-topics */
-+			for (gi = 0; gi < audio_group_count && displayed < crows - 1; gi++) {
-+	int text_y = (displayed + 2) * cell_height;
-+	const char *gn = audio_groups[gi];
- 
--	wlr_log_init(cfg_log_level, NULL);
--	setupgrid();
--	buildappcache();
--	setup_foot_config();
-+	is_selected = (displayed + 1 == audio_selected_row);
-+	row_fg = is_selected ? highlight_fg : text_color;
- 
--	/* Initialize s7 Scheme interpreter */
--	sc = s7_init();
--	if (!sc) {
--		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: failed to initialize s7 Scheme\n");
--	} else {
--		tbwm_log(TBWM_LOG_INFO, "tbwm: s7 Scheme %s initialized\n", S7_VERSION);
--		setup_scheme();
-+	if (is_selected) {
-+		int px, py;
-+		for (py = text_y; py < text_y + cell_height; py++) {
-+			for (px = cell_width; px < menu_width - cell_width; px++) {
-+				pixels[py * menu_width + px] = highlight_bg;
-+			}
-+		}
- 	}
- 
--	/* Initialize comprehensive CPU profiling */
--	timing_init();
--
--	/* The Wayland display is managed by libwayland. It handles accepting
--	 * clients from the Unix socket, manging Wayland globals, and so on. */
--	dpy = wl_display_create();
--	event_loop = wl_display_get_event_loop(dpy);
-+	render_row_text(pixels, menu_width, menu_height, text_y,
-+		gn, row_fg, mtext, is_selected,
-+		audio_menu_marquee_px, &audio_menu_marquee_needed);
-+	displayed++;
-+			}
-+		} else if (audio_group_has_sub && audio_current_subgroup < 0) {
-+			/* Show entities (each sink/source) of the selected sub-topic */
-+			int gi;
-+			int displayed = 0;
-+			int is_selected;
-+			uint32_t row_fg;
- 
--	/* Setup eventfd to safely communicate signals into the Wayland event loop */
--	signal_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
--	if (signal_fd >= 0) {
--		signal_fd_source = wl_event_loop_add_fd(event_loop, signal_fd, WL_EVENT_READABLE, signal_fd_cb, NULL);
--	} else {
--		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: eventfd() failed: %s\n", strerror(errno));
--	} 
-+			/* First row: "< Back" */
-+			is_selected = (audio_selected_row == 0);
-+			row_fg = is_selected ? highlight_fg : text_color;
-+			{
-+				int text_y = cell_height;
-+				const char *back = "< Back";
-+				int bi;
- 
-+				if (is_selected) {
-+					int px, py;
-+					for (py = text_y; py < text_y + cell_height; py++) {
-+						for (px = cell_width; px < menu_width - cell_width; px++) {
-+							pixels[py * menu_width + px] = highlight_bg;
-+						}
-+					}
-+				}
- 
 -	/* The backend is a wlroots feature which abstracts the underlying input and
 -	 * output hardware. The autocreate option will choose the most suitable
 -	 * backend based on the current environment, such as opening an X11 window
 -	 * if an X11 server is running. */
 -	if (!(backend = wlr_backend_autocreate(event_loop, &session)))
 -		die("couldn't create backend");
-+				for (bi = 0; back[bi] && bi < mtext; bi++) {
-+					render_char_to_buffer(pixels, menu_width, menu_height,
-+						cell_width + bi * cell_width, text_y,
-+						back[bi], row_fg);
-+				}
-+			}
++			/* First row: "< Back" */
++			is_selected = (audio_selected_row == 0);
++			row_fg = is_selected ? highlight_fg : text_color;
++			{
++				int text_y = cell_height;
++				const char *back = "< Back";
++				int bi;
  
 -	/* Initialize the scene graph used to lay out windows */
 -	scene = wlr_scene_create();
@@ -5989,10 +5959,14 @@ index a1e049d..353d3fd 100644
 -	layers[LyrFS] = wlr_scene_tree_create(&scene->tree);
 -	drag_icon = wlr_scene_tree_create(&scene->tree);
 -	wlr_scene_node_place_below(&drag_icon->node, &layers[LyrBlock]->node);
-+			/* Show the entities */
-+			for (gi = 0; gi < audio_subgroup_count && displayed < crows - 1; gi++) {
-+	int text_y = (displayed + 2) * cell_height;
-+	const char *sn = audio_subgroups[gi];
++				if (is_selected) {
++					int px, py;
++					for (py = text_y; py < text_y + cell_height; py++) {
++						for (px = cell_width; px < menu_width - cell_width; px++) {
++							pixels[py * menu_width + px] = highlight_bg;
++						}
++					}
++				}
  
 -	/* Autocreates a renderer, either Pixman, GLES2 or Vulkan for us. The user
 -	 * can also specify a renderer using the WLR_RENDERER env var.
@@ -6001,8 +5975,12 @@ index a1e049d..353d3fd 100644
 -	if (!(drw = wlr_renderer_autocreate(backend)))
 -		die("couldn't create renderer");
 -	wl_signal_add(&drw->events.lost, &gpu_reset);
-+	is_selected = (displayed + 1 == audio_selected_row);
-+	row_fg = is_selected ? highlight_fg : text_color;
++				for (bi = 0; back[bi] && bi < mtext; bi++) {
++					render_char_to_buffer(pixels, menu_width, menu_height,
++						cell_width + bi * cell_width, text_y,
++						back[bi], row_fg);
++				}
++			}
  
 -	/* Create shm, drm and linux_dmabuf interfaces by ourselves.
 -	 * The simplest way is to call:
@@ -6010,6 +5988,18 @@ index a1e049d..353d3fd 100644
 -	 * but we need to create the linux_dmabuf interface manually to integrate it
 -	 * with wlr_scene. */
 -	wlr_renderer_init_wl_shm(drw, dpy);
++			/* Show the sub-topics */
++			for (gi = 0; gi < audio_group_count && displayed < crows - 1; gi++) {
++	int text_y = (displayed + 2) * cell_height;
++	const char *gn = audio_groups[gi];
+ 
+-	if (wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF)) {
+-		wlr_drm_create(dpy, drw);
+-		wlr_scene_set_linux_dmabuf_v1(scene,
+-				wlr_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
++	is_selected = (displayed + 1 == audio_selected_row);
++	row_fg = is_selected ? highlight_fg : text_color;
++
 +	if (is_selected) {
 +		int px, py;
 +		for (py = text_y; py < text_y + cell_height; py++) {
@@ -6017,28 +6007,19 @@ index a1e049d..353d3fd 100644
 +				pixels[py * menu_width + px] = highlight_bg;
 +			}
 +		}
-+	}
+ 	}
  
--	if (wlr_renderer_get_texture_formats(drw, WLR_BUFFER_CAP_DMABUF)) {
--		wlr_drm_create(dpy, drw);
--		wlr_scene_set_linux_dmabuf_v1(scene,
--				wlr_linux_dmabuf_v1_create_with_renderer(dpy, 5, drw));
--	}
--
 -	if ((drm_fd = wlr_renderer_get_drm_fd(drw)) >= 0 && drw->features.timeline
 -			&& backend->features.timeline)
 -		wlr_linux_drm_syncobj_manager_v1_create(dpy, 1, drm_fd);
 +	render_row_text(pixels, menu_width, menu_height, text_y,
-+		sn, row_fg, mtext, is_selected,
++		gn, row_fg, mtext, is_selected,
 +		audio_menu_marquee_px, &audio_menu_marquee_needed);
 +	displayed++;
 +			}
-+		} else {
-+			/* Show actions of the selected sub-topic (direct) or of a specific
-+			 * entity. The < Back> row returns to the appropriate upper level. */
-+			const char *cat = audio_categories[audio_current_category];
-+			const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
-+			const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
++		} else if (audio_group_has_sub && audio_current_subgroup < 0) {
++			/* Show entities (each sink/source) of the selected sub-topic */
++			int gi;
 +			int displayed = 0;
 +			int is_selected;
 +			uint32_t row_fg;
@@ -6095,6 +6076,92 @@ index a1e049d..353d3fd 100644
 +			}
  
 -	wlr_scene_set_gamma_control_manager_v1(scene, wlr_gamma_control_manager_v1_create(dpy));
++			/* Show the entities */
++			for (gi = 0; gi < audio_subgroup_count && displayed < crows - 1; gi++) {
++	int text_y = (displayed + 2) * cell_height;
++	const char *sn = audio_subgroups[gi];
+ 
+-	power_mgr = wlr_output_power_manager_v1_create(dpy);
+-	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
++	is_selected = (displayed + 1 == audio_selected_row);
++	row_fg = is_selected ? highlight_fg : text_color;
+ 
+-	/* Creates an output layout, which is a wlroots utility for working with an
+-	 * arrangement of screens in a physical layout. */
+-	output_layout = wlr_output_layout_create(dpy);
+-	wl_signal_add(&output_layout->events.change, &layout_change);
++	if (is_selected) {
++		int px, py;
++		for (py = text_y; py < text_y + cell_height; py++) {
++			for (px = cell_width; px < menu_width - cell_width; px++) {
++				pixels[py * menu_width + px] = highlight_bg;
++			}
++		}
++	}
+ 
+-    wlr_xdg_output_manager_v1_create(dpy, output_layout);
++	render_row_text(pixels, menu_width, menu_height, text_y,
++		sn, row_fg, mtext, is_selected,
++		audio_menu_marquee_px, &audio_menu_marquee_needed);
++	displayed++;
++			}
++		} else {
++			/* Show actions of the selected sub-topic (direct) or of a specific
++			 * entity. The < Back> row returns to the appropriate upper level. */
++			const char *cat = audio_categories[audio_current_category];
++			const char *group = (audio_group_count == 0) ? "" : audio_groups[audio_current_group];
++			const char *sub = (audio_current_subgroup >= 0) ? audio_subgroups[audio_current_subgroup] : "";
++			int displayed = 0;
++			int is_selected;
++			uint32_t row_fg;
+ 
+-	/* Configure a listener to be notified when new outputs are available on the
+-	 * backend. */
+-	wl_list_init(&mons);
+-	wl_signal_add(&backend->events.new_output, &new_output);
++			/* First row: "< Back" */
++			is_selected = (audio_selected_row == 0);
++			row_fg = is_selected ? highlight_fg : text_color;
++			{
++				int text_y = cell_height;
++				const char *back = "< Back";
++				int bi;
+ 
+-	/* Set up our client lists, the xdg-shell and the layer-shell. The xdg-shell is a
+-	 * Wayland protocol which is used for application windows. For more
+-	 * detail on shells, refer to the article:
+-	 *
+-	 * https://drewdevault.com/2018/07/29/Wayland-shells.html
+-	 */
+-	wl_list_init(&clients);
+-	wl_list_init(&fstack);
++				if (is_selected) {
++					int px, py;
++					for (py = text_y; py < text_y + cell_height; py++) {
++						for (px = cell_width; px < menu_width - cell_width; px++) {
++							pixels[py * menu_width + px] = highlight_bg;
++						}
++					}
++				}
+ 
+-	/* Initialize REPL and load config (must be after layers and mons init) */
+-	if (sc) {
+-		repl_add_line(";;; Welcome to TurboWM!");
+-		repl_add_line(";;; Run (help) for commands");
+-		repl_add_line(";;; Press Super+Shift+; to toggle, Escape to close");
+-		repl_add_line("");
+-		load_config();
+-	}
++				for (bi = 0; back[bi] && bi < mtext; bi++) {
++					render_char_to_buffer(pixels, menu_width, menu_height,
++						cell_width + bi * cell_width, text_y,
++						back[bi], row_fg);
++				}
++			}
+ 
+-	xdg_shell = wlr_xdg_shell_create(dpy, 6);
+-	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
+-	wl_signal_add(&xdg_shell->events.new_popup, &new_xdg_popup);
 +			/* Show actions in this sub-topic / entity */
 +			for (i = 0; i < audio_entry_count && displayed < crows - 1; i++) {
 +				if (strcmp(audio_entries[i].category, cat) == 0 &&
@@ -6103,15 +6170,12 @@ index a1e049d..353d3fd 100644
 +						int text_y = (displayed + 2) * cell_height;
 +						const char *nm = audio_entries[i].name;
  
--	power_mgr = wlr_output_power_manager_v1_create(dpy);
--	wl_signal_add(&power_mgr->events.set_mode, &output_power_mgr_set_mode);
+-	layer_shell = wlr_layer_shell_v1_create(dpy, 3);
+-	wl_signal_add(&layer_shell->events.new_surface, &new_layer_surface);
 +						is_selected = (displayed + 1 == audio_selected_row);
 +						row_fg = is_selected ? highlight_fg : text_color;
  
--	/* Creates an output layout, which is a wlroots utility for working with an
--	 * arrangement of screens in a physical layout. */
--	output_layout = wlr_output_layout_create(dpy);
--	wl_signal_add(&output_layout->events.change, &layout_change);
+-	idle_notifier = wlr_idle_notifier_v1_create(dpy);
 +						if (is_selected) {
 +							int px, py;
 +							for (py = text_y; py < text_y + cell_height; py++) {
@@ -6121,7 +6185,8 @@ index a1e049d..353d3fd 100644
 +							}
 +						}
  
--    wlr_xdg_output_manager_v1_create(dpy, output_layout);
+-	idle_inhibit_mgr = wlr_idle_inhibit_v1_create(dpy);
+-	wl_signal_add(&idle_inhibit_mgr->events.new_inhibitor, &new_idle_inhibitor);
 +						render_row_text(pixels, menu_width, menu_height, text_y,
 +							nm, row_fg, mtext, is_selected,
 +							audio_menu_marquee_px, &audio_menu_marquee_needed);
@@ -6131,10 +6196,11 @@ index a1e049d..353d3fd 100644
 +		}
 +	}
  
--	/* Configure a listener to be notified when new outputs are available on the
--	 * backend. */
--	wl_list_init(&mons);
--	wl_signal_add(&backend->events.new_output, &new_output);
+-	session_lock_mgr = wlr_session_lock_manager_v1_create(dpy);
+-	wl_signal_add(&session_lock_mgr->events.new_lock, &new_session_lock);
+-	locked_bg = wlr_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
+-			(float [4]){0.1f, 0.1f, 0.1f, 1.0f});
+-	wlr_scene_node_set_enabled(&locked_bg->node, 0);
 +	/* Create or update the audiomenu buffer */
 +	if (!audiomenu_buffer)
 +		audiomenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
@@ -6156,26 +6222,19 @@ index a1e049d..353d3fd 100644
 +	/* Don't drop - we're caching the buffer for reuse */
 +}
  
--	/* Set up our client lists, the xdg-shell and the layer-shell. The xdg-shell is a
--	 * Wayland protocol which is used for application windows. For more
--	 * detail on shells, refer to the article:
--	 *
--	 * https://drewdevault.com/2018/07/29/Wayland-shells.html
--	 */
--	wl_list_init(&clients);
--	wl_list_init(&fstack);
+-	/* Use decoration protocols to negotiate server-side decorations */
+-	wlr_server_decoration_manager_set_default_mode(
+-			wlr_server_decoration_manager_create(dpy),
+-			WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
+-	xdg_decoration_mgr = wlr_xdg_decoration_manager_v1_create(dpy);
+-	wl_signal_add(&xdg_decoration_mgr->events.new_toplevel_decoration, &new_xdg_decoration);
 +static int
 +launcherkey(xkb_keysym_t sym)
 +{
 +	int match_count;
  
--	/* Initialize REPL and load config (must be after layers and mons init) */
--	if (sc) {
--		repl_add_line(";;; Welcome to TurboWM!");
--		repl_add_line(";;; Run (help) for commands");
--		repl_add_line(";;; Press Super+Shift+; to toggle, Escape to close");
--		repl_add_line("");
--		load_config();
+-	pointer_constraints = wlr_pointer_constraints_v1_create(dpy);
+-	wl_signal_add(&pointer_constraints->events.new_constraint, &new_pointer_constraint);
 +	if (sym == XKB_KEY_Escape) {
 +		launcher_active = 0;
 +		launcher_input[0] = '\0';
@@ -6183,20 +6242,20 @@ index a1e049d..353d3fd 100644
 +		launcher_selection = 0;
 +		updatebars();
 +		return 1;
- 	}
++	}
  
--	xdg_shell = wlr_xdg_shell_create(dpy, 6);
--	wl_signal_add(&xdg_shell->events.new_toplevel, &new_xdg_toplevel);
--	wl_signal_add(&xdg_shell->events.new_popup, &new_xdg_popup);
--
--	layer_shell = wlr_layer_shell_v1_create(dpy, 3);
--	wl_signal_add(&layer_shell->events.new_surface, &new_layer_surface);
+-	relative_pointer_mgr = wlr_relative_pointer_manager_v1_create(dpy);
 +	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
 +		runlauncher();
 +		return 1;
 +	}
  
--	idle_notifier = wlr_idle_notifier_v1_create(dpy);
+-	/*
+-	 * Creates a cursor, which is a wlroots utility for tracking the cursor
+-	 * image shown on screen.
+-	 */
+-	cursor = wlr_cursor_create();
+-	wlr_cursor_attach_output_layout(cursor, output_layout);
 +	if (sym == XKB_KEY_BackSpace) {
 +		if (launcher_input_len > 0) {
 +			launcher_input[--launcher_input_len] = '\0';
@@ -6206,8 +6265,12 @@ index a1e049d..353d3fd 100644
 +		return 1;
 +	}
  
--	idle_inhibit_mgr = wlr_idle_inhibit_v1_create(dpy);
--	wl_signal_add(&idle_inhibit_mgr->events.new_inhibitor, &new_idle_inhibitor);
+-	/* Creates an xcursor manager, another wlroots utility which loads up
+-	 * Xcursor themes to source cursor images from and makes sure that cursor
+-	 * images are available at all scale factors on the screen (necessary for
+-	 * HiDPI support). Scaled cursors will be loaded with each output. */
+-	cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
+-	setenv("XCURSOR_SIZE", "24", 1);
 +	/* Navigation: Tab to cycle forward, Shift+Tab to go back */
 +	if (sym == XKB_KEY_Tab) {
 +		match_count = launcher_match_count();
@@ -6217,71 +6280,6 @@ index a1e049d..353d3fd 100644
 +		}
 +		return 1;
 +	}
- 
--	session_lock_mgr = wlr_session_lock_manager_v1_create(dpy);
--	wl_signal_add(&session_lock_mgr->events.new_lock, &new_session_lock);
--	locked_bg = wlr_scene_rect_create(layers[LyrBlock], sgeom.width, sgeom.height,
--			(float [4]){0.1f, 0.1f, 0.1f, 1.0f});
--	wlr_scene_node_set_enabled(&locked_bg->node, 0);
-+	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
-+		match_count = launcher_match_count();
-+		if (match_count > 0) {
-+			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
-+			updatebars();
-+		}
-+		return 1;
-+	}
- 
--	/* Use decoration protocols to negotiate server-side decorations */
--	wlr_server_decoration_manager_set_default_mode(
--			wlr_server_decoration_manager_create(dpy),
--			WLR_SERVER_DECORATION_MANAGER_MODE_SERVER);
--	xdg_decoration_mgr = wlr_xdg_decoration_manager_v1_create(dpy);
--	wl_signal_add(&xdg_decoration_mgr->events.new_toplevel_decoration, &new_xdg_decoration);
-+	/* Regular character input */
-+	if (sym >= 0x20 && sym <= 0x7e &&
-+	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
-+		launcher_input[launcher_input_len++] = (char)sym;
-+		launcher_input[launcher_input_len] = '\0';
-+		launcher_selection = 0;
-+		updatebars();
- 
--	pointer_constraints = wlr_pointer_constraints_v1_create(dpy);
--	wl_signal_add(&pointer_constraints->events.new_constraint, &new_pointer_constraint);
-+		/* Auto-run if only one match */
-+		if (launcher_match_count() == 1) {
-+			runlauncher();
-+		}
-+		return 1;
-+	}
- 
--	relative_pointer_mgr = wlr_relative_pointer_manager_v1_create(dpy);
-+	return 1; /* Consume all keys in launcher mode */
-+}
- 
-+int
-+keybinding(uint32_t mods, xkb_keysym_t sym)
-+{
- 	/*
--	 * Creates a cursor, which is a wlroots utility for tracking the cursor
--	 * image shown on screen.
-+	 * Here we handle compositor keybindings. This is when the compositor is
-+	 * processing keys, rather than passing them on to the client for its own
-+	 * processing.
- 	 */
--	cursor = wlr_cursor_create();
--	wlr_cursor_attach_output_layout(cursor, output_layout);
-+	const Key *k;
- 
--	/* Creates an xcursor manager, another wlroots utility which loads up
--	 * Xcursor themes to source cursor images from and makes sure that cursor
--	 * images are available at all scale factors on the screen (necessary for
--	 * HiDPI support). Scaled cursors will be loaded with each output. */
--	cursor_mgr = wlr_xcursor_manager_create(NULL, 24);
--	setenv("XCURSOR_SIZE", "24", 1);
-+	/* Handle launcher mode first */
-+	if (launcher_active)
-+		return launcherkey(sym);
  
 -	/*
 -	 * wlr_cursor *only* displays an image on screen. It does not move around
@@ -6298,12 +6296,75 @@ index a1e049d..353d3fd 100644
 -	wl_signal_add(&cursor->events.button, &cursor_button);
 -	wl_signal_add(&cursor->events.axis, &cursor_axis);
 -	wl_signal_add(&cursor->events.frame, &cursor_frame);
++	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
++		match_count = launcher_match_count();
++		if (match_count > 0) {
++			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
++			updatebars();
++		}
++		return 1;
++	}
+ 
+-	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
+-	wl_signal_add(&cursor_shape_mgr->events.request_set_shape, &request_set_cursor_shape);
++	/* Regular character input */
++	if (sym >= 0x20 && sym <= 0x7e &&
++	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
++		launcher_input[launcher_input_len++] = (char)sym;
++		launcher_input[launcher_input_len] = '\0';
++		launcher_selection = 0;
++		updatebars();
++
++		/* Auto-run if only one match */
++		if (launcher_match_count() == 1) {
++			runlauncher();
++		}
++		return 1;
++	}
++
++	return 1; /* Consume all keys in launcher mode */
++}
+ 
++int
++keybinding(uint32_t mods, xkb_keysym_t sym)
++{
+ 	/*
+-	 * Configures a seat, which is a single "seat" at which a user sits and
+-	 * operates the computer. This conceptually includes up to one keyboard,
+-	 * pointer, touch, and drawing tablet device. We also rig up a listener to
+-	 * let us know when new input devices are available on the backend.
++	 * Here we handle compositor keybindings. This is when the compositor is
++	 * processing keys, rather than passing them on to the client for its own
++	 * processing.
+ 	 */
+-	wl_signal_add(&backend->events.new_input, &new_input_device);
+-	virtual_keyboard_mgr = wlr_virtual_keyboard_manager_v1_create(dpy);
+-	wl_signal_add(&virtual_keyboard_mgr->events.new_virtual_keyboard,
+-			&new_virtual_keyboard);
+-	virtual_pointer_mgr = wlr_virtual_pointer_manager_v1_create(dpy);
+-    wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
+-            &new_virtual_pointer);
++	const Key *k;
+ 
+-	seat = wlr_seat_create(dpy, "seat0");
+-	wl_signal_add(&seat->events.request_set_cursor, &request_cursor);
+-	wl_signal_add(&seat->events.request_set_selection, &request_set_sel);
+-	wl_signal_add(&seat->events.request_set_primary_selection, &request_set_psel);
+-	wl_signal_add(&seat->events.request_start_drag, &request_start_drag);
+-	wl_signal_add(&seat->events.start_drag, &start_drag);
++	/* Handle launcher mode first */
++	if (launcher_active)
++		return launcherkey(sym);
+ 
+-	kb_group = createkeyboardgroup();
+-	wl_list_init(&kb_group->destroy.link);
 +	/* Handle REPL input mode */
 +	if (repl_input_active)
 +		return replkey(sym);
  
--	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
--	wl_signal_add(&cursor_shape_mgr->events.request_set_shape, &request_set_cursor_shape);
+-	output_mgr = wlr_output_manager_v1_create(dpy);
+-	wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
+-	wl_signal_add(&output_mgr->events.test, &output_mgr_test);
 +	/* Handle app menu navigation - if appmenukey handles it, return 1;
 +	 * otherwise fall through to check scheme bindings (e.g., M-x to toggle) */
 +	if (appmenu_active && appmenukey(sym))
@@ -6317,22 +6378,21 @@ index a1e049d..353d3fd 100644
 +	if (traymenu_active && traymenu_key(sym))
 +		return 1;
  
+-	/* Make sure XWayland clients don't connect to the parent X server,
+-	 * e.g when running in the x11 backend or the wayland backend and the
+-	 * compositor has Xwayland support */
+-	unsetenv("DISPLAY");
+-#ifdef XWAYLAND
  	/*
--	 * Configures a seat, which is a single "seat" at which a user sits and
--	 * operates the computer. This conceptually includes up to one keyboard,
--	 * pointer, touch, and drawing tablet device. We also rig up a listener to
--	 * let us know when new input devices are available on the backend.
+-	 * Initialise the XWayland X server.
+-	 * It will be started when the first X client is started.
 +	 * Fallback: some keyboards or keymaps produce plain F1..F12 for Ctrl+Alt+Fx
 +	 * instead of the XF86Switch_VT_* keysyms. Handle that scenario here so VT
 +	 * switching works regardless of the specific keysym produced.
  	 */
--	wl_signal_add(&backend->events.new_input, &new_input_device);
--	virtual_keyboard_mgr = wlr_virtual_keyboard_manager_v1_create(dpy);
--	wl_signal_add(&virtual_keyboard_mgr->events.new_virtual_keyboard,
--			&new_virtual_keyboard);
--	virtual_pointer_mgr = wlr_virtual_pointer_manager_v1_create(dpy);
--    wl_signal_add(&virtual_pointer_mgr->events.new_virtual_pointer,
--            &new_virtual_pointer);
+-	if ((xwayland = wlr_xwayland_create(dpy, compositor, 1))) {
+-		wl_signal_add(&xwayland->events.ready, &xwayland_ready);
+-		wl_signal_add(&xwayland->events.new_surface, &new_xwayland_surface);
 +	if (CLEANMASK(mods) == (WLR_MODIFIER_CTRL|WLR_MODIFIER_ALT)) {
 +		/* Prefer XF86Switch_VT_1..12 if the keymap provides them */
 +		if (sym >= XKB_KEY_XF86Switch_VT_1 && sym <= XKB_KEY_XF86Switch_VT_12) {
@@ -6343,19 +6403,13 @@ index a1e049d..353d3fd 100644
 +			return 1;
 +		}
  
--	seat = wlr_seat_create(dpy, "seat0");
--	wl_signal_add(&seat->events.request_set_cursor, &request_cursor);
--	wl_signal_add(&seat->events.request_set_selection, &request_set_sel);
--	wl_signal_add(&seat->events.request_set_primary_selection, &request_set_psel);
--	wl_signal_add(&seat->events.request_start_drag, &request_start_drag);
--	wl_signal_add(&seat->events.start_drag, &start_drag);
--
--	kb_group = createkeyboardgroup();
--	wl_list_init(&kb_group->destroy.link);
--
--	output_mgr = wlr_output_manager_v1_create(dpy);
--	wl_signal_add(&output_mgr->events.apply, &output_mgr_apply);
--	wl_signal_add(&output_mgr->events.test, &output_mgr_test);
+-		setenv("DISPLAY", xwayland->display_name, 1);
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: XWayland started on DISPLAY=%s\n", xwayland->display_name);
+-	} else {
+-		tbwm_log(TBWM_LOG_ERROR, "tbwm: ERROR: failed to setup XWayland X server, continuing without it\n");
+-	} 
+-#endif
+-}
 +		/* Older / simpler keymaps may produce plain F1..F12 */
 +		if (sym >= XKB_KEY_F1 && sym <= XKB_KEY_F12) {
 +			int n = sym - XKB_KEY_F1 + 1;
@@ -6366,29 +6420,22 @@ index a1e049d..353d3fd 100644
 +		}
 +	}
  
--	/* Make sure XWayland clients don't connect to the parent X server,
--	 * e.g when running in the x11 backend or the wayland backend and the
--	 * compositor has Xwayland support */
--	unsetenv("DISPLAY");
--#ifdef XWAYLAND
--	/*
--	 * Initialise the XWayland X server.
--	 * It will be started when the first X client is started.
--	 */
--	if ((xwayland = wlr_xwayland_create(dpy, compositor, 1))) {
--		wl_signal_add(&xwayland->events.ready, &xwayland_ready);
--		wl_signal_add(&xwayland->events.new_surface, &new_xwayland_surface);
+-void
+-spawn(const Arg *arg)
+-{
+-	tbwm_log(TBWM_LOG_INFO, "tbwm: spawning %s (DISPLAY=%s WAYLAND_DISPLAY=%s)\n",
+-		((char **)arg->v)[0],
+-		getenv("DISPLAY") ? getenv("DISPLAY") : "(none)",
+-		getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(none)");
+-	if (fork() == 0) {
+-		dup2(STDERR_FILENO, STDOUT_FILENO);
+-		setsid();
+-		execvp(((char **)arg->v)[0], (char **)arg->v);
+-		die("tbwm: execvp %s failed:", ((char **)arg->v)[0]);
 +	/* Check Scheme keybindings first */
 +	if (check_scheme_bindings(CLEANMASK(mods), sym))
 +		return 1;
- 
--		setenv("DISPLAY", xwayland->display_name, 1);
--		tbwm_log(TBWM_LOG_INFO, "tbwm: XWayland started on DISPLAY=%s\n", xwayland->display_name);
--	} else {
--		tbwm_log(TBWM_LOG_ERROR, "tbwm: ERROR: failed to setup XWayland X server, continuing without it\n");
--	} 
--#endif
--}
++
 +	/* Fallback: treat Win+Shift+Arrow as Swap (same as Win+Shift+h/j/k/l) if no Scheme binding exists for M-S-Arrow */
 +	if ((mods & WLR_MODIFIER_SHIFT) && (mods & (WLR_MODIFIER_LOGO|WLR_MODIFIER_ALT))) {
 +		if (sym == XKB_KEY_Left) {
@@ -6413,19 +6460,7 @@ index a1e049d..353d3fd 100644
 +			return 1;
 +		}
 +	}
- 
--void
--spawn(const Arg *arg)
--{
--	tbwm_log(TBWM_LOG_INFO, "tbwm: spawning %s (DISPLAY=%s WAYLAND_DISPLAY=%s)\n",
--		((char **)arg->v)[0],
--		getenv("DISPLAY") ? getenv("DISPLAY") : "(none)",
--		getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(none)");
--	if (fork() == 0) {
--		dup2(STDERR_FILENO, STDOUT_FILENO);
--		setsid();
--		execvp(((char **)arg->v)[0], (char **)arg->v);
--		die("tbwm: execvp %s failed:", ((char **)arg->v)[0]);
++
 +	for (k = keys; k < END(keys); k++) {
 +		if (CLEANMASK(mods) == CLEANMASK(k->mod)
 +				&& sym == k->keysym && k->func) {
@@ -6483,6 +6518,7 @@ index a1e049d..353d3fd 100644
 +	/* On _press_ if there is no active screen locker,
 +	 * attempt to process a compositor keybinding. */
 +	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
++		kb_spawned = 0;
 +		for (i = 0; i < nsyms; i++)
 +			handled = keybinding(mods, syms[i]) || handled;
  	}
@@ -6497,7 +6533,7 @@ index a1e049d..353d3fd 100644
 -		tbwm_log(TBWM_LOG_INFO, "Loaded fallback font: %s", cfg_fallback_font_path);
 +	/* Don't enable key repeat if we're now in screenshot mode (spawn-grab was called)
 +	 * or if the keybinding spawned a process - we don't want to spawn it repeatedly. */
-+	if (handled && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
++	if (handled && !kb_spawned && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
 +		group->mods = mods;
 +		group->keysyms = syms;
 +		group->nsyms = nsyms;
@@ -6598,33 +6634,47 @@ index a1e049d..353d3fd 100644
 -	arg.i = s7_integer(s7_car(args));
 -	focusdir(&arg);
 -	return s7_t(sc);
+-}
 +	wl_event_source_timer_update(group->key_repeat_source,
 +			1000 / group->wlr_group->keyboard.repeat_info.rate);
-+
-+	for (i = 0; i < group->nsyms; i++)
-+		keybinding(group->mods, group->keysyms[i]);
-+
-+	return 0;
- }
  
 -/* Scheme function: (swap-dir direction) - swap window in direction */
 -static s7_pointer scm_swap_dir(s7_scheme *sc, s7_pointer args)
-+void
-+killclient(const Arg *arg)
- {
+-{
 -	Arg arg;
 -	if (!s7_is_integer(s7_car(args)))
 -		return s7_f(sc);
 -	arg.i = s7_integer(s7_car(args));
 -	swapdir(&arg);
 -	return s7_t(sc);
++	for (i = 0; i < group->nsyms; i++)
++		keybinding(group->mods, group->keysyms[i]);
++
++	return 0;
+ }
+ 
+-/* Scheme function: (view-tag n) - switch to tag n (1-9) */
+-static s7_pointer scm_view_tag(s7_scheme *sc, s7_pointer args)
++void
++killclient(const Arg *arg)
+ {
+-	Arg arg;
+-	int n;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	n = s7_integer(s7_car(args));
+-	if (n < 1 || n > 9)
+-		return s7_f(sc);
+-	arg.ui = 1 << (n - 1);
+-	view(&arg);
+-	return s7_t(sc);
 +	Client *sel = focustop(selmon);
 +	if (sel)
 +		client_send_close(sel);
  }
  
--/* Scheme function: (view-tag n) - switch to tag n (1-9) */
--static s7_pointer scm_view_tag(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (tag-window n) - move focused window to tag n */
+-static s7_pointer scm_tag_window(s7_scheme *sc, s7_pointer args)
 +void
 +locksession(struct wl_listener *listener, void *data)
  {
@@ -6636,7 +6686,7 @@ index a1e049d..353d3fd 100644
 -	if (n < 1 || n > 9)
 -		return s7_f(sc);
 -	arg.ui = 1 << (n - 1);
--	view(&arg);
+-	tag(&arg);
 -	return s7_t(sc);
 -}
 +	struct wlr_session_lock_v1 *session_lock = data;
@@ -6649,48 +6699,40 @@ index a1e049d..353d3fd 100644
 +	lock = session_lock->data = ecalloc(1, sizeof(*lock));
 +	focusclient(NULL, 0);
  
--/* Scheme function: (tag-window n) - move focused window to tag n */
--static s7_pointer scm_tag_window(s7_scheme *sc, s7_pointer args)
--{
--	Arg arg;
--	int n;
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	n = s7_integer(s7_car(args));
--	if (n < 1 || n > 9)
--		return s7_f(sc);
--	arg.ui = 1 << (n - 1);
--	tag(&arg);
--	return s7_t(sc);
--}
-+	lock->scene = wlr_scene_tree_create(layers[LyrBlock]);
-+	cur_lock = lock->lock = session_lock;
-+	locked = 1;
- 
 -/* Scheme function: (toggle-floating) - toggle floating for focused window */
 -static s7_pointer scm_toggle_floating(s7_scheme *sc, s7_pointer args)
 -{
 -	togglefloating(NULL);
 -	return s7_t(sc);
 -}
-+	LISTEN(&session_lock->events.new_surface, &lock->new_surface, createlocksurface);
-+	LISTEN(&session_lock->events.destroy, &lock->destroy, destroysessionlock);
-+	LISTEN(&session_lock->events.unlock, &lock->unlock, unlocksession);
++	lock->scene = wlr_scene_tree_create(layers[LyrBlock]);
++	cur_lock = lock->lock = session_lock;
++	locked = 1;
  
 -/* Scheme function: (toggle-fullscreen) - toggle fullscreen for focused window */
 -static s7_pointer scm_toggle_fullscreen(s7_scheme *sc, s7_pointer args)
 -{
 -	togglefullscreen(NULL);
 -	return s7_t(sc);
-+	wlr_session_lock_v1_send_locked(session_lock);
- }
+-}
++	LISTEN(&session_lock->events.new_surface, &lock->new_surface, createlocksurface);
++	LISTEN(&session_lock->events.destroy, &lock->destroy, destroysessionlock);
++	LISTEN(&session_lock->events.unlock, &lock->unlock, unlocksession);
  
 -/* Scheme function: (kill-client) - close focused window */
 -static s7_pointer scm_kill_client(s7_scheme *sc, s7_pointer args)
+-{
+-	killclient(NULL);
+-	return s7_t(sc);
++	wlr_session_lock_v1_send_locked(session_lock);
+ }
+ 
+-/* Scheme function: (refresh) - refresh layout */
+-static s7_pointer scm_refresh(s7_scheme *sc, s7_pointer args)
 +void
 +mapnotify(struct wl_listener *listener, void *data)
  {
--	killclient(NULL);
+-	refresh(NULL);
 -	return s7_t(sc);
 -}
 +	/* Called when the surface is mapped, or ready to display on-screen. */
@@ -6698,10 +6740,10 @@ index a1e049d..353d3fd 100644
 +	Client *w, *c = wl_container_of(listener, c, map);
 +	Monitor *m;
  
--/* Scheme function: (refresh) - refresh layout */
--static s7_pointer scm_refresh(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (toggle-launcher) - open/close launcher */
+-static s7_pointer scm_toggle_launcher(s7_scheme *sc, s7_pointer args)
 -{
--	refresh(NULL);
+-	togglelauncher(NULL);
 -	return s7_t(sc);
 -}
 +	/* Create scene tree for this client */
@@ -6713,14 +6755,6 @@ index a1e049d..353d3fd 100644
 +			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
 +	c->scene->node.data = c->scene_surface->node.data = c;
  
--/* Scheme function: (toggle-launcher) - open/close launcher */
--static s7_pointer scm_toggle_launcher(s7_scheme *sc, s7_pointer args)
--{
--	togglelauncher(NULL);
--	return s7_t(sc);
--}
-+	client_get_geometry(c, &c->geom);
- 
 -/* Scheme function: (focus-monitor dir) - focus monitor in direction */
 -static s7_pointer scm_focus_monitor(s7_scheme *sc, s7_pointer args)
 -{
@@ -6729,6 +6763,18 @@ index a1e049d..353d3fd 100644
 -		return s7_f(sc);
 -	arg.i = s7_integer(s7_car(args));
 -	focusmon(&arg);
+-	return s7_t(sc);
+-}
++	client_get_geometry(c, &c->geom);
+ 
+-/* Scheme function: (tag-monitor dir) - send window to monitor in direction */
+-static s7_pointer scm_tag_monitor(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	arg.i = s7_integer(s7_car(args));
+-	tagmon(&arg);
 -	return s7_t(sc);
 -}
 +	/* Handle unmanaged clients first so we can return prior create borders */
@@ -6745,23 +6791,6 @@ index a1e049d..353d3fd 100644
 +		}
 +		goto unset_fullscreen;
 +	}
- 
--/* Scheme function: (tag-monitor dir) - send window to monitor in direction */
--static s7_pointer scm_tag_monitor(s7_scheme *sc, s7_pointer args)
--{
--	Arg arg;
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	arg.i = s7_integer(s7_car(args));
--	tagmon(&arg);
--	return s7_t(sc);
--}
-+	/* Frame buffers will be created by updateframe() */
-+	c->frame_top = NULL;
-+	c->frame_bottom = NULL;
-+	c->frame_left = NULL;
-+	c->frame_right = NULL;
-+	c->dwindle = NULL;
  
 -/* Scheme function: (set-layout name) - set layout by name: "tile", "dwindle", "monocle", "float" */
 -static s7_pointer scm_set_layout(s7_scheme *sc, s7_pointer args)
@@ -6786,10 +6815,12 @@ index a1e049d..353d3fd 100644
 -	setlayout(&arg);
 -	return s7_t(sc);
 -}
-+	/* Initialize client geometry with room for text frame (1 cell each side) */
-+	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
-+	c->geom.width += 2 * cell_width;
-+	c->geom.height += 2 * cell_height;
++	/* Frame buffers will be created by updateframe() */
++	c->frame_top = NULL;
++	c->frame_bottom = NULL;
++	c->frame_left = NULL;
++	c->frame_right = NULL;
++	c->dwindle = NULL;
  
 -/* Scheme function: (cycle-layout) - cycle through layouts */
 -static s7_pointer scm_cycle_layout(s7_scheme *sc, s7_pointer args)
@@ -6797,9 +6828,10 @@ index a1e049d..353d3fd 100644
 -	setlayout(NULL);
 -	return s7_t(sc);
 -}
-+	/* Insert this client into client lists (at end for tiling order, front for focus) */
-+	wl_list_insert(clients.prev, &c->link);
-+	wl_list_insert(&fstack, &c->flink);
++	/* Initialize client geometry with room for text frame (1 cell each side) */
++	client_set_tiled(c, WLR_EDGE_TOP | WLR_EDGE_BOTTOM | WLR_EDGE_LEFT | WLR_EDGE_RIGHT);
++	c->geom.width += 2 * cell_width;
++	c->geom.height += 2 * cell_height;
  
 -/* Scheme function: (inc-mfact delta) - increase/decrease master factor */
 -static s7_pointer scm_inc_mfact(s7_scheme *sc, s7_pointer args)
@@ -6809,6 +6841,20 @@ index a1e049d..353d3fd 100644
 -		return s7_f(sc);
 -	arg.f = s7_real(s7_car(args));
 -	setmfact(&arg);
+-	return s7_t(sc);
+-}
++	/* Insert this client into client lists (at end for tiling order, front for focus) */
++	wl_list_insert(clients.prev, &c->link);
++	wl_list_insert(&fstack, &c->flink);
+ 
+-/* Scheme function: (inc-nmaster delta) - increase/decrease number of masters */
+-static s7_pointer scm_inc_nmaster(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	arg.i = s7_integer(s7_car(args));
+-	incnmaster(&arg);
 -	return s7_t(sc);
 -}
 +	/* Set initial monitor, tags, floating status, and focus:
@@ -6823,23 +6869,6 @@ index a1e049d..353d3fd 100644
 +	}
 +	printstatus();
  
--/* Scheme function: (inc-nmaster delta) - increase/decrease number of masters */
--static s7_pointer scm_inc_nmaster(s7_scheme *sc, s7_pointer args)
--{
--	Arg arg;
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	arg.i = s7_integer(s7_car(args));
--	incnmaster(&arg);
--	return s7_t(sc);
--}
-+unset_fullscreen:
-+	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
-+	wl_list_for_each(w, &clients, link) {
-+		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
-+			setfullscreen(w, 0);
-+	}
- 
 -/* Scheme function: (toggle-tag n) - toggle tag visibility */
 -static s7_pointer scm_toggle_tag(s7_scheme *sc, s7_pointer args)
 -{
@@ -6853,18 +6882,17 @@ index a1e049d..353d3fd 100644
 -	arg.ui = 1 << (n - 1);
 -	toggleview(&arg);
 -	return s7_t(sc);
-+	/* Ensure top layers remain above after a new client maps,
-+	 * but keep LyrFS at the very top so fullscreen covers the bar. */
-+	safe_raise_tree(layers[LyrOverlay], "mapnotify LyrOverlay");
-+	safe_raise_tree(layers[LyrTop], "mapnotify LyrTop");
-+	safe_raise_tree(layers[LyrFS], "mapnotify LyrFS");
- }
+-}
++unset_fullscreen:
++	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
++	wl_list_for_each(w, &clients, link) {
++		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
++			setfullscreen(w, 0);
++	}
  
 -/* Scheme function: (toggle-window-tag n) - toggle tag on focused window */
 -static s7_pointer scm_toggle_window_tag(s7_scheme *sc, s7_pointer args)
-+void
-+maximizenotify(struct wl_listener *listener, void *data)
- {
+-{
 -	Arg arg;
 -	int n;
 -	if (!s7_is_integer(s7_car(args)))
@@ -6874,6 +6902,20 @@ index a1e049d..353d3fd 100644
 -		return s7_f(sc);
 -	arg.ui = 1 << (n - 1);
 -	toggletag(&arg);
+-	return s7_t(sc);
++	/* Ensure top layers remain above after a new client maps,
++	 * but keep LyrFS at the very top so fullscreen covers the bar. */
++	safe_raise_tree(layers[LyrOverlay], "mapnotify LyrOverlay");
++	safe_raise_tree(layers[LyrTop], "mapnotify LyrTop");
++	safe_raise_tree(layers[LyrFS], "mapnotify LyrFS");
+ }
+ 
+-/* Scheme function: (toggle-repl) - toggle REPL input mode */
+-static s7_pointer scm_toggle_repl(s7_scheme *sc, s7_pointer args)
++void
++maximizenotify(struct wl_listener *listener, void *data)
+ {
+-	togglerepl(NULL);
 -	return s7_t(sc);
 +	/* This event is raised when a client would like to maximize itself,
 +	 * typically because the user clicked on the maximize button on
@@ -6890,16 +6932,24 @@ index a1e049d..353d3fd 100644
 +		wlr_xdg_surface_schedule_configure(c->surface.xdg);
  }
  
--/* Scheme function: (toggle-repl) - toggle REPL input mode */
--static s7_pointer scm_toggle_repl(s7_scheme *sc, s7_pointer args)
+-/* Scheme: (move-window) - start moving focused window with mouse */
+-static s7_pointer scm_move_window(s7_scheme *sc, s7_pointer args)
 +void
 +monocle(Monitor *m)
  {
--	togglerepl(NULL);
+-	Arg arg = {.ui = CurMove};
+-	moveresize(&arg);
 -	return s7_t(sc);
+-}
 +	Client *c;
 +	int n = 0;
-+
+ 
+-/* Scheme: (resize-window) - start resizing focused window with mouse */
+-static s7_pointer scm_resize_window(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg = {.ui = CurResize};
+-	moveresize(&arg);
+-	return s7_t(sc);
 +	wl_list_for_each(c, &clients, link) {
 +		if (!VISIBLEON(c, m) || c->isfloating || c->isfullscreen)
 +			continue;
@@ -6912,21 +6962,23 @@ index a1e049d..353d3fd 100644
 +		safe_raise_node(&c->scene->node, "dwindle/new_parent raise");
  }
  
--/* Scheme: (move-window) - start moving focused window with mouse */
--static s7_pointer scm_move_window(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (zoom) - swap focused window with master */
+-static s7_pointer scm_zoom(s7_scheme *sc, s7_pointer args)
 -{
--	Arg arg = {.ui = CurMove};
--	moveresize(&arg);
+-	zoom(NULL);
 -	return s7_t(sc);
 -}
 -
--/* Scheme: (resize-window) - start resizing focused window with mouse */
--static s7_pointer scm_resize_window(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (focus-stack delta) - focus next/prev in stack */
+-static s7_pointer scm_focus_stack(s7_scheme *sc, s7_pointer args)
 +void
 +motionabsolute(struct wl_listener *listener, void *data)
  {
--	Arg arg = {.ui = CurResize};
--	moveresize(&arg);
+-	Arg arg;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	arg.i = s7_integer(s7_car(args));
+-	focusstack(&arg);
 -	return s7_t(sc);
 -}
 +	/* This event is forwarded by the cursor when a pointer emits an _absolute_
@@ -6937,46 +6989,16 @@ index a1e049d..353d3fd 100644
 +	struct wlr_pointer_motion_absolute_event *event = data;
 +	double lx, ly, dx, dy;
  
--/* Scheme function: (zoom) - swap focused window with master */
--static s7_pointer scm_zoom(s7_scheme *sc, s7_pointer args)
--{
--	zoom(NULL);
--	return s7_t(sc);
--}
-+	if (!event->time_msec) /* this is 0 with virtual pointers */
-+		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
- 
--/* Scheme function: (focus-stack delta) - focus next/prev in stack */
--static s7_pointer scm_focus_stack(s7_scheme *sc, s7_pointer args)
--{
--	Arg arg;
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	arg.i = s7_integer(s7_car(args));
--	focusstack(&arg);
--	return s7_t(sc);
-+	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
-+	dx = lx - cursor->x;
-+	dy = ly - cursor->y;
-+	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
- }
- 
 -/* Scheme function: (view-all) - view all tags */
 -static s7_pointer scm_view_all(s7_scheme *sc, s7_pointer args)
-+void
-+motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
-+		double dx_unaccel, double dy_unaccel)
- {
+-{
 -	Arg arg;
 -	arg.ui = ~0;
 -	view(&arg);
 -	return s7_t(sc);
 -}
-+	double sx = 0, sy = 0, sx_confined, sy_confined;
-+	Client *c = NULL, *w = NULL;
-+	LayerSurface *l = NULL;
-+	struct wlr_surface *surface = NULL;
-+	struct wlr_pointer_constraint_v1 *constraint;
++	if (!event->time_msec) /* this is 0 with virtual pointers */
++		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
  
 -/* Scheme function: (tag-all) - set window to all tags */
 -static s7_pointer scm_tag_all(s7_scheme *sc, s7_pointer args)
@@ -6985,25 +7007,27 @@ index a1e049d..353d3fd 100644
 -	arg.ui = ~0;
 -	tag(&arg);
 -	return s7_t(sc);
--}
-+	/* Find the client under the pointer and send the event along. */
-+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
++	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
++	dx = lx - cursor->x;
++	dy = ly - cursor->y;
++	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
+ }
  
 -/* Scheme function: (eval-string str) - evaluate Scheme code string */
 -static s7_pointer scm_eval_string(s7_scheme *sc, s7_pointer args)
--{
++void
++motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
++		double dx_unaccel, double dy_unaccel)
+ {
 -	if (!s7_is_string(s7_car(args)))
 -		return s7_f(sc);
 -	return s7_eval_c_string(sc, s7_string(s7_car(args)));
 -}
-+	if (cursor_mode == CurPressed && !seat->drag
-+			&& surface != seat->pointer_state.focused_surface
-+			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
-+		c = w;
-+		surface = seat->pointer_state.focused_surface;
-+		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
-+		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
-+	}
++	double sx = 0, sy = 0, sx_confined, sy_confined;
++	Client *c = NULL, *w = NULL;
++	LayerSurface *l = NULL;
++	struct wlr_surface *surface = NULL;
++	struct wlr_pointer_constraint_v1 *constraint;
  
 -/* Scheme function: (reload-config) - reload config file */
 -static s7_pointer scm_reload_config(s7_scheme *sc, s7_pointer args)
@@ -7011,11 +7035,8 @@ index a1e049d..353d3fd 100644
 -	load_config();
 -	return s7_t(sc);
 -}
-+	/* time is 0 in internal calls meant to restore pointer focus. */
-+	if (time) {
-+		wlr_relative_pointer_manager_v1_send_relative_motion(
-+				relative_pointer_mgr, seat, (uint64_t)time * 1000,
-+				dx, dy, dx_unaccel, dy_unaccel);
++	/* Find the client under the pointer and send the event along. */
++	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
  
 -/* Scheme function: (focused-app-id) - get app_id of focused window */
 -static s7_pointer scm_focused_app_id(s7_scheme *sc, s7_pointer args)
@@ -7028,8 +7049,14 @@ index a1e049d..353d3fd 100644
 -		return s7_f(sc);
 -	return s7_make_string(sc, client_get_appid(c));
 -}
-+		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
-+			cursorconstrain(constraint);
++	if (cursor_mode == CurPressed && !seat->drag
++			&& surface != seat->pointer_state.focused_surface
++			&& toplevel_from_wlr_surface(seat->pointer_state.focused_surface, &w, &l) >= 0) {
++		c = w;
++		surface = seat->pointer_state.focused_surface;
++		sx = cursor->x - (l ? l->scene->node.x : w->geom.x);
++		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
++	}
  
 -/* Scheme function: (focused-title) - get title of focused window */
 -static s7_pointer scm_focused_title(s7_scheme *sc, s7_pointer args)
@@ -7042,16 +7069,11 @@ index a1e049d..353d3fd 100644
 -		return s7_f(sc);
 -	return s7_make_string(sc, client_get_title(c));
 -}
-+		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
-+			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
-+			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
-+				sx = cursor->x - c->geom.x - c->bw;
-+				sy = cursor->y - c->geom.y - c->bw;
-+				if (wlr_region_confine(&active_constraint->region, sx, sy,
-+						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
-+					dx = sx_confined - sx;
-+					dy = sy_confined - sy;
-+				}
++	/* time is 0 in internal calls meant to restore pointer focus. */
++	if (time) {
++		wlr_relative_pointer_manager_v1_send_relative_motion(
++				relative_pointer_mgr, seat, (uint64_t)time * 1000,
++				dx, dy, dx_unaccel, dy_unaccel);
  
 -/* Scheme function: (current-tag) - get current tag number */
 -static s7_pointer scm_current_tag(s7_scheme *sc, s7_pointer args)
@@ -7067,10 +7089,8 @@ index a1e049d..353d3fd 100644
 -	}
 -	return s7_make_integer(sc, 1);
 -}
-+				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
-+					return;
-+			}
-+		}
++		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
++			cursorconstrain(constraint);
  
 -/* Scheme function: (window-count) - get number of visible windows */
 -static s7_pointer scm_window_count(s7_scheme *sc, s7_pointer args)
@@ -7085,8 +7105,16 @@ index a1e049d..353d3fd 100644
 -	}
 -	return s7_make_integer(sc, count);
 -}
-+		wlr_cursor_move(cursor, device, dx, dy);
-+		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
++		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
++			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
++			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
++				sx = cursor->x - c->geom.x - c->bw;
++				sy = cursor->y - c->geom.y - c->bw;
++				if (wlr_region_confine(&active_constraint->region, sx, sy,
++						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
++					dx = sx_confined - sx;
++					dy = sy_confined - sy;
++				}
  
 -/* Scheme function: (log msg) - print message to stderr */
 -static s7_pointer scm_log(s7_scheme *sc, s7_pointer args)
@@ -7095,19 +7123,9 @@ index a1e049d..353d3fd 100644
 -		tbwm_log(TBWM_LOG_WARN, "tbwm-scm: %s\n", s7_string(s7_car(args)));
 -	return s7_t(sc);
 -}
-+		/* If compositor entered screenshot-grab mode, forward motion only to the
-+		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
-+		if (screenshot_mode) {
-+			/* Recompute the surface under the cursor and give it pointer focus
-+			 * so the screenshot client (e.g. slurp) receives enter/motion/button
-+			 * events. wlroots only delivers motion to the focused surface. */
-+			xytonode(cursor->x, cursor->y, &surface, NULL, NULL, &sx, &sy);
-+			if (surface != seat->pointer_state.focused_surface)
-+				wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
-+			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
-+			if (cursor && cursor_mgr)
-+				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
-+			return;
++				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
++					return;
++			}
 +		}
  
 -/* Scheme function: (help) - show available commands */
@@ -7133,6 +7151,45 @@ index a1e049d..353d3fd 100644
 -	repl_add_line("(set-show-date B)  - show date in bar");
 -	repl_add_line("(set-status-text S)- custom status text");
 -	repl_add_line("DIR: DIR-LEFT/RIGHT/UP/DOWN");
+-	return s7_t(sc);
+-}
++		wlr_cursor_move(cursor, device, dx, dy);
++		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+ 
+-/* Scheme function: (chvt n) - switch to virtual terminal n */
+-static s7_pointer scm_chvt(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	arg.ui = s7_integer(s7_car(args));
+-	/* Log the scheme request (INFO level) so debug file shows it; errors are promoted to REPL */
+-	tbwm_log(TBWM_LOG_INFO, "scm_chvt: request to change VT to %u\n", arg.ui);
+-	chvt(&arg);
+-	return s7_t(sc);
+-}
++		/* If compositor entered screenshot-grab mode, forward motion only to the
++		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
++		if (screenshot_mode) {
++			/* Recompute the surface under the cursor and give it pointer focus
++			 * so the screenshot client (e.g. slurp) receives enter/motion/button
++			 * events. wlroots only delivers motion to the focused surface. */
++			xytonode(cursor->x, cursor->y, &surface, NULL, NULL, &sx, &sy);
++			if (surface != seat->pointer_state.focused_surface)
++				wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
++			wlr_seat_pointer_notify_motion(seat, time, sx, sy);
++			if (cursor && cursor_mgr)
++				wlr_cursor_set_xcursor(cursor, cursor_mgr, "crosshair");
++			return;
++		}
+ 
+-/* Scheme function: (set-repl-log-level n) - set REPL log threshold (0=DEBUG,1=INFO,2=WARN,3=ERROR) */
+-static s7_pointer scm_set_repl_log_level(s7_scheme *sc, s7_pointer args)
+-{
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	cfg_repl_log_level = s7_integer(s7_car(args));
+-	tbwm_log(TBWM_LOG_INFO, "set-repl-log-level: set to %d\n", cfg_repl_log_level);
 -	return s7_t(sc);
 -}
 +		/* Update selmon (even while dragging a window) */
@@ -7162,16 +7219,12 @@ index a1e049d..353d3fd 100644
 +			}
 +		}
  
--/* Scheme function: (chvt n) - switch to virtual terminal n */
--static s7_pointer scm_chvt(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (set-title-scroll-mode mode) - set scroll mode (0=truncate, 1=scroll) */
+-static s7_pointer scm_set_title_scroll_mode(s7_scheme *sc, s7_pointer args)
 -{
--	Arg arg;
 -	if (!s7_is_integer(s7_car(args)))
 -		return s7_f(sc);
--	arg.ui = s7_integer(s7_car(args));
--	/* Log the scheme request (INFO level) so debug file shows it; errors are promoted to REPL */
--	tbwm_log(TBWM_LOG_INFO, "scm_chvt: request to change VT to %u\n", arg.ui);
--	chvt(&arg);
+-	title_scroll_mode = s7_integer(s7_car(args)) ? 1 : 0;
 -	return s7_t(sc);
 -}
 +		/* Update net menu hover selection */
@@ -7183,29 +7236,6 @@ index a1e049d..353d3fd 100644
 +			menu_w = 25 * cell_width;
 +			menu_h = netmenu_cells_h() * cell_height;
  
--/* Scheme function: (set-repl-log-level n) - set REPL log threshold (0=DEBUG,1=INFO,2=WARN,3=ERROR) */
--static s7_pointer scm_set_repl_log_level(s7_scheme *sc, s7_pointer args)
--{
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	cfg_repl_log_level = s7_integer(s7_car(args));
--	tbwm_log(TBWM_LOG_INFO, "set-repl-log-level: set to %d\n", cfg_repl_log_level);
--	return s7_t(sc);
--}
-+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
-+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
-+				int rel_y = (int)(cursor->y - menu_y);
-+				int hovered_row = rel_y / cell_height;
- 
--/* Scheme function: (set-title-scroll-mode mode) - set scroll mode (0=truncate, 1=scroll) */
--static s7_pointer scm_set_title_scroll_mode(s7_scheme *sc, s7_pointer args)
--{
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	title_scroll_mode = s7_integer(s7_car(args)) ? 1 : 0;
--	return s7_t(sc);
--}
--
 -/* Scheme function: (set-title-scroll-speed speed) - set scroll speed (pixels per tick) */
 -static s7_pointer scm_set_title_scroll_speed(s7_scheme *sc, s7_pointer args)
 -{
@@ -7215,16 +7245,10 @@ index a1e049d..353d3fd 100644
 -	if (title_scroll_speed < 1) title_scroll_speed = 1;
 -	return s7_t(sc);
 -}
-+				/* Row 0 is title bar, rows 1+ are content */
-+				if (hovered_row >= 1 && hovered_row <= netmenu_cells_h() - 2) {
-+					int new_selected = hovered_row - 1; /* 0-indexed content row */
-+					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
-+						net_selected_row = new_selected;
-+						updatenetmenu();
-+					}
-+				}
-+			}
-+		}
++			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
++			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
++				int rel_y = (int)(cursor->y - menu_y);
++				int hovered_row = rel_y / cell_height;
  
 -/* Storage for Scheme keybindings (dynamic) */
 -typedef struct {
@@ -7236,14 +7260,16 @@ index a1e049d..353d3fd 100644
 -static SchemeBinding *scheme_bindings = NULL;
 -static int scheme_binding_count = 0;
 -static int scheme_binding_capacity = 0;
-+		/* Update audio menu hover selection */
-+		if (audiomenu_active && selmon) {
-+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
-+			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
-+			menu_y = selmon->m.y + cell_height;
-+			menu_w = 25 * cell_width;
-+			menu_h = audiomenu_cells_h() * cell_height;
++				/* Row 0 is title bar, rows 1+ are content */
++				if (hovered_row >= 1 && hovered_row <= netmenu_cells_h() - 2) {
++					int new_selected = hovered_row - 1; /* 0-indexed content row */
++					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
++						net_selected_row = new_selected;
++						updatenetmenu();
++					}
++				}
++			}
++		}
  
 -static void
 -ensure_scheme_bindings_capacity(int extra)
@@ -7266,10 +7292,14 @@ index a1e049d..353d3fd 100644
 -	scheme_binding_capacity = newcap;
 -	file_debug_log("tbwm-scm: scheme_bindings capacity grown to %d\n", scheme_binding_capacity);
 -}
-+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
-+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
-+				int rel_y = (int)(cursor->y - menu_y);
-+				int hovered_row = rel_y / cell_height;
++		/* Update audio menu hover selection */
++		if (audiomenu_active && selmon) {
++			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
++			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
++			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
++			menu_y = selmon->m.y + cell_height;
++			menu_w = 25 * cell_width;
++			menu_h = audiomenu_cells_h() * cell_height;
  
 -/* Parse modifier string like "M-S-" to modifier mask */
 -static uint32_t parse_modifiers(const char *str, const char **rest)
@@ -7281,6 +7311,24 @@ index a1e049d..353d3fd 100644
 -		case 'S': mods |= WLR_MODIFIER_SHIFT; break;  /* Shift */
 -		case 'C': mods |= WLR_MODIFIER_CTRL; break;   /* Control */
 -		case 'A': mods |= WLR_MODIFIER_ALT; break;    /* Alt */
+-		}
+-		str += 2;
+-	}
+-	*rest = str;
+-	return mods;
+-}
++			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
++			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
++				int rel_y = (int)(cursor->y - menu_y);
++				int hovered_row = rel_y / cell_height;
+ 
+-/* Scheme function: (bind-key "M-Return" callback) - bind a key to a Scheme function */
+-static s7_pointer scm_bind_key(s7_scheme *sc, s7_pointer args)
+-{
+-	const char *keystr, *keyname;
+-	s7_pointer callback;
+-	uint32_t mods;
+-	xkb_keysym_t sym;
 +				/* Row 0 is title bar, rows 1+ are content */
 +				if (hovered_row >= 1 && hovered_row <= audiomenu_cells_h() - 2) {
 +					int new_selected = hovered_row - 1; /* 0-indexed content row */
@@ -7290,20 +7338,7 @@ index a1e049d..353d3fd 100644
 +					}
 +				}
 +			}
- 		}
--		str += 2;
--	}
--	*rest = str;
--	return mods;
--}
--
--/* Scheme function: (bind-key "M-Return" callback) - bind a key to a Scheme function */
--static s7_pointer scm_bind_key(s7_scheme *sc, s7_pointer args)
--{
--	const char *keystr, *keyname;
--	s7_pointer callback;
--	uint32_t mods;
--	xkb_keysym_t sym;
++		}
  
 -	if (!s7_is_string(s7_car(args)))
 -		return s7_f(sc);
@@ -8121,8 +8156,16 @@ index a1e049d..353d3fd 100644
 -			s7_gc_unprotect_at(sc, cfg_mouse_bindings[i].gc_loc);
 -		cfg_mouse_bindings[i].callback = s7_nil(sc);
 -		cfg_mouse_bindings[i].gc_loc = -1;
+-	}
+-	cfg_mouse_binding_count = 0;
+-}
 +	bbox = interact ? &sgeom : (c->isfullscreen ? &c->mon->m : &c->mon->w);
-+
+ 
+-/* Scheme: (clear-mouse-bindings) */
+-static s7_pointer scm_clear_mouse_bindings(s7_scheme *sc, s7_pointer args) {
+-	clear_mouse_bindings_internal();
+-	return s7_t(sc);
+-}
 +	/* Snap to grid if not fullscreen */
 +	/* For floating windows during interactive move (interact=1), skip position snap */
 +	if (!c->isfullscreen && cell_width > 0 && cell_height > 0) {
@@ -8137,18 +8180,7 @@ index a1e049d..353d3fd 100644
 +		/* Minimum size: 3 cells wide (border+content+border), 3 cells tall */
 +		if (geo.width < cell_width * 3) geo.width = cell_width * 3;
 +		if (geo.height < cell_height * 3) geo.height = cell_height * 3;
- 	}
--	cfg_mouse_binding_count = 0;
--}
- 
--/* Scheme: (clear-mouse-bindings) */
--static s7_pointer scm_clear_mouse_bindings(s7_scheme *sc, s7_pointer args) {
--	clear_mouse_bindings_internal();
--	return s7_t(sc);
--}
-+	client_set_bounds(c, geo.width, geo.height);
-+	c->geom = geo;
-+	applybounds(c, bbox);
++	}
  
 -/* Scheme: (buffer-stats) - return buffer allocation stats for debugging */
 -static s7_pointer scm_buffer_stats(s7_scheme *sc, s7_pointer args) {
@@ -8160,10 +8192,14 @@ index a1e049d..353d3fd 100644
 -	         glyph_malloc_count, glyph_free_count, glyph_leaked, glyph_total_bytes);
 -	return s7_make_string(sc, buf);
 -}
-+	/* Frame is 1 cell on each side (top has title, others are box chars) */
-+	frame_inset = c->isfullscreen ? 0 : cell_width;
++	client_set_bounds(c, geo.width, geo.height);
++	c->geom = geo;
++	applybounds(c, bbox);
  
 -/* ==================== END SCHEME CONFIG SETTERS ====================  */
++	/* Frame is 1 cell on each side (top has title, others are box chars) */
++	frame_inset = c->isfullscreen ? 0 : cell_width;
++
 +	/* Update scene-graph */
 +	wlr_scene_node_set_position(&c->scene->node, c->geom.x, c->geom.y);
 +	/* Content is inset by 1 cell on left and 1 cell on top */
@@ -8409,8 +8445,21 @@ index a1e049d..353d3fd 100644
 +	 * loop configuration to listen to libinput events, DRM events, generate
 +	 * frame events at the refresh rate, and so on. */
 +	wl_display_run(dpy);
-+}
-+
+ }
+ 
+-static const char *default_config_parts[] = {
+-";;; TurboWM config.scm - Scheme configuration\n"
+-";;; All settings can be changed at runtime with (reload-config)\n"
+-"\n"
+-";;;; ==================== APPEARANCE ====================\n"
+-"\n"
+-";; Colors - Format: #RRGGBB\n"
+-";; Background/REPL color (black)\n"
+-"(set-bg-color \"#000000\")\n"
+-"\n"
+-";; Background/REPL text color (grey)\n"
+-"(set-bg-text-color \"#aaaaaa\")\n"
+-"\n"
 +void
 +setcursor(struct wl_listener *listener, void *data)
 +{
@@ -8878,6 +8927,7 @@ index a1e049d..353d3fd 100644
 +		((char **)arg->v)[0],
 +		getenv("DISPLAY") ? getenv("DISPLAY") : "(none)",
 +		getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY") : "(none)");
++	kb_spawned = 1;
 +	if (fork() == 0) {
 +		dup2(STDERR_FILENO, STDOUT_FILENO);
 +		setsid();
@@ -8945,6 +8995,7 @@ index a1e049d..353d3fd 100644
 +		execlp("/bin/sh", "/bin/sh", "-c", cmd, NULL);
 +		_exit(EXIT_FAILURE);
 +	}
++	kb_spawned = 1;
 +	return s7_t(sc);
 +}
 +
@@ -10152,10 +10203,25 @@ index a1e049d..353d3fd 100644
 +	/* Define constants for monitor directions */
 +	s7_define_variable(sc, "MON-LEFT", s7_make_integer(sc, WLR_DIRECTION_LEFT));
 +	s7_define_variable(sc, "MON-RIGHT", s7_make_integer(sc, WLR_DIRECTION_RIGHT));
- }
- 
- static const char *default_config_parts[] = {
-@@ -6278,6 +9495,10 @@ static const char *default_config_parts[] = {
++}
++
++static const char *default_config_parts[] = {
++";;; TurboWM config.scm - Scheme configuration\n"
++";;; All settings can be changed at runtime with (reload-config)\n"
++"\n"
++";;;; ==================== APPEARANCE ====================\n"
++"\n"
++";; Colors - Format: #RRGGBB\n"
++";; Background/REPL color (black)\n"
++"(set-bg-color \"#000000\")\n"
++"\n"
++";; Background/REPL text color (grey)\n"
++"(set-bg-text-color \"#aaaaaa\")\n"
++"\n"
+ ";; Status bar background (the blue)\n"
+ "(set-bar-color \"#0000aa\")\n"
+ "\n"
+@@ -6278,6 +9514,10 @@ static const char *default_config_parts[] = {
  ";; Uncomment and customize as needed:\n"
  ";; (on-startup \"waybar\" \"mako\" \"foot --server\")\n"
  "\n"
@@ -10166,7 +10232,7 @@ index a1e049d..353d3fd 100644
  ";;;; ==================== STATUS BAR ====================\n"
  "\n"
  ";; Show date and time in status bar\n"
-@@ -6328,991 +9549,3804 @@ static const char *default_config_parts[] = {
+@@ -6328,991 +9568,3804 @@ static const char *default_config_parts[] = {
  ";; App menu\n"
  "(bind-key \"M-x\" (lambda () (toggle-appmenu)))\n"
  "\n"
@@ -14799,7 +14865,7 @@ index a1e049d..353d3fd 100644
  }
  
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
-@@ -7412,9 +13446,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +13465,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -14811,7 +14877,7 @@ index a1e049d..353d3fd 100644
  		return 1;
  	}
  
-@@ -7497,7 +13533,7 @@ updaterepl(void)
+@@ -7497,7 +13552,7 @@ updaterepl(void)
  
  		/* Fill with background color */
  		for (i = 0; i < width * height; i++)
@@ -14820,7 +14886,7 @@ index a1e049d..353d3fd 100644
  
  		/* Calculate visible lines (leave space for bar at top) */
  		visible_lines = (height - cell_height) / cell_height;
-@@ -7596,7 +13632,7 @@ updatebar(Monitor *m)
+@@ -7596,7 +13651,7 @@ updatebar(Monitor *m)
  	/* Fill background - skip if scroll-only update */
  	if (!scroll_only_bar_update) {
  		for (i = 0; i < width * cell_height; i++)
@@ -14829,7 +14895,7 @@ index a1e049d..353d3fd 100644
  	}
  
  	x = 0;
-@@ -7643,37 +13679,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +13698,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -14892,7 +14958,7 @@ index a1e049d..353d3fd 100644
  			}
  		}
  	} else {
-@@ -7687,7 +13723,7 @@ updatebar(Monitor *m)
+@@ -7687,7 +13742,7 @@ updatebar(Monitor *m)
  				fg = RGB_TO_ARGB(cfg_bar_color);
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + btn_cells * cell_width && px < width; px++) {
@@ -14901,7 +14967,7 @@ index a1e049d..353d3fd 100644
  					}
  				}
  			} else {
-@@ -7726,7 +13762,7 @@ updatebar(Monitor *m)
+@@ -7726,7 +13781,7 @@ updatebar(Monitor *m)
  			if (bg != RGB_TO_ARGB(cfg_bar_color)) {
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + 3 * cell_width && px < width; px++) {
@@ -14910,7 +14976,7 @@ index a1e049d..353d3fd 100644
  					}
  				}
  			}
-@@ -7809,7 +13845,7 @@ render_tabs:
+@@ -7809,7 +13864,7 @@ render_tabs:
  				if (is_focused || (scroll_only_bar_update && needs_scroll)) {
  					for (py = 0; py < cell_height; py++) {
  						for (px = x; px < x + actual_tab_width && px < width; px++) {
@@ -14919,7 +14985,7 @@ index a1e049d..353d3fd 100644
  						}
  					}
  				}
-@@ -7884,66 +13920,207 @@ render_tabs:
+@@ -7884,66 +13939,207 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -15168,7 +15234,7 @@ index a1e049d..353d3fd 100644
  				}
  			}
  		}
-@@ -8204,12 +14381,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8204,12 +14400,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -15183,7 +15249,7 @@ index a1e049d..353d3fd 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8222,11 +14400,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8222,11 +14419,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			px = x + cg->bitmap_left + gx;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -15207,7 +15273,7 @@ index a1e049d..353d3fd 100644
  		}
  	}
  }
-@@ -8238,12 +14423,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8238,12 +14442,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -15222,7 +15288,7 @@ index a1e049d..353d3fd 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8256,11 +14442,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8256,11 +14461,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			if (px < clip_left || px >= clip_right) continue;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -15246,7 +15312,7 @@ index a1e049d..353d3fd 100644
  		}
  	}
  }
-@@ -8305,7 +14498,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
+@@ -8305,7 +14517,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
  	
  	pixels = c->scroll_title_pixels;
  	for (i = 0; i < total_width * cell_height; i++)
@@ -15255,7 +15321,7 @@ index a1e049d..353d3fd 100644
  	
  	/* Render title characters TWICE (uses glyph cache - fast) */
  	pos = 0;
-@@ -8572,7 +14765,7 @@ updateframe(Client *c)
+@@ -8572,7 +14784,7 @@ updateframe(Client *c)
  	
  	/* Clear buffer */
  	for (i = 0; i < width * cell_height; i++)
@@ -15264,7 +15330,7 @@ index a1e049d..353d3fd 100644
  
  	/* Format: ╔═ title ═╗ with horizontal lines filling the rest */
  	render_char_to_buffer(pixels, width, cell_height, 0, 0, tl_char, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8774,7 +14967,7 @@ updateframe(Client *c)
+@@ -8774,7 +14986,7 @@ updateframe(Client *c)
  		
  		/* Clear buffer */
  		for (i = 0; i < width * cell_height; i++)
@@ -15273,7 +15339,7 @@ index a1e049d..353d3fd 100644
  
  		render_char_to_buffer(pixels, width, cell_height, 0, 0, bl_char, RGB_TO_ARGB(cfg_border_line_color));
  		
-@@ -8812,7 +15005,7 @@ updateframe(Client *c)
+@@ -8812,7 +15024,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -15282,7 +15348,7 @@ index a1e049d..353d3fd 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8847,7 +15040,7 @@ updateframe(Client *c)
+@@ -8847,7 +15059,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -15291,7 +15357,7 @@ index a1e049d..353d3fd 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -9142,6 +15335,18 @@ unmapnotify(struct wl_listener *listener, void *data)
+@@ -9142,6 +15354,18 @@ unmapnotify(struct wl_listener *listener, void *data)
  		c->frame_right_buf = NULL;
  	}
  
@@ -15310,7 +15376,7 @@ index a1e049d..353d3fd 100644
  	wlr_scene_node_destroy(&c->scene->node);
  
  	/* Recompute layers/usable-area after client removal so layer ordering
-@@ -9377,8 +15582,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9377,8 +15601,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
  			continue;
  
@@ -15319,7 +15385,7 @@ index a1e049d..353d3fd 100644
  		if (node->type == WLR_SCENE_NODE_BUFFER) {
  			struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(
  					wlr_scene_buffer_from_node(node));
-@@ -9394,8 +15597,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9394,8 +15616,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		}
  	}
  
@@ -15328,7 +15394,7 @@ index a1e049d..353d3fd 100644
  	if (psurface) *psurface = surface;
  	if (pc) *pc = c;
  	if (pl) *pl = l;
-@@ -9561,6 +15762,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +15781,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  
