@@ -729,7 +729,7 @@ index 9ccea74..a39eb2a 100644
 +CFLAGS += -DTBWM_XKB_LAYOUT=\"$(TBWM_XKB_LAYOUT)\"
 +endif
 diff --git a/install.sh b/install.sh
-index 8a401bc..d905546 100755
+index 8a401bc..64c16f1 100755
 --- a/install.sh
 +++ b/install.sh
 @@ -46,13 +46,29 @@ install_deps() {
@@ -970,7 +970,22 @@ index 8a401bc..d905546 100755
      meson setup build --prefix=/usr/local -Dexamples=false
      
      info "Building..."
-@@ -272,25 +406,68 @@ install_tbwm() {
+@@ -246,8 +380,12 @@ build_tbwm() {
+ install_tbwm() {
+     info "Installing TurboWM..."
+     
+-    # Binary
+-    sudo cp tbwm /usr/local/bin/
++    # Binary: copy to a temp name and mv -f (atomic rename) so the install works
++    # while tbwm is running -- directly overwriting the running executable fails
++    # with ETXTBSY ("text file busy"). The running process keeps the old inode
++    # until the session is restarted.
++    sudo cp tbwm /usr/local/bin/.tbwm.new
++    sudo mv -f /usr/local/bin/.tbwm.new /usr/local/bin/tbwm
+     sudo chmod 755 /usr/local/bin/tbwm
+     success "Installed /usr/local/bin/tbwm"
+     
+@@ -272,25 +410,68 @@ install_tbwm() {
      sudo fc-cache -f /usr/share/fonts/tbwm 2>/dev/null || true
      success "Installed fonts (from fonts/ directory)"
      
@@ -1048,7 +1063,7 @@ index 8a401bc..d905546 100755
      
      # If wlroots was built from source, create a wrapper that sets LD_LIBRARY_PATH
      if [ -f "/usr/local/lib/libwlroots-0.19.so" ] || [ -f "/usr/local/lib64/libwlroots-0.19.so" ]; then
-@@ -307,6 +484,94 @@ exec /usr/local/bin/tbwm.bin "$@"
+@@ -307,6 +488,94 @@ exec /usr/local/bin/tbwm.bin "$@"
  EOF
          sudo chmod 755 /usr/local/bin/tbwm
      fi
@@ -1143,7 +1158,7 @@ index 8a401bc..d905546 100755
  }
  
  # Main
-@@ -319,6 +584,8 @@ main() {
+@@ -319,6 +588,8 @@ main() {
      
      check_not_root
      detect_distro
@@ -1152,7 +1167,7 @@ index 8a401bc..d905546 100755
      
      # Ask what to do
      echo ""
-@@ -356,7 +623,8 @@ main() {
+@@ -356,7 +627,8 @@ main() {
      echo ""
      echo "To use TurboWM:"
      echo "  • Log out and select 'TurboWM' from your display manager"

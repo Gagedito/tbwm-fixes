@@ -380,8 +380,12 @@ build_tbwm() {
 install_tbwm() {
     info "Installing TurboWM..."
     
-    # Binary
-    sudo cp tbwm /usr/local/bin/
+    # Binary: copy to a temp name and mv -f (atomic rename) so the install works
+    # while tbwm is running -- directly overwriting the running executable fails
+    # with ETXTBSY ("text file busy"). The running process keeps the old inode
+    # until the session is restarted.
+    sudo cp tbwm /usr/local/bin/.tbwm.new
+    sudo mv -f /usr/local/bin/.tbwm.new /usr/local/bin/tbwm
     sudo chmod 755 /usr/local/bin/tbwm
     success "Installed /usr/local/bin/tbwm"
     
