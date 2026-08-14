@@ -203,8 +203,10 @@ El bloque Bluetooth de `tbwm-network` solo imprimía `bluetoothctl devices`
 (dispositivos ya cacheados por `bluetoothd`), y el escaneo duraba 2s. Como el
 menú de tbwm solo muestra categorías con al menos una entrada, si la caché estaba
 vacía la sección Bluetooth no aparecía:
-- El escaneo ahora dura ~8s (`timeout 10 bluetoothctl scan on` + `sleep 8`) para
-  que los dispositivos cercanos se descubran y queden cacheados.
+- El escaneo ahora usa una subshell con pipe
+  (`( echo "scan on"; sleep 8|16; echo "scan off" ) | bluetoothctl`) para que la
+  sesión viva toda la ventana de descubrimiento: 8s en la vista en vivo
+  "Buscar dispositivos" (`bt`), 16s en la carga inicial (`all`).
 - Si aun así no hay dispositivos, se emite siempre una entrada `Info` "[BT] Sin
   dispositivos cerca (reintenta)" para que la categoría **nunca** desaparezca.
 - Conectar un dispositivo no emparejado ahora hace
@@ -323,8 +325,10 @@ botón `[N]` de la barra (justo a la izquierda de la fecha/hora).
 
 ### Configuración
 ```scm
-;; Script que lista redes y dispositivos (ver más abajo)
-(set-net-menu-cmd "~/.local/bin/tbwm-network")
+;; Script que lista redes y dispositivos (ver más abajo).
+;; La config por defecto (tbwm.c) ya usa "tbwm-network" del PATH; si lo
+;; instalaste en ~/.local/bin y ese directorio está en tu PATH, esto es opcional.
+(set-net-menu-cmd "tbwm-network")
 
 ;; Abrir el menú
 (bind-key "M-n" (lambda () (toggle-net-menu)))
@@ -334,10 +338,12 @@ botón `[N]` de la barra (justo a la izquierda de la fecha/hora).
 ```
 
 ### Script `tbwm-network`
-Copia el script a `~/.local/bin/tbwm-network` y hazlo ejecutable:
+`install.sh` lo instala en `/usr/local/bin/tbwm-network`. En una instalación
+manual, cópialo a cualquier directorio que esté en tu `PATH` (`~/bin`,
+`~/.local/bin`, `/usr/local/bin`, ...) y hazlo ejecutable:
 
 ```sh
-chmod +x tbwm-network
+install -m 755 tbwm-network ~/.local/bin/
 ```
 
 Depende de `nmcli` (paquete `networkmanager`) para WiFi y `bluetoothctl`
@@ -354,6 +360,11 @@ por elemento con el formato
 - **Subgrupo**: la red o dispositivo concreto (o vacío en el marcador `Info`).
 - **Acción**: `Conectar`, `Desconectar`, `Olvidar` o `Info` (marcador de grupo
   vacío, ejecuta `sh -c true`).
+  > Los placeholders de grupos vacíos y avisos se emiten en el formato legacy de
+  > 4 columnas `Categoría<TAB>Grupo<TAB>texto<TAB>comando` (p. ej.
+  > `Wifi<TAB>Conectado<TAB>[sin red conectada]<TAB>sh -c true`): el texto se
+  > muestra como nombre y el comando es un no-op. Es el mismo patrón que usa
+  > `tbwm-audio-menu` para sus etiquetas read-only.
 - **comando**: shell command que se ejecuta al elegir el elemento
   (`nmcli dev wifi connect 'SSID'`, `bluetoothctl connect MAC`,
   `bluetoothctl disconnect MAC`).
