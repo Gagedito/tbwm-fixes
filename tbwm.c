@@ -487,7 +487,9 @@ static void tray_cleanup(void);
 static s7_pointer scm_toggle_tray_menu(s7_scheme *sc, s7_pointer args);
 static int netmenu_scan_keepalive(void *data);
 static int netmenu_scan_is_active(void);
+#ifdef TBWM_PROFILE
 static int timingtimer(void *data);
+#endif
 static int bartimer(void *data);
 static int scrolltimer(void *data);
 static int batterytimer(void *data);
@@ -575,7 +577,9 @@ typedef struct {
 #define MAX_TIMING_STATS 32
 static TimingStat timing_stats[MAX_TIMING_STATS];
 static int timing_count = 0;
+#ifdef TBWM_PROFILE
 static struct timespec last_timing_report = {0};
+#endif
 
 #define TIMING_SCROLLTIMER 0
 #define TIMING_UPDATEBARS 1
@@ -704,7 +708,9 @@ static struct wl_event_source *signal_fd_source = NULL;
 static struct wl_event_source *bar_timer = NULL;
 static struct wl_event_source *net_scan_timer = NULL;  /* auto-rescan while focused on a search sub-topic */
 static int netmenu_last_sub = 0;        /* last netmenu_refresh() used a focused subcommand (tbwm-network bt/wifi) */
+#ifdef TBWM_PROFILE
 static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
+#endif
 static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
 static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
 static int title_scroll_speed = 30;      /* currently unused: scroll advances 1px per 30fps tick (~30 px/s) */
@@ -10019,20 +10025,18 @@ buildappcache(void)
 	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
 }
 
+#ifdef TBWM_PROFILE
 int
 timingtimer(void *data)
 {
 	/* Report CPU timing statistics every 500ms (profile builds only) */
-#ifndef TBWM_PROFILE
-	return 0;
-#else
 	fprintf(stderr, "[TIMING TICK]\n");
 	fflush(stderr);
 	timing_report();
 	wl_event_source_timer_update(timing_timer, 500);
 	return 0;
-#endif
 }
+#endif
 
 int
 bartimer(void *data)
