@@ -1,0 +1,3 @@
+# Runtime artifacts / local cruft
+tbwm-crash.log
+*.log

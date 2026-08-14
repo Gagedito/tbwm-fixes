@@ -27,12 +27,12 @@ mode="${1:-all}"
 # which only lists the Bluetooth category.
 if [ "$mode" != "bt" ]; then
     if pgrep -x connmand >/dev/null 2>&1; then
-        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
+        printf 'Wifi\tConectado\t[sin red conectada]\tsh -c true\n'
+        printf 'Wifi\tGuardadas\t[sin redes guardadas]\tsh -c true\n'
     elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
-        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
-        printf 'Wifi\tBuscar red\t\tInfo\t[sin redes visibles]\tsh -c true\n'
+        printf 'Wifi\tConectado\t[sin red conectada]\tsh -c true\n'
+        printf 'Wifi\tGuardadas\t[sin redes guardadas]\tsh -c true\n'
+        printf 'Wifi\tBuscar red\t[sin redes visibles]\tsh -c true\n'
     fi
 fi
 
@@ -40,9 +40,9 @@ fi
 # sub-topics exist from the first render. Skipped in "wifi" mode, which only
 # lists the WiFi category.
 if [ "$mode" != "wifi" ] && command -v bluetoothctl >/dev/null 2>&1; then
-    printf 'Bluetooth\tConectado\t\tInfo\t[sin conectados]\tsh -c true\n'
-    printf 'Bluetooth\tEmparejados\t\tInfo\t[sin emparejados]\tsh -c true\n'
-    printf 'Bluetooth\tBuscar dispositivos\t\tInfo\t[sin dispositivos]\tsh -c true\n'
+    printf 'Bluetooth\tConectado\t[sin conectados]\tsh -c true\n'
+    printf 'Bluetooth\tEmparejados\t[sin emparejados]\tsh -c true\n'
+    printf 'Bluetooth\tBuscar dispositivos\t[sin dispositivos]\tsh -c true\n'
 fi
 
 # Quote a string for use inside single quotes in a shell command.
@@ -183,7 +183,7 @@ $ssid"
 $(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r)
 EOF
 else
-    printf 'Wifi\t\t\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
+    printf 'Wifi\t\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
 fi
 fi
 
@@ -366,5 +366,5 @@ $mac"
     fi
 rm -f "$devices" "$btout" "$scanmacs" "$emitted"
 else
-    printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
+    printf 'Bluetooth\t\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 fi

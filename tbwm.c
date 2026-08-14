@@ -370,19 +370,22 @@ static void safe_scene_node_reparent(struct wlr_scene_node *node, struct wlr_sce
 static void safe_raise_tree(struct wlr_scene_tree *tree, const char *ctx);
 static void safe_raise_node(struct wlr_scene_node *node, const char *ctx);
 
-/* Simple file logger for debugging when running in a graphical session */
+/* Simple file logger for debugging when running in a graphical session.
+ * The file handle is opened lazily once and kept for the process lifetime
+ * instead of fopen()/fclose() per call (some call sites are frame-rate hot). */
 static void
 file_debug_log(const char *fmt, ...)
 {
-	FILE *f = fopen("/tmp/tbwm-debug.log", "a");
-	if (!f)
+	static FILE *logf = NULL;
+	if (!logf)
+		logf = fopen("/tmp/tbwm-debug.log", "a");
+	if (!logf)
 		return;
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(f, fmt, ap);
+	vfprintf(logf, fmt, ap);
 	va_end(ap);
-	fflush(f);
-	fclose(f);
+	fflush(logf);
 }
 
 static void incnmaster(const Arg *arg);
@@ -598,11 +601,14 @@ static void timing_init(void) {
 }
 
 static inline void timing_start(int idx) {
+#ifdef TBWM_PROFILE
 	if (idx < 0 || idx >= timing_count) return;
 	clock_gettime(CLOCK_MONOTONIC, &timing_stats[idx].start);
+#endif
 }
 
 static inline void timing_end(int idx) {
+#ifdef TBWM_PROFILE
 	struct timespec end;
 	long us;
 	if (idx < 0 || idx >= timing_count) return;
@@ -615,9 +621,13 @@ static inline void timing_end(int idx) {
 	if (us > timing_stats[idx].max_us) timing_stats[idx].max_us = us;
 	if (us < timing_stats[idx].min_us) timing_stats[idx].min_us = us;
 	timing_stats[idx].call_count++;
+#endif
 }
 
 static void timing_report(void) {
+#ifndef TBWM_PROFILE
+	return;
+#else
 	struct timespec now;
 	long elapsed_ns;
 	int i, j;
@@ -683,6 +693,7 @@ static void timing_report(void) {
 	fflush(fp);
 	fclose(fp);
 	last_timing_report = now;
+#endif
 }
 
 /* Signal handling helpers: set by signal handler and used from main loop */
@@ -706,9 +717,22 @@ static struct wl_event_source *battery_timer = NULL;
 
 /* ---- crash diagnostics ---- */
 /* /tmp is tmpfs and is wiped on reboot, so crash evidence is kept in the
- * home directory instead. */
-#define TBWM_DIAG_DIR "/home/gage"
-#define TBWM_CRASH_LOG TBWM_DIAG_DIR "/tbwm-crash.log"
+ * home directory instead. Resolved at runtime via $HOME so it works for any
+ * user (a hardcoded path silently drops crash logs on other machines). */
+#define TBWM_CRASH_LOG_FNAME "tbwm-crash.log"
+static char tbwm_crash_log_path[512] = "";
+static const char *
+crash_log_path(void)
+{
+	if (!tbwm_crash_log_path[0]) {
+		const char *home = getenv("HOME");
+		if (!home || !home[0])
+			return NULL;
+		snprintf(tbwm_crash_log_path, sizeof(tbwm_crash_log_path),
+			"%s/%s", home, TBWM_CRASH_LOG_FNAME);
+	}
+	return tbwm_crash_log_path;
+}
 
 /* REPL state */
 static int repl_visible = 0;             /* 0 = REPL background/text hidden unless active */
@@ -796,7 +820,7 @@ typedef struct {
 } NetEntry;
 static NetEntry net_entries[MAX_NET_ENTRIES];
 static int net_entry_count = 0;
-static char netmenu_cmd[512] = ""; /* command that lists entries (category<TAB>group<TAB>name<TAB>exec per line) */
+static char netmenu_cmd[512] = ""; /* command that lists entries (category<TAB>group<TAB>subgroup<TAB>name<TAB>exec per line) */
 static int netmenu_active = 0;
 static struct wlr_scene_buffer *netmenu_buffer = NULL;
 static struct TitleBuffer *netmenu_tb = NULL;  /* cached buffer for reuse */
@@ -3157,7 +3181,9 @@ destroynotify(struct wl_listener *listener, void *data)
 		free(c->scroll_title_pixels);
 		c->scroll_title_pixels = NULL;
 	}
-	/* Detach scroll buffer - scene node is destroyed with c->scene parent */
+	/* Safety net: scroll buffers are normally detached in unmapnotify()
+	 * before the scene node is destroyed; this only fires if unmap was
+	 * skipped. The scene node is destroyed with c->scene parent. */
 	if (c->scroll_scene_buf) {
 		wlr_scene_buffer_set_buffer(c->scroll_scene_buf, NULL);
 		c->scroll_scene_buf = NULL;
@@ -4424,7 +4450,7 @@ netmenu_parse_buffer(const char *out, NetEntry *dst, int max)
 
 	while (n < max && *p) {
 		char line[512];
-		char *tok[6];
+		char *tok[6] = {0};
 		int nt = 0;
 
 		{
@@ -4451,6 +4477,12 @@ netmenu_parse_buffer(const char *out, NetEntry *dst, int max)
 				*t++ = '\0';
 			}
 		}
+
+		/* Lines with fewer than 4 fields cannot be parsed in either layout.
+		 * tok[] is zero-initialized, but skip them defensively instead of
+		 * strncpy'ing empty/positional data. */
+		if (nt < 4)
+			continue;
 
 		/* Detect legacy vs new layout */
 		if (nt >= 5 &&
@@ -5373,7 +5405,7 @@ audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
 
 	while (n < max && *p) {
 		char line[512];
-		char *tok[6];
+		char *tok[6] = {0};
 		int nt = 0;
 
 		{
@@ -5400,6 +5432,12 @@ audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
 				*t++ = '\0';
 			}
 		}
+
+		/* Lines with fewer than 4 fields cannot be parsed in either layout.
+		 * tok[] is zero-initialized, but skip them defensively instead of
+		 * strncpy'ing empty/positional data. */
+		if (nt < 4)
+			continue;
 
 		if (nt >= 5 && audiomenu_is_action(tok[3])) {
 			/* new: cat group subgroup action exec */
@@ -7638,9 +7676,11 @@ run(char *startup_cmd)
 	scroll_timer = wl_event_loop_add_timer(event_loop, scrolltimer, NULL);
 	wl_event_source_timer_update(scroll_timer, 33);
 
-	/* Start timing report timer (every 500ms) */
+	/* Start timing report timer (every 500ms) - only in profile builds */
+#ifdef TBWM_PROFILE
 	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
 	wl_event_source_timer_update(timing_timer, 500);
+#endif
 
 	/* Timer for netmenu auto-rescan (only armed while on a search sub-topic) */
 	net_scan_timer = wl_event_loop_add_timer(event_loop, netmenu_scan_keepalive, NULL);
@@ -7653,7 +7693,7 @@ run(char *startup_cmd)
 	 * pairing state changes. */
 	bluetooth_init(dpy, netmenu_scan_is_active, updatenetmenu);
 
-	/* Dump a backtrace to TBWM_CRASH_LOG if we abort/segfault, then
+	/* Dump a backtrace to $HOME/tbwm-crash.log if we abort/segfault, then
 	 * re-raise so the behaviour matches a plain crash. */
 	install_crash_handlers();
 
@@ -9761,10 +9801,18 @@ setup_foot_config(void)
 	if (!home)
 		return;
 
-	/* Install font if needed */
+	/* Install font if needed. Prefer the system-installed copy (install.sh
+	 * drops it in /usr/share/fonts/tbwm/), then fall back to a copy in the
+	 * user's home. */
 	snprintf(fontdir, sizeof(fontdir), "%s/.local/share/fonts", home);
 	snprintf(fontsrc, sizeof(fontsrc), "%s/PxPlus_IBM_VGA_8x16.ttf", home);
 	snprintf(fontdst, sizeof(fontdst), "%s/PxPlus_IBM_VGA_8x16.ttf", fontdir);
+
+	if (stat(fontdst, &st) != 0) {
+		char sysfont[] = "/usr/share/fonts/tbwm/PxPlus_IBM_VGA_8x16.ttf";
+		if (stat(sysfont, &st) == 0)
+			snprintf(fontsrc, sizeof(fontsrc), "%s", sysfont);
+	}
 
 	if (stat(fontdst, &st) != 0 && stat(fontsrc, &st) == 0) {
 		/* Create font directory */
@@ -9974,12 +10022,16 @@ buildappcache(void)
 int
 timingtimer(void *data)
 {
-	/* Report CPU timing statistics every 500ms */
+	/* Report CPU timing statistics every 500ms (profile builds only) */
+#ifndef TBWM_PROFILE
+	return 0;
+#else
 	fprintf(stderr, "[TIMING TICK]\n");
 	fflush(stderr);
 	timing_report();
 	wl_event_source_timer_update(timing_timer, 500);
 	return 0;
+#endif
 }
 
 int
@@ -13256,7 +13308,8 @@ crash_handler(int sig)
 	const char *msg = "\n=== tbwm crash (signal ";
 
 	dprintf(2, "%s%d%s", msg, sig, ") ===\n");
-	fd = open(TBWM_CRASH_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
+	const char *crash_log = crash_log_path();
+	fd = (crash_log) ? open(crash_log, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
 	if (fd < 0)
 		goto out;
 	w += dprintf(fd, "\n=== tbwm crash (signal %d) at %ld ===\n", sig,
@@ -15276,6 +15329,18 @@ unmapnotify(struct wl_listener *listener, void *data)
 	if (c->frame_right_buf) {
 		wlr_buffer_drop(&c->frame_right_buf->base);
 		c->frame_right_buf = NULL;
+	}
+
+	/* Detach scroll buffers before destroying the scene node - scroll_scene_buf
+	 * is a child of c->scene, so touching it after the destroy would be a
+	 * use-after-free. Mirrors the frame_* pattern above. */
+	if (c->scroll_scene_buf) {
+		wlr_scene_buffer_set_buffer(c->scroll_scene_buf, NULL);
+		c->scroll_scene_buf = NULL;
+	}
+	if (c->scroll_buf) {
+		wlr_buffer_drop(&c->scroll_buf->base);
+		c->scroll_buf = NULL;
 	}
 
 	wlr_scene_node_destroy(&c->scene->node);

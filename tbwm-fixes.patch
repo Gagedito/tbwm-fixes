@@ -1,9 +1,13 @@
 diff --git a/Makefile b/Makefile
-index 296971d..3f5947d 100644
+index 296971d..9b7e916 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -12,16 +12,18 @@ TBWMDEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
- 	-Wfloat-conversion
+@@ -9,19 +9,21 @@ TBWMCPPFLAGS = -I. -DWLR_USE_UNSTABLE -D_POSIX_C_SOURCE=200809L \
+ TBWMDEVCFLAGS = -g -Wpedantic -Wall -Wextra -Wdeclaration-after-statement \
+ 	-Wno-unused-parameter -Wshadow -Wunused-macros -Werror=strict-prototypes \
+ 	-Werror=implicit -Werror=return-type -Werror=incompatible-pointer-types \
+-	-Wfloat-conversion
++	-Wfloat-conversion -Wformat=2 -Wformat-security -Warray-bounds
  
  # CFLAGS / LDFLAGS
 -PKGS      = wayland-server xkbcommon libinput freetype2 pixman-1 $(XLIBS)
@@ -25,6 +29,18 @@ index 296971d..3f5947d 100644
  util.o: util.c util.h
  s7.o: s7.c s7.h
  	$(CC) -c -O2 -I. s7.c -o s7.o
+@@ -55,9 +57,9 @@ clean:
+ 
+ dist: clean
+ 	mkdir -p tbwm-$(VERSION)
+-	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
++	cp -R LICENSE* Makefile README.md client.h config.def.h \
+ 		config.mk protocols tbwm.1 tbwm.c util.c util.h tbwm.desktop \
+-		tbwm-$(VERSION)
++		s7.c s7.h bluetooth.c bluetooth.h tbwm-$(VERSION)
+ 	tar -caf tbwm-$(VERSION).tar.gz tbwm-$(VERSION)
+ 	rm -rf tbwm-$(VERSION)
+ 
 diff --git a/bluetooth.c b/bluetooth.c
 new file mode 100644
 index 0000000..f41ce56
@@ -682,10 +698,22 @@ index a52155a..cd62d1b 100644
  };
  
 diff --git a/config.mk b/config.mk
-index 9ccea74..a63fe58 100644
+index 9ccea74..a39eb2a 100644
 --- a/config.mk
 +++ b/config.mk
-@@ -34,3 +34,14 @@ XLIBS = xcb xcb-icccm
+@@ -24,9 +24,8 @@ WLR_LIBS = `$(PKG_CONFIG) --libs wlroots-0.19`
+ #	-I$(PWD)/wlroots/0.19/include/wlroots-0.19
+ #WLR_LIBS = -Wl,-rpath,$(PWD)/wlroots/0.19/lib64 -L$(PWD)/wlroots/0.19/lib64 -lwlroots-0.19
+ 
+-XWAYLAND =
+-XLIBS =
+-# Uncomment to build XWayland support
++# XWayland support. Set XWAYLAND= (empty) on the make command line to disable,
++# e.g.  make XWAYLAND=   (the CI workflow does this).
+ XWAYLAND = -DXWAYLAND
+ XLIBS = xcb xcb-icccm
+ 
+@@ -34,3 +33,14 @@ XLIBS = xcb xcb-icccm
  # To avoid warnings about them, we do not use -std=c99 and instead of using the
  # gmake default 'CC=c99', we use cc.
  CC = cc
@@ -1268,7 +1296,7 @@ index 0000000..4371d99
 +exit 0
 diff --git a/tbwm-network b/tbwm-network
 new file mode 100755
-index 0000000..304e307
+index 0000000..64b5f32
 --- /dev/null
 +++ b/tbwm-network
 @@ -0,0 +1,370 @@
@@ -1301,12 +1329,12 @@ index 0000000..304e307
 +# which only lists the Bluetooth category.
 +if [ "$mode" != "bt" ]; then
 +    if pgrep -x connmand >/dev/null 2>&1; then
-+        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-+        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
++        printf 'Wifi\tConectado\t[sin red conectada]\tsh -c true\n'
++        printf 'Wifi\tGuardadas\t[sin redes guardadas]\tsh -c true\n'
 +    elif [ "$(nmcli -t -f RUNNING general status 2>/dev/null)" = "running" ]; then
-+        printf 'Wifi\tConectado\t\tInfo\t[sin red conectada]\tsh -c true\n'
-+        printf 'Wifi\tGuardadas\t\tInfo\t[sin redes guardadas]\tsh -c true\n'
-+        printf 'Wifi\tBuscar red\t\tInfo\t[sin redes visibles]\tsh -c true\n'
++        printf 'Wifi\tConectado\t[sin red conectada]\tsh -c true\n'
++        printf 'Wifi\tGuardadas\t[sin redes guardadas]\tsh -c true\n'
++        printf 'Wifi\tBuscar red\t[sin redes visibles]\tsh -c true\n'
 +    fi
 +fi
 +
@@ -1314,9 +1342,9 @@ index 0000000..304e307
 +# sub-topics exist from the first render. Skipped in "wifi" mode, which only
 +# lists the WiFi category.
 +if [ "$mode" != "wifi" ] && command -v bluetoothctl >/dev/null 2>&1; then
-+    printf 'Bluetooth\tConectado\t\tInfo\t[sin conectados]\tsh -c true\n'
-+    printf 'Bluetooth\tEmparejados\t\tInfo\t[sin emparejados]\tsh -c true\n'
-+    printf 'Bluetooth\tBuscar dispositivos\t\tInfo\t[sin dispositivos]\tsh -c true\n'
++    printf 'Bluetooth\tConectado\t[sin conectados]\tsh -c true\n'
++    printf 'Bluetooth\tEmparejados\t[sin emparejados]\tsh -c true\n'
++    printf 'Bluetooth\tBuscar dispositivos\t[sin dispositivos]\tsh -c true\n'
 +fi
 +
 +# Quote a string for use inside single quotes in a shell command.
@@ -1457,7 +1485,7 @@ index 0000000..304e307
 +$(nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null | sort -r)
 +EOF
 +else
-+    printf 'Wifi\t\t\tInfo\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
++    printf 'Wifi\t\t[WiFi] ni connman ni NetworkManager activos\tsh -c '\''echo activa: sudo sv up connmand (connman) o NetworkManager'\''\n'
 +fi
 +fi
 +
@@ -1640,7 +1668,7 @@ index 0000000..304e307
 +    fi
 +rm -f "$devices" "$btout" "$scanmacs" "$emitted"
 +else
-+    printf 'Bluetooth\t\t\tInfo\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
++    printf 'Bluetooth\t\t[BT] instala bluez-utils (bluetoothctl)\tsh -c '\''echo instala: sudo pacman -S bluez bluez-utils'\''\n'
 +fi
 \ No newline at end of file
 diff --git a/tbwm-wallpaper b/tbwm-wallpaper
@@ -1717,7 +1745,7 @@ index 0000000..9687ac7
 +log "tbwm-wallpaper: ok"
 \ No newline at end of file
 diff --git a/tbwm.c b/tbwm.c
-index a1e049d..787e6ba 100644
+index a1e049d..353d3fd 100644
 --- a/tbwm.c
 +++ b/tbwm.c
 @@ -1,5 +1,6 @@
@@ -1739,7 +1767,36 @@ index a1e049d..787e6ba 100644
  #include <wayland-server-core.h>
  #include <wlr/backend.h>
  #include <wlr/backend/libinput.h>
-@@ -414,6 +418,7 @@ static void requestmonstate(struct wl_listener *listener, void *data);
+@@ -366,19 +370,22 @@ static void safe_scene_node_reparent(struct wlr_scene_node *node, struct wlr_sce
+ static void safe_raise_tree(struct wlr_scene_tree *tree, const char *ctx);
+ static void safe_raise_node(struct wlr_scene_node *node, const char *ctx);
+ 
+-/* Simple file logger for debugging when running in a graphical session */
++/* Simple file logger for debugging when running in a graphical session.
++ * The file handle is opened lazily once and kept for the process lifetime
++ * instead of fopen()/fclose() per call (some call sites are frame-rate hot). */
+ static void
+ file_debug_log(const char *fmt, ...)
+ {
+-	FILE *f = fopen("/tmp/tbwm-debug.log", "a");
+-	if (!f)
++	static FILE *logf = NULL;
++	if (!logf)
++		logf = fopen("/tmp/tbwm-debug.log", "a");
++	if (!logf)
+ 		return;
+ 	va_list ap;
+ 	va_start(ap, fmt);
+-	vfprintf(f, fmt, ap);
++	vfprintf(logf, fmt, ap);
+ 	va_end(ap);
+-	fflush(f);
+-	fclose(f);
++	fflush(logf);
+ }
+ 
+ static void incnmaster(const Arg *arg);
+@@ -414,6 +421,7 @@ static void requestmonstate(struct wl_listener *listener, void *data);
  static void resize(Client *c, struct wlr_box geo, int interact);
  static void run(char *startup_cmd);
  static void run_startup_commands(void);
@@ -1747,7 +1804,7 @@ index a1e049d..787e6ba 100644
  static void setcursor(struct wl_listener *listener, void *data);
  static void setcursorshape(struct wl_listener *listener, void *data);
  static void setfloating(Client *c, int floating);
-@@ -440,9 +445,49 @@ static void updatebar(Monitor *m);
+@@ -440,9 +448,51 @@ static void updatebar(Monitor *m);
  static void updatebars(void);
  static void updateappmenu(void);
  static int appmenu_item_count(void);
@@ -1790,14 +1847,16 @@ index a1e049d..787e6ba 100644
 +static s7_pointer scm_toggle_tray_menu(s7_scheme *sc, s7_pointer args);
 +static int netmenu_scan_keepalive(void *data);
 +static int netmenu_scan_is_active(void);
++#ifdef TBWM_PROFILE
  static int timingtimer(void *data);
++#endif
  static int bartimer(void *data);
  static int scrolltimer(void *data);
 +static int batterytimer(void *data);
  static void togglelauncher(const Arg *arg);
  static void togglerepl(const Arg *arg);
  static void toggleappmenu(const Arg *arg);
-@@ -455,6 +500,8 @@ static void updateframe(Client *c);
+@@ -455,6 +505,8 @@ static void updateframe(Client *c);
  static void updateframes(void);
  static int update_scroll_only(Client *c);
  static void setup_scroll_scene_buffer(Client *c, uint32_t fg_color, uint32_t bg_color);
@@ -1806,7 +1865,7 @@ index a1e049d..787e6ba 100644
  
  static void startdrag(struct wl_listener *listener, void *data);
  static void tag(const Arg *arg);
-@@ -505,7 +552,11 @@ static int launcher_active = 0;
+@@ -505,7 +557,11 @@ static int launcher_active = 0;
  static char launcher_input[256] = {0};
  static int launcher_input_len = 0;
  static int launcher_selection = 0;
@@ -1819,13 +1878,62 @@ index a1e049d..787e6ba 100644
  static int app_cache_count = 0;
  
  /* ==================== COMPREHENSIVE PERFORMANCE TIMING ==================== */
-@@ -640,16 +691,27 @@ static int signal_fd = -1;
+@@ -521,7 +577,9 @@ typedef struct {
+ #define MAX_TIMING_STATS 32
+ static TimingStat timing_stats[MAX_TIMING_STATS];
+ static int timing_count = 0;
++#ifdef TBWM_PROFILE
+ static struct timespec last_timing_report = {0};
++#endif
+ 
+ #define TIMING_SCROLLTIMER 0
+ #define TIMING_UPDATEBARS 1
+@@ -547,11 +605,14 @@ static void timing_init(void) {
+ }
+ 
+ static inline void timing_start(int idx) {
++#ifdef TBWM_PROFILE
+ 	if (idx < 0 || idx >= timing_count) return;
+ 	clock_gettime(CLOCK_MONOTONIC, &timing_stats[idx].start);
++#endif
+ }
+ 
+ static inline void timing_end(int idx) {
++#ifdef TBWM_PROFILE
+ 	struct timespec end;
+ 	long us;
+ 	if (idx < 0 || idx >= timing_count) return;
+@@ -564,9 +625,13 @@ static inline void timing_end(int idx) {
+ 	if (us > timing_stats[idx].max_us) timing_stats[idx].max_us = us;
+ 	if (us < timing_stats[idx].min_us) timing_stats[idx].min_us = us;
+ 	timing_stats[idx].call_count++;
++#endif
+ }
+ 
+ static void timing_report(void) {
++#ifndef TBWM_PROFILE
++	return;
++#else
+ 	struct timespec now;
+ 	long elapsed_ns;
+ 	int i, j;
+@@ -632,6 +697,7 @@ static void timing_report(void) {
+ 	fflush(fp);
+ 	fclose(fp);
+ 	last_timing_report = now;
++#endif
+ }
+ 
+ /* Signal handling helpers: set by signal handler and used from main loop */
+@@ -640,16 +706,42 @@ static int signal_fd = -1;
  static struct wl_event_source *signal_fd_source = NULL;
  
  static struct wl_event_source *bar_timer = NULL;
 +static struct wl_event_source *net_scan_timer = NULL;  /* auto-rescan while focused on a search sub-topic */
 +static int netmenu_last_sub = 0;        /* last netmenu_refresh() used a focused subcommand (tbwm-network bt/wifi) */
++#ifdef TBWM_PROFILE
  static struct wl_event_source *timing_timer = NULL;  /* dedicated timing report timer */
++#endif
  static uint32_t title_scroll_offset = 0; /* pixel offset for smooth title scrolling */
  static int title_scroll_mode = 1;        /* 0 = truncate with ..., 1 = scroll */
 -static int title_scroll_speed = 30;      /* pixels per second */
@@ -1839,9 +1947,22 @@ index a1e049d..787e6ba 100644
 +
 +/* ---- crash diagnostics ---- */
 +/* /tmp is tmpfs and is wiped on reboot, so crash evidence is kept in the
-+ * home directory instead. */
-+#define TBWM_DIAG_DIR "/home/gage"
-+#define TBWM_CRASH_LOG TBWM_DIAG_DIR "/tbwm-crash.log"
++ * home directory instead. Resolved at runtime via $HOME so it works for any
++ * user (a hardcoded path silently drops crash logs on other machines). */
++#define TBWM_CRASH_LOG_FNAME "tbwm-crash.log"
++static char tbwm_crash_log_path[512] = "";
++static const char *
++crash_log_path(void)
++{
++	if (!tbwm_crash_log_path[0]) {
++		const char *home = getenv("HOME");
++		if (!home || !home[0])
++			return NULL;
++		snprintf(tbwm_crash_log_path, sizeof(tbwm_crash_log_path),
++			"%s/%s", home, TBWM_CRASH_LOG_FNAME);
++	}
++	return tbwm_crash_log_path;
++}
  
  /* REPL state */
 -static int repl_visible = 1;             /* 1 = REPL background/text visible */
@@ -1849,7 +1970,7 @@ index a1e049d..787e6ba 100644
  static int repl_input_active = 0;        /* 1 = REPL accepting keyboard input */
  static char repl_input[1024] = {0};      /* current input line */
  static int repl_input_len = 0;
-@@ -685,9 +747,11 @@ static int cfg_tagcount = 9;
+@@ -685,9 +777,11 @@ static int cfg_tagcount = 9;
  static int cfg_show_time = 1;          /* Show time in status bar */
  static int cfg_show_date = 1;          /* Show date in status bar */
  static char cfg_status_text[256] = ""; /* Custom status text (overrides date/time if set) */
@@ -1862,7 +1983,7 @@ index a1e049d..787e6ba 100644
   * cfg_bg_color          = root/REPL background (black)
   * cfg_bg_text_color     = text on background/REPL (grey)
   * cfg_bar_color         = status bar background (blue)
-@@ -697,21 +761,220 @@ static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen *
+@@ -697,21 +791,220 @@ static int cfg_bar_autohide = 1;       /* Hide bar when a client is fullscreen *
   * cfg_menu_color        = app menu background (grey)
   * cfg_menu_text_color   = app menu text (white)
   */
@@ -1909,7 +2030,7 @@ index a1e049d..787e6ba 100644
 +} NetEntry;
 +static NetEntry net_entries[MAX_NET_ENTRIES];
 +static int net_entry_count = 0;
-+static char netmenu_cmd[512] = ""; /* command that lists entries (category<TAB>group<TAB>name<TAB>exec per line) */
++static char netmenu_cmd[512] = ""; /* command that lists entries (category<TAB>group<TAB>subgroup<TAB>name<TAB>exec per line) */
 +static int netmenu_active = 0;
 +static struct wlr_scene_buffer *netmenu_buffer = NULL;
 +static struct TitleBuffer *netmenu_tb = NULL;  /* cached buffer for reuse */
@@ -2091,7 +2212,7 @@ index a1e049d..787e6ba 100644
  /* App launcher data structures */
  #define MAX_APPS 512
  #define MAX_CATEGORIES 32
-@@ -857,6 +1120,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
+@@ -857,6 +1150,7 @@ static const struct wlr_buffer_impl titlebuf_impl = {
  };
  
  static pid_t child_pid = -1;
@@ -2099,7 +2220,7 @@ index a1e049d..787e6ba 100644
  static int locked;
  static void *exclusive_focus;
  static struct wl_display *dpy;
-@@ -1045,8 +1309,9 @@ applyrules(Client *c)
+@@ -1045,8 +1339,9 @@ applyrules(Client *c)
  	/* rule matching */
  	const char *appid, *title;
  	uint32_t newtags = 0;
@@ -2110,7 +2231,7 @@ index a1e049d..787e6ba 100644
  	Monitor *mon = selmon, *m;
  
  	appid = client_get_appid(c);
-@@ -1064,6 +1329,21 @@ applyrules(Client *c)
+@@ -1064,6 +1359,21 @@ applyrules(Client *c)
  			}
  		}
  	}
@@ -2132,7 +2253,7 @@ index a1e049d..787e6ba 100644
  
  	c->isfloating |= client_is_float_type(c);
  	setmon(c, mon, newtags);
-@@ -1304,6 +1584,87 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1304,6 +1614,87 @@ buttonpress(struct wl_listener *listener, void *data)
  				toggleappmenu(&a);
  				return;
  			}
@@ -2220,7 +2341,7 @@ index a1e049d..787e6ba 100644
  		}
  
  		/* Handle app menu clicks */
-@@ -1375,6 +1736,278 @@ buttonpress(struct wl_listener *listener, void *data)
+@@ -1375,6 +1766,278 @@ buttonpress(struct wl_listener *listener, void *data)
  			}
  		}
  
@@ -2499,7 +2620,7 @@ index a1e049d..787e6ba 100644
  		/* Handle clicks on the status bar */
  		/* Skip if fullscreen client is focused */
  		fc = focustop(selmon);
-@@ -1591,6 +2224,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
+@@ -1591,6 +2254,68 @@ checkidleinhibitor(struct wlr_surface *exclude)
  	wlr_idle_notifier_v1_set_inhibited(idle_notifier, inhibited);
  }
  
@@ -2568,7 +2689,7 @@ index a1e049d..787e6ba 100644
  void
  cleanup(void)
  {
-@@ -1606,6 +2301,13 @@ cleanup(void)
+@@ -1606,6 +2331,13 @@ cleanup(void)
  		kill(-child_pid, SIGTERM);
  		waitpid(child_pid, NULL, 0);
  	}
@@ -2582,7 +2703,7 @@ index a1e049d..787e6ba 100644
  	wlr_xcursor_manager_destroy(cursor_mgr);
  
  	/* Clean up glyph cache bitmaps */
-@@ -1633,6 +2335,58 @@ cleanup(void)
+@@ -1633,6 +2365,58 @@ cleanup(void)
  		appmenu_tb = NULL;
  	}
  
@@ -2641,7 +2762,7 @@ index a1e049d..787e6ba 100644
  	/* Clean up REPL buffers on all monitors */
  	wl_list_for_each(m, &mons, link) {
  		if (m->repl) {
-@@ -1682,9 +2436,6 @@ cleanup(void)
+@@ -1682,9 +2466,6 @@ cleanup(void)
  
  	/* Clean up app cache (launcher autocomplete) */
  	if (app_cache) {
@@ -2651,7 +2772,18 @@ index a1e049d..787e6ba 100644
  		free(app_cache);
  		app_cache = NULL;
  		app_cache_count = 0;
-@@ -3191,9 +3942,10 @@ void
+@@ -2406,7 +3187,9 @@ destroynotify(struct wl_listener *listener, void *data)
+ 		free(c->scroll_title_pixels);
+ 		c->scroll_title_pixels = NULL;
+ 	}
+-	/* Detach scroll buffer - scene node is destroyed with c->scene parent */
++	/* Safety net: scroll buffers are normally detached in unmapnotify()
++	 * before the scene node is destroyed; this only fires if unmap was
++	 * skipped. The scene node is destroyed with c->scene parent. */
+ 	if (c->scroll_scene_buf) {
+ 		wlr_scene_buffer_set_buffer(c->scroll_scene_buf, NULL);
+ 		c->scroll_scene_buf = NULL;
+@@ -3191,9 +3974,10 @@ void
  handlesig(int signo)
  {
  	if (signo == SIGCHLD) {
@@ -2665,7 +2797,7 @@ index a1e049d..787e6ba 100644
  		if (signal_fd >= 0) {
  			uint64_t one = 1;
  			ssize_t s = write(signal_fd, &one, sizeof(one));
-@@ -3366,12 +4118,24 @@ inputdevice(struct wl_listener *listener, void *data)
+@@ -3366,12 +4150,24 @@ inputdevice(struct wl_listener *listener, void *data)
  	wlr_seat_set_capabilities(seat, caps);
  }
  
@@ -2691,7 +2823,7 @@ index a1e049d..787e6ba 100644
  			count++;
  	}
  	return count;
-@@ -3382,9 +4146,9 @@ launcher_get_match(int index)
+@@ -3382,9 +4178,9 @@ launcher_get_match(int index)
  {
  	int i, count = 0;
  	for (i = 0; i < app_cache_count; i++) {
@@ -2703,7 +2835,7 @@ index a1e049d..787e6ba 100644
  			count++;
  		}
  	}
-@@ -3586,2690 +4350,5097 @@ appmenukey(xkb_keysym_t sym)
+@@ -3586,2662 +4382,5083 @@ appmenukey(xkb_keysym_t sym)
  }
  
  static int
@@ -2797,11 +2929,20 @@ index a1e049d..787e6ba 100644
 -			launcher_input[--launcher_input_len] = '\0';
 -			launcher_selection = 0;
 -			updatebars();
+-		}
+-		return 1;
+-	}
 +	while (n < max && *p) {
 +		char line[512];
-+		char *tok[6];
++		char *tok[6] = {0};
 +		int nt = 0;
-+
+ 
+-	/* Navigation: Tab to cycle forward, Shift+Tab to go back */
+-	if (sym == XKB_KEY_Tab) {
+-		match_count = launcher_match_count();
+-		if (match_count > 0) {
+-			launcher_selection = (launcher_selection + 1) % match_count;
+-			updatebars();
 +		{
 +			const char *eol = strchr(p, '\n');
 +			size_t len = eol ? (size_t)(eol - p) : strlen(p);
@@ -2814,11 +2955,10 @@ index a1e049d..787e6ba 100644
 -		return 1;
 -	}
  
--	/* Navigation: Tab to cycle forward, Shift+Tab to go back */
--	if (sym == XKB_KEY_Tab) {
+-	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
 -		match_count = launcher_match_count();
 -		if (match_count > 0) {
--			launcher_selection = (launcher_selection + 1) % match_count;
+-			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
 -			updatebars();
 +		if (!line[0])
 +			continue;
@@ -2835,7 +2975,26 @@ index a1e049d..787e6ba 100644
 +			}
  		}
 -		return 1;
-+
+-	}
+ 
+-	/* Regular character input */
+-	if (sym >= 0x20 && sym <= 0x7e &&
+-	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
+-		launcher_input[launcher_input_len++] = (char)sym;
+-		launcher_input[launcher_input_len] = '\0';
+-		launcher_selection = 0;
+-		updatebars();
++		/* Lines with fewer than 4 fields cannot be parsed in either layout.
++		 * tok[] is zero-initialized, but skip them defensively instead of
++		 * strncpy'ing empty/positional data. */
++		if (nt < 4)
++			continue;
+ 
+-		/* Auto-run if only one match */
+-		if (launcher_match_count() == 1) {
+-			runlauncher();
+-		}
+-		return 1;
 +		/* Detect legacy vs new layout */
 +		if (nt >= 5 &&
 +		    (strcmp(tok[3], "Conectar") == 0 || strcmp(tok[3], "Desconectar") == 0 ||
@@ -2865,102 +3024,19 @@ index a1e049d..787e6ba 100644
 +		dst[n].exec[NET_EXEC_LEN - 1] = '\0';
 +		n++;
  	}
+-
+-	return 1; /* Consume all keys in launcher mode */
 +	return n;
-+}
+ }
  
--	if (sym == XKB_KEY_ISO_Left_Tab) { /* Shift+Tab */
--		match_count = launcher_match_count();
--		if (match_count > 0) {
--			launcher_selection = (launcher_selection - 1 + match_count) % match_count;
--			updatebars();
+-int
+-keybinding(uint32_t mods, xkb_keysym_t sym)
 +/* Rebuild net_categories from the current net_entries, preserving the
 + * existing category order so the list never reorders between focused wifi/bt
 + * rescans. Categories that still have entries keep their position; categories
 + * first seen in the new stream are appended. */
 +static void
 +netmenu_rebuild_categories(void)
-+{
-+	char old[MAX_NET_CATEGORIES][NET_CAT_LEN];
-+	int oldn = net_category_count;
-+	int i;
-+	int ci;
-+	int j;
-+
-+	for (i = 0; i < oldn; i++)
-+		strcpy(old[i], net_categories[i]);
-+
-+	net_category_count = 0;
-+
-+	/* Categories that already existed keep their previous position */
-+	for (i = 0; i < oldn; i++) {
-+		int has = 0;
-+		for (ci = 0; ci < net_entry_count; ci++) {
-+			if (strcmp(net_entries[ci].category, old[i]) == 0) {
-+				has = 1;
-+				break;
-+			}
-+		}
-+		if (has && net_category_count < MAX_NET_CATEGORIES) {
-+			strncpy(net_categories[net_category_count], old[i], NET_CAT_LEN - 1);
-+			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
-+			net_category_count++;
-+		}
-+	}
-+	/* Brand new categories go to the end */
-+	for (ci = 0; ci < net_entry_count; ci++) {
-+		for (j = 0; j < net_category_count; j++) {
-+			if (strcmp(net_categories[j], net_entries[ci].category) == 0)
-+				break;
-+		}
-+		if (j >= net_category_count && net_category_count < MAX_NET_CATEGORIES) {
-+			strncpy(net_categories[net_category_count], net_entries[ci].category, NET_CAT_LEN - 1);
-+			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
-+			net_category_count++;
- 		}
--		return 1;
- 	}
-+}
- 
--	/* Regular character input */
--	if (sym >= 0x20 && sym <= 0x7e &&
--	    launcher_input_len < (int)sizeof(launcher_input) - 1) {
--		launcher_input[launcher_input_len++] = (char)sym;
--		launcher_input[launcher_input_len] = '\0';
--		launcher_selection = 0;
--		updatebars();
--
--		/* Auto-run if only one match */
--		if (launcher_match_count() == 1) {
--			runlauncher();
--		}
--		return 1;
-+/* Is `cat` present in the given category set? */
-+static int
-+netmenu_cat_in_set(const char *cat, const char scats[MAX_NET_CATEGORIES][NET_CAT_LEN], int n)
-+{
-+	int ci;
-+	for (ci = 0; ci < n; ci++) {
-+		if (strcmp(scats[ci], cat) == 0)
-+			return 1;
- 	}
--
--	return 1; /* Consume all keys in launcher mode */
-+	return 0;
- }
- 
--int
--keybinding(uint32_t mods, xkb_keysym_t sym)
-+/* Merge a freshly parsed stream (src) into the live menu data (net_entries /
-+ * net_categories). Categories not covered by src keep their existing entries,
-+ * so a focused wifi/bt rescan never blanks the other category (which caused
-+ * the Bluetooth category to flicker out on every search cycle). When grow is
-+ * set (the child is still streaming), entries of src's categories that src
-+ * has not re-emitted yet are kept too, so a live scan grows the list item by
-+ * item instead of briefly dropping networks/devices on each refresh. The
-+ * final stream of a command is authoritative: it replaces its categories so
-+ * stale devices/networks that left range drop out. */
-+static void
-+netmenu_merge_parse(const NetEntry *src, int src_count, int grow)
  {
 -	/*
 -	 * Here we handle compositor keybindings. This is when the compositor is
@@ -2972,22 +3048,23 @@ index a1e049d..787e6ba 100644
 -	/* Handle launcher mode first */
 -	if (launcher_active)
 -		return launcherkey(sym);
--
++	char old[MAX_NET_CATEGORIES][NET_CAT_LEN];
++	int oldn = net_category_count;
++	int i;
++	int ci;
++	int j;
+ 
 -	/* Handle REPL input mode */
 -	if (repl_input_active)
 -		return replkey(sym);
--
++	for (i = 0; i < oldn; i++)
++		strcpy(old[i], net_categories[i]);
+ 
 -	/* Handle app menu navigation - if appmenukey handles it, return 1;
 -	 * otherwise fall through to check scheme bindings (e.g., M-x to toggle) */
 -	if (appmenu_active && appmenukey(sym))
 -		return 1;
-+	char scats[MAX_NET_CATEGORIES][NET_CAT_LEN];
-+	int scatn = 0;
-+	NetEntry merged[MAX_NET_ENTRIES];
-+	int mc = 0;
-+	int i;
-+	int j;
-+	int ci;
++	net_category_count = 0;
  
 -	/*
 -	 * Fallback: some keyboards or keymaps produce plain F1..F12 for Ctrl+Alt+Fx
@@ -3002,10 +3079,14 @@ index a1e049d..787e6ba 100644
 -			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: XF86Switch_VT_%d detected, invoking chvt()\n", n);
 -			chvt(&a);
 -			return 1;
-+	for (i = 0; i < src_count; i++) {
-+		for (ci = 0; ci < scatn; ci++) {
-+			if (strcmp(scats[ci], src[i].category) == 0)
++	/* Categories that already existed keep their previous position */
++	for (i = 0; i < oldn; i++) {
++		int has = 0;
++		for (ci = 0; ci < net_entry_count; ci++) {
++			if (strcmp(net_entries[ci].category, old[i]) == 0) {
++				has = 1;
 +				break;
++			}
  		}
 -
 -		/* Older / simpler keymaps may produce plain F1..F12 */
@@ -3015,13 +3096,13 @@ index a1e049d..787e6ba 100644
 -			tbwm_log(TBWM_LOG_INFO, "tbwm: chvt: F%d detected (no XF86 keysym), invoking chvt()\n", n);
 -			chvt(&a);
 -			return 1;
-+		if (ci >= scatn && scatn < MAX_NET_CATEGORIES) {
-+			strncpy(scats[scatn], src[i].category, NET_CAT_LEN - 1);
-+			scats[scatn][NET_CAT_LEN - 1] = '\0';
-+			scatn++;
++		if (has && net_category_count < MAX_NET_CATEGORIES) {
++			strncpy(net_categories[net_category_count], old[i], NET_CAT_LEN - 1);
++			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
++			net_category_count++;
  		}
  	}
- 
+-
 -	/* Check Scheme keybindings first */
 -	if (check_scheme_bindings(CLEANMASK(mods), sym))
 -		return 1;
@@ -3048,19 +3129,116 @@ index a1e049d..787e6ba 100644
 -			Arg a = { .i = DirDown };
 -			swapdir(&a);
 -			return 1;
--		}
-+	/* Keep existing entries whose category the new stream does not cover */
-+	for (i = 0; i < net_entry_count && mc < MAX_NET_ENTRIES; i++) {
-+		if (!netmenu_cat_in_set(net_entries[i].category, scats, scatn))
-+			merged[mc++] = net_entries[i];
++	/* Brand new categories go to the end */
++	for (ci = 0; ci < net_entry_count; ci++) {
++		for (j = 0; j < net_category_count; j++) {
++			if (strcmp(net_categories[j], net_entries[ci].category) == 0)
++				break;
++		}
++		if (j >= net_category_count && net_category_count < MAX_NET_CATEGORIES) {
++			strncpy(net_categories[net_category_count], net_entries[ci].category, NET_CAT_LEN - 1);
++			net_categories[net_category_count][NET_CAT_LEN - 1] = '\0';
++			net_category_count++;
+ 		}
  	}
++}
  
 -	for (k = keys; k < END(keys); k++) {
 -		if (CLEANMASK(mods) == CLEANMASK(k->mod)
 -				&& sym == k->keysym && k->func) {
 -			tbwm_log(TBWM_LOG_INFO, "tbwm: keybinding matched mods=0x%x sym=0x%x func=%p\n", mods, sym, (void*)k->func);
 -			k->func(&k->arg);
--			return 1;
++/* Is `cat` present in the given category set? */
++static int
++netmenu_cat_in_set(const char *cat, const char scats[MAX_NET_CATEGORIES][NET_CAT_LEN], int n)
++{
++	int ci;
++	for (ci = 0; ci < n; ci++) {
++		if (strcmp(scats[ci], cat) == 0)
+ 			return 1;
+-		}
+ 	}
+ 	return 0;
+ }
+ 
+-void
+-keypress(struct wl_listener *listener, void *data)
++/* Merge a freshly parsed stream (src) into the live menu data (net_entries /
++ * net_categories). Categories not covered by src keep their existing entries,
++ * so a focused wifi/bt rescan never blanks the other category (which caused
++ * the Bluetooth category to flicker out on every search cycle). When grow is
++ * set (the child is still streaming), entries of src's categories that src
++ * has not re-emitted yet are kept too, so a live scan grows the list item by
++ * item instead of briefly dropping networks/devices on each refresh. The
++ * final stream of a command is authoritative: it replaces its categories so
++ * stale devices/networks that left range drop out. */
++static void
++netmenu_merge_parse(const NetEntry *src, int src_count, int grow)
+ {
++	char scats[MAX_NET_CATEGORIES][NET_CAT_LEN];
++	int scatn = 0;
++	NetEntry merged[MAX_NET_ENTRIES];
++	int mc = 0;
+ 	int i;
+-	/* This event is raised when a key is pressed or released. */
+-	KeyboardGroup *group = wl_container_of(listener, group, key);
+-	struct wlr_keyboard_key_event *event = data;
+-
+-	/* Translate libinput keycode -> xkbcommon */
+-	uint32_t keycode = event->keycode + 8;
+-	/* Get a list of keysyms based on the keymap for this keyboard */
+-	const xkb_keysym_t *syms;
+-	int nsyms = xkb_state_key_get_syms(
+-			group->wlr_group->keyboard.xkb_state, keycode, &syms);
+-
+-	int handled = 0;
+-	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
+-
+-	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
++	int j;
++	int ci;
+ 
+-	/* If in screenshot-grab mode, don't run compositor keybindings; forward
+-	 * keyboard events to the seat so the screenshot client can receive keys. */
+-	if (screenshot_mode) {
+-		wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+-		wlr_seat_keyboard_notify_key(seat, event->time_msec,
+-				event->keycode, event->state);
+-		return;
++	for (i = 0; i < src_count; i++) {
++		for (ci = 0; ci < scatn; ci++) {
++			if (strcmp(scats[ci], src[i].category) == 0)
++				break;
++		}
++		if (ci >= scatn && scatn < MAX_NET_CATEGORIES) {
++			strncpy(scats[scatn], src[i].category, NET_CAT_LEN - 1);
++			scats[scatn][NET_CAT_LEN - 1] = '\0';
++			scatn++;
++		}
+ 	}
+ 
+-	/* On _press_ if there is no active screen locker,
+-	 * attempt to process a compositor keybinding. */
+-	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+-		for (i = 0; i < nsyms; i++)
+-			handled = keybinding(mods, syms[i]) || handled;
++	/* Keep existing entries whose category the new stream does not cover */
++	for (i = 0; i < net_entry_count && mc < MAX_NET_ENTRIES; i++) {
++		if (!netmenu_cat_in_set(net_entries[i].category, scats, scatn))
++			merged[mc++] = net_entries[i];
+ 	}
+ 
+-	/* Don't enable key repeat if we're now in screenshot mode (spawn-grab was called)
+-	 * or if the keybinding spawned a process - we don't want to spawn it repeatedly. */
+-	if (handled && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
+-		group->mods = mods;
+-		group->keysyms = syms;
+-		group->nsyms = nsyms;
+-		wl_event_source_timer_update(group->key_repeat_source,
+-				group->wlr_group->keyboard.repeat_info.delay);
+-	} else {
+-		group->nsyms = 0;
+-		wl_event_source_timer_update(group->key_repeat_source, 0);
 +	if (grow) {
 +		/* Keep covered-category entries the stream has not re-emitted yet */
 +		for (i = 0; i < net_entry_count && mc < MAX_NET_ENTRIES; i++) {
@@ -3077,14 +3255,19 @@ index a1e049d..787e6ba 100644
 +			}
 +			if (!dup)
 +				merged[mc++] = net_entries[i];
- 		}
++		}
  	}
--	return 0;
-+
+ 
+-	if (handled)
+-		return;
 +	/* The new stream is authoritative for the categories it covers */
 +	for (i = 0; i < src_count && mc < MAX_NET_ENTRIES; i++)
 +		merged[mc++] = src[i];
-+
+ 
+-	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
+-	/* Pass unhandled keycodes along to the client. */
+-	wlr_seat_keyboard_notify_key(seat, event->time_msec,
+-			event->keycode, event->state);
 +	for (i = 0; i < mc; i++)
 +		net_entries[i] = merged[i];
 +	net_entry_count = mc;
@@ -3092,91 +3275,12 @@ index a1e049d..787e6ba 100644
  }
  
 -void
--keypress(struct wl_listener *listener, void *data)
+-keypressmod(struct wl_listener *listener, void *data)
 +/* Build the list of sub-topics (groups) for the currently selected category.
 + * Entries with an empty group are treated as direct entries of a single
 + * implicit group, so the group view is skipped. */
 +static void
 +netmenu_build_groups(void)
- {
-+	int gi;
- 	int i;
--	/* This event is raised when a key is pressed or released. */
--	KeyboardGroup *group = wl_container_of(listener, group, key);
--	struct wlr_keyboard_key_event *event = data;
--
--	/* Translate libinput keycode -> xkbcommon */
--	uint32_t keycode = event->keycode + 8;
--	/* Get a list of keysyms based on the keymap for this keyboard */
--	const xkb_keysym_t *syms;
--	int nsyms = xkb_state_key_get_syms(
--			group->wlr_group->keyboard.xkb_state, keycode, &syms);
--
--	int handled = 0;
--	uint32_t mods = wlr_keyboard_get_modifiers(&group->wlr_group->keyboard);
- 
--	wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
--
--	/* If in screenshot-grab mode, don't run compositor keybindings; forward
--	 * keyboard events to the seat so the screenshot client can receive keys. */
--	if (screenshot_mode) {
--		wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
--		wlr_seat_keyboard_notify_key(seat, event->time_msec,
--				event->keycode, event->state);
--		return;
-+	net_group_count = 0;
-+	for (i = 0; i < net_entry_count; i++) {
-+	if (net_current_category < 0 ||
-+	    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
-+		continue;
-+	if (net_entries[i].group[0] == '\0')
-+		continue; /* direct entries: no sub-topic */
-+	for (gi = 0; gi < net_group_count; gi++) {
-+		if (strcmp(net_groups[gi], net_entries[i].group) == 0)
-+			break;
- 	}
--
--	/* On _press_ if there is no active screen locker,
--	 * attempt to process a compositor keybinding. */
--	if (!locked && event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
--		for (i = 0; i < nsyms; i++)
--			handled = keybinding(mods, syms[i]) || handled;
-+	if (gi >= net_group_count && net_group_count < MAX_NET_CATEGORIES) {
-+		strncpy(net_groups[net_group_count], net_entries[i].group, NET_CAT_LEN - 1);
-+		net_groups[net_group_count][NET_CAT_LEN - 1] = '\0';
-+		net_group_count++;
- 	}
--
--	/* Don't enable key repeat if we're now in screenshot mode (spawn-grab was called)
--	 * or if the keybinding spawned a process - we don't want to spawn it repeatedly. */
--	if (handled && !screenshot_mode && group->wlr_group->keyboard.repeat_info.delay > 0) {
--		group->mods = mods;
--		group->keysyms = syms;
--		group->nsyms = nsyms;
--		wl_event_source_timer_update(group->key_repeat_source,
--				group->wlr_group->keyboard.repeat_info.delay);
--	} else {
--		group->nsyms = 0;
--		wl_event_source_timer_update(group->key_repeat_source, 0);
- 	}
--
--	if (handled)
--		return;
--
--	wlr_seat_set_keyboard(seat, &group->wlr_group->keyboard);
--	/* Pass unhandled keycodes along to the client. */
--	wlr_seat_keyboard_notify_key(seat, event->time_msec,
--			event->keycode, event->state);
- }
- 
--void
--keypressmod(struct wl_listener *listener, void *data)
-+/* Build the list of entity sub-levels (e.g. each saved network or each BT
-+ * device) for the currently selected group. If the group has no sub-level
-+ * entries, net_group_has_sub is left 0 and the group's actions are shown
-+ * directly. */
-+static void
-+netmenu_build_subgroups(void)
  {
 -	/* This event is raised when a modifier key, such as shift or alt, is
 -	 * pressed. We simply communicate this to the client. */
@@ -3188,6 +3292,42 @@ index a1e049d..787e6ba 100644
 -	/* Send modifiers to the client. */
 -	wlr_seat_keyboard_notify_modifiers(seat,
 -			&group->wlr_group->keyboard.modifiers);
++	net_group_count = 0;
++	for (i = 0; i < net_entry_count; i++) {
++	if (net_current_category < 0 ||
++	    strcmp(net_entries[i].category, net_categories[net_current_category]) != 0)
++		continue;
++	if (net_entries[i].group[0] == '\0')
++		continue; /* direct entries: no sub-topic */
++	for (gi = 0; gi < net_group_count; gi++) {
++		if (strcmp(net_groups[gi], net_entries[i].group) == 0)
++			break;
++	}
++	if (gi >= net_group_count && net_group_count < MAX_NET_CATEGORIES) {
++		strncpy(net_groups[net_group_count], net_entries[i].group, NET_CAT_LEN - 1);
++		net_groups[net_group_count][NET_CAT_LEN - 1] = '\0';
++		net_group_count++;
++	}
++	}
+ }
+ 
+-int
+-keyrepeat(void *data)
++/* Build the list of entity sub-levels (e.g. each saved network or each BT
++ * device) for the currently selected group. If the group has no sub-level
++ * entries, net_group_has_sub is left 0 and the group's actions are shown
++ * directly. */
++static void
++netmenu_build_subgroups(void)
+ {
+-	KeyboardGroup *group = data;
++	int gi;
+ 	int i;
+-	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
+-		return 0;
+ 
+-	wl_event_source_timer_update(group->key_repeat_source,
+-			1000 / group->wlr_group->keyboard.repeat_info.rate);
 +	net_subgroup_count = 0;
 +	for (i = 0; i < net_entry_count; i++) {
 +	if (net_current_category < 0 ||
@@ -3208,22 +3348,15 @@ index a1e049d..787e6ba 100644
 +		net_subgroup_count++;
 +	}
 +	}
- }
++}
  
--int
--keyrepeat(void *data)
+-	for (i = 0; i < group->nsyms; i++)
+-		keybinding(group->mods, group->keysyms[i]);
 +/* Stop an in-flight asynchronous load: remove the event source, close the
 + * pipe and kill/reap the child. */
 +static void
 +netmenu_cancel_load(void)
- {
--	KeyboardGroup *group = data;
--	int i;
--	if (!group->nsyms || group->wlr_group->keyboard.repeat_info.rate <= 0)
--		return 0;
--
--	wl_event_source_timer_update(group->key_repeat_source,
--			1000 / group->wlr_group->keyboard.repeat_info.rate);
++{
 +	if (netmenu_source) {
 +		wl_event_source_remove(netmenu_source);
 +		netmenu_source = NULL;
@@ -3239,8 +3372,7 @@ index a1e049d..787e6ba 100644
 +	}
 +}
  
--	for (i = 0; i < group->nsyms; i++)
--		keybinding(group->mods, group->keysyms[i]);
+-	return 0;
 +/* Re-parse the accumulated netmenu output and re-render, preserving the
 + * user's navigation position by name. Called while the child is still
 + * streaming output (incremental render, so "Buscar dispositivos" grows item
@@ -3260,8 +3392,7 @@ index a1e049d..787e6ba 100644
 +	int keep = 0;
 +	int gi;
 +	int i;
- 
--	return 0;
++
 +	/* Remember where the user was so a background reload doesn't jump */
 +	if (net_current_category >= 0 && net_current_category < net_category_count) {
 +		strncpy(saved_cat, net_categories[net_current_category], NET_CAT_LEN - 1);
@@ -4135,16 +4266,11 @@ index a1e049d..787e6ba 100644
 -		wlr_cursor_set_xcursor(cursor, cursor_mgr, "default");
 -
 -	pointerfocus(c, surface, sx, sy, time);
- }
- 
+-}
+-
 -void
 -motionrelative(struct wl_listener *listener, void *data)
-+/* Height of the audio menu in cells, fitted to its current content so there
-+ * is no empty vertical space below the items. Min 3 cells (frame + 1 row),
-+ * max 25 cells (23 content rows, the old fixed size). */
-+static int
-+audiomenu_cells_h(void)
- {
+-{
 -	/* This event is forwarded by the cursor when a pointer emits a _relative_
 -	 * pointer motion event (i.e. a delta) */
 -	struct wlr_pointer_motion_event *event = data;
@@ -4155,40 +4281,22 @@ index a1e049d..787e6ba 100644
 -	 * the cursor around without any input. */
 -	motionnotify(event->time_msec, &event->pointer->base, event->delta_x, event->delta_y,
 -			event->unaccel_dx, event->unaccel_dy);
-+	int need_rows = audiomenu_item_count();
-+
-+	if (need_rows < 1)
-+		need_rows = 1;
-+	/* Dynamic height: the menu grows with its content. Safety cap so it never
-+	 * overflows the screen (anchored below the bar at m.y + cell_height). */
-+	if (selmon) {
-+		int cap = (selmon->m.height - cell_height) / cell_height;
-+		if (cap < 3)
-+			cap = 3;
-+		if (need_rows + 2 > cap)
-+			need_rows = cap - 2;
-+	}
-+	return need_rows + 2;
  }
  
 -void
 -moveresize(const Arg *arg)
-+/* Does `s` start with one of the audio action verbs? Action names can carry
-+ * suffixes (e.g. "Subir 5%"), so this is a prefix match; the read-only status
-+ * rows (legacy 4-column lines) start with '[' or a device name and never
-+ * collide with these verbs. */
++/* Height of the audio menu in cells, fitted to its current content so there
++ * is no empty vertical space below the items. Min 3 cells (frame + 1 row),
++ * max 25 cells (23 content rows, the old fixed size). */
 +static int
-+audiomenu_is_action(const char *s)
++audiomenu_cells_h(void)
  {
 -	if (cursor_mode != CurNormal && cursor_mode != CurPressed)
 -		return;
 -	xytonode(cursor->x, cursor->y, NULL, &grabc, NULL, NULL, NULL);
 -	if (!grabc || client_is_unmanaged(grabc) || grabc->isfullscreen)
 -		return;
-+	static const char *const verbs[] = {
-+		"Subir", "Bajar", "Silenciar", "Elegir", "Mutear", "Info", "Mic silencio"
-+	};
-+	size_t i;
++	int need_rows = audiomenu_item_count();
  
 -	switch (cursor_mode = arg->ui) {
 -	case CurMove:
@@ -4221,15 +4329,45 @@ index a1e049d..787e6ba 100644
 -		grabcy = grabc->geom.height;
 -		wlr_cursor_set_xcursor(cursor, cursor_mgr, "se-resize");
 -		break;
-+	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
-+		if (strncmp(s, verbs[i], strlen(verbs[i])) == 0)
-+			return 1;
++	if (need_rows < 1)
++		need_rows = 1;
++	/* Dynamic height: the menu grows with its content. Safety cap so it never
++	 * overflows the screen (anchored below the bar at m.y + cell_height). */
++	if (selmon) {
++		int cap = (selmon->m.height - cell_height) / cell_height;
++		if (cap < 3)
++			cap = 3;
++		if (need_rows + 2 > cap)
++			need_rows = cap - 2;
  	}
-+	return 0;
++	return need_rows + 2;
  }
  
 -void
 -outputmgrapply(struct wl_listener *listener, void *data)
++/* Does `s` start with one of the audio action verbs? Action names can carry
++ * suffixes (e.g. "Subir 5%"), so this is a prefix match; the read-only status
++ * rows (legacy 4-column lines) start with '[' or a device name and never
++ * collide with these verbs. */
++static int
++audiomenu_is_action(const char *s)
+ {
+-	struct wlr_output_configuration_v1 *config = data;
+-	outputmgrapplyortest(config, 0);
++	static const char *const verbs[] = {
++		"Subir", "Bajar", "Silenciar", "Elegir", "Mutear", "Info", "Mic silencio"
++	};
++	size_t i;
++
++	for (i = 0; i < sizeof(verbs) / sizeof(verbs[0]); i++) {
++		if (strncmp(s, verbs[i], strlen(verbs[i])) == 0)
++			return 1;
++	}
++	return 0;
+ }
+ 
+-void
+-outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
 +/* Parse a NUL-terminated audiomenu payload into dst[] and return the entry
 + * count. New format: "Category<TAB>Group<TAB>Subgroup<TAB>Action<TAB>exec".
 + * The legacy format "Category<TAB>Group<TAB>Name<TAB>exec" is still detected
@@ -4237,15 +4375,6 @@ index a1e049d..787e6ba 100644
 +static int
 +audiomenu_parse_buffer(const char *out, AudioEntry *dst, int max)
  {
--	struct wlr_output_configuration_v1 *config = data;
--	outputmgrapplyortest(config, 0);
--}
-+	const char *p = out;
-+	int n = 0;
- 
--void
--outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
--{
 -	/*
 -	 * Called when a client such as wlr-randr requests a change in output
 -	 * configuration. This is only one way that the layout can be changed,
@@ -4254,15 +4383,21 @@ index a1e049d..787e6ba 100644
 -	 */
 -	struct wlr_output_configuration_head_v1 *config_head;
 -	int ok = 1;
-+	while (n < max && *p) {
-+		char line[512];
-+		char *tok[6];
-+		int nt = 0;
++	const char *p = out;
++	int n = 0;
  
 -	wl_list_for_each(config_head, &config->heads, link) {
 -		struct wlr_output *wlr_output = config_head->state.output;
 -		Monitor *m = wlr_output->data;
 -		struct wlr_output_state state;
++	while (n < max && *p) {
++		char line[512];
++		char *tok[6] = {0};
++		int nt = 0;
+ 
+-		/* Ensure displays previously disabled by wlr-output-power-management-v1
+-		 * are properly handled*/
+-		m->asleep = 0;
 +		{
 +			const char *eol = strchr(p, '\n');
 +			size_t len = eol ? (size_t)(eol - p) : strlen(p);
@@ -4273,16 +4408,20 @@ index a1e049d..787e6ba 100644
 +			p = eol ? eol + 1 : p + len;
 +		}
  
--		/* Ensure displays previously disabled by wlr-output-power-management-v1
--		 * are properly handled*/
--		m->asleep = 0;
-+		if (!line[0])
-+			continue;
- 
 -		wlr_output_state_init(&state);
 -		wlr_output_state_set_enabled(&state, config_head->state.enabled);
 -		if (!config_head->state.enabled)
 -			goto apply_or_test;
++		if (!line[0])
++			continue;
+ 
+-		if (config_head->state.mode)
+-			wlr_output_state_set_mode(&state, config_head->state.mode);
+-		else
+-			wlr_output_state_set_custom_mode(&state,
+-					config_head->state.custom_mode.width,
+-					config_head->state.custom_mode.height,
+-					config_head->state.custom_mode.refresh);
 +		{
 +			char *t = line;
 +			while (nt < 6) {
@@ -4295,13 +4434,19 @@ index a1e049d..787e6ba 100644
 +			}
 +		}
  
--		if (config_head->state.mode)
--			wlr_output_state_set_mode(&state, config_head->state.mode);
--		else
--			wlr_output_state_set_custom_mode(&state,
--					config_head->state.custom_mode.width,
--					config_head->state.custom_mode.height,
--					config_head->state.custom_mode.refresh);
+-		wlr_output_state_set_transform(&state, config_head->state.transform);
+-		wlr_output_state_set_scale(&state, config_head->state.scale);
+-		wlr_output_state_set_adaptive_sync_enabled(&state,
+-				config_head->state.adaptive_sync_enabled);
++		/* Lines with fewer than 4 fields cannot be parsed in either layout.
++		 * tok[] is zero-initialized, but skip them defensively instead of
++		 * strncpy'ing empty/positional data. */
++		if (nt < 4)
++			continue;
+ 
+-apply_or_test:
+-		ok &= test ? wlr_output_test_state(wlr_output, &state)
+-				: wlr_output_commit_state(wlr_output, &state);
 +		if (nt >= 5 && audiomenu_is_action(tok[3])) {
 +			/* new: cat group subgroup action exec */
 +			strncpy(dst[n].category, tok[0], AUDIO_CAT_LEN - 1);
@@ -4327,10 +4472,12 @@ index a1e049d..787e6ba 100644
 +	return n;
 +}
  
--		wlr_output_state_set_transform(&state, config_head->state.transform);
--		wlr_output_state_set_scale(&state, config_head->state.scale);
--		wlr_output_state_set_adaptive_sync_enabled(&state,
--				config_head->state.adaptive_sync_enabled);
+-		/* Don't move monitors if position wouldn't change. This avoids
+-		 * wlroots marking the output as manually configured.
+-		 * wlr_output_layout_add does not like disabled outputs */
+-		if (!test && wlr_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
+-			wlr_output_layout_add(output_layout, wlr_output,
+-					config_head->state.x, config_head->state.y);
 +/* Rebuild audio_categories from the current audio_entries, preserving the
 + * existing category order so the list never reorders between refreshes. */
 +static void
@@ -4342,21 +4489,20 @@ index a1e049d..787e6ba 100644
 +	int ci;
 +	int j;
  
--apply_or_test:
--		ok &= test ? wlr_output_test_state(wlr_output, &state)
--				: wlr_output_commit_state(wlr_output, &state);
+-		wlr_output_state_finish(&state);
+-	}
 +	for (i = 0; i < oldn; i++)
 +		strcpy(old[i], audio_categories[i]);
  
--		/* Don't move monitors if position wouldn't change. This avoids
--		 * wlroots marking the output as manually configured.
--		 * wlr_output_layout_add does not like disabled outputs */
--		if (!test && wlr_output->enabled && (m->m.x != config_head->state.x || m->m.y != config_head->state.y))
--			wlr_output_layout_add(output_layout, wlr_output,
--					config_head->state.x, config_head->state.y);
+-	if (ok)
+-		wlr_output_configuration_v1_send_succeeded(config);
+-	else
+-		wlr_output_configuration_v1_send_failed(config);
+-	wlr_output_configuration_v1_destroy(config);
 +	audio_category_count = 0;
  
--		wlr_output_state_finish(&state);
+-	/* https://codeberg.org/tbwm/tbwm/issues/577 */
+-	updatemons(NULL, NULL);
 +	for (i = 0; i < oldn; i++) {
 +		int has = 0;
 +		for (ci = 0; ci < audio_entry_count; ci++) {
@@ -4381,16 +4527,7 @@ index a1e049d..787e6ba 100644
 +			audio_categories[audio_category_count][AUDIO_CAT_LEN - 1] = '\0';
 +			audio_category_count++;
 +		}
- 	}
--
--	if (ok)
--		wlr_output_configuration_v1_send_succeeded(config);
--	else
--		wlr_output_configuration_v1_send_failed(config);
--	wlr_output_configuration_v1_destroy(config);
--
--	/* https://codeberg.org/tbwm/tbwm/issues/577 */
--	updatemons(NULL, NULL);
++	}
  }
  
 -void
@@ -4421,10 +4558,6 @@ index a1e049d..787e6ba 100644
 +audiomenu_merge_parse(const AudioEntry *src, int src_count, int grow)
  {
 -	struct timespec now;
--
--	if (surface != seat->pointer_state.focused_surface &&
--			cfg_sloppyfocus && time && c && !client_is_unmanaged(c))
--		focusclient(c, 0);
 +	char scats[MAX_AUDIO_CATEGORIES][AUDIO_CAT_LEN];
 +	int scatn = 0;
 +	AudioEntry merged[MAX_AUDIO_ENTRIES];
@@ -4433,10 +4566,9 @@ index a1e049d..787e6ba 100644
 +	int j;
 +	int ci;
  
--	/* If surface is NULL, clear pointer focus */
--	if (!surface) {
--		wlr_seat_pointer_notify_clear_focus(seat);
--		return;
+-	if (surface != seat->pointer_state.focused_surface &&
+-			cfg_sloppyfocus && time && c && !client_is_unmanaged(c))
+-		focusclient(c, 0);
 +	for (i = 0; i < src_count; i++) {
 +		for (ci = 0; ci < scatn; ci++) {
 +			if (strcmp(scats[ci], src[i].category) == 0)
@@ -4447,21 +4579,20 @@ index a1e049d..787e6ba 100644
 +			scats[scatn][AUDIO_CAT_LEN - 1] = '\0';
 +			scatn++;
 +		}
- 	}
++	}
  
--	if (!time) {
--		clock_gettime(CLOCK_MONOTONIC, &now);
--		time = now.tv_sec * 1000 + now.tv_nsec / 1000000;
+-	/* If surface is NULL, clear pointer focus */
+-	if (!surface) {
+-		wlr_seat_pointer_notify_clear_focus(seat);
+-		return;
 +	for (i = 0; i < audio_entry_count && mc < MAX_AUDIO_ENTRIES; i++) {
 +		if (!audiomenu_cat_in_set(audio_entries[i].category, scats, scatn))
 +			merged[mc++] = audio_entries[i];
  	}
  
--	/* Let the client know that the mouse cursor has entered one
--	 * of its surfaces, and make keyboard focus follow if desired.
--	 * wlroots makes this a no-op if surface is already focused */
--	wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
--	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
+-	if (!time) {
+-		clock_gettime(CLOCK_MONOTONIC, &now);
+-		time = now.tv_sec * 1000 + now.tv_nsec / 1000000;
 +	if (grow) {
 +		for (i = 0; i < audio_entry_count && mc < MAX_AUDIO_ENTRIES; i++) {
 +			int dup = 0;
@@ -4478,8 +4609,13 @@ index a1e049d..787e6ba 100644
 +			if (!dup)
 +				merged[mc++] = audio_entries[i];
 +		}
-+	}
-+
+ 	}
+ 
+-	/* Let the client know that the mouse cursor has entered one
+-	 * of its surfaces, and make keyboard focus follow if desired.
+-	 * wlroots makes this a no-op if surface is already focused */
+-	wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+-	wlr_seat_pointer_notify_motion(seat, time, sx, sy);
 +	for (i = 0; i < src_count && mc < MAX_AUDIO_ENTRIES; i++)
 +		merged[mc++] = src[i];
 +
@@ -6696,13 +6832,27 @@ index a1e049d..787e6ba 100644
 -	arg.i = s7_integer(s7_car(args));
 -	incnmaster(&arg);
 -	return s7_t(sc);
+-}
 +unset_fullscreen:
 +	m = c->mon ? c->mon : xytomon(c->geom.x, c->geom.y);
 +	wl_list_for_each(w, &clients, link) {
 +		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
 +			setfullscreen(w, 0);
 +	}
-+
+ 
+-/* Scheme function: (toggle-tag n) - toggle tag visibility */
+-static s7_pointer scm_toggle_tag(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg;
+-	int n;
+-	if (!s7_is_integer(s7_car(args)))
+-		return s7_f(sc);
+-	n = s7_integer(s7_car(args));
+-	if (n < 1 || n > 9)
+-		return s7_f(sc);
+-	arg.ui = 1 << (n - 1);
+-	toggleview(&arg);
+-	return s7_t(sc);
 +	/* Ensure top layers remain above after a new client maps,
 +	 * but keep LyrFS at the very top so fullscreen covers the bar. */
 +	safe_raise_tree(layers[LyrOverlay], "mapnotify LyrOverlay");
@@ -6710,8 +6860,8 @@ index a1e049d..787e6ba 100644
 +	safe_raise_tree(layers[LyrFS], "mapnotify LyrFS");
  }
  
--/* Scheme function: (toggle-tag n) - toggle tag visibility */
--static s7_pointer scm_toggle_tag(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (toggle-window-tag n) - toggle tag on focused window */
+-static s7_pointer scm_toggle_window_tag(s7_scheme *sc, s7_pointer args)
 +void
 +maximizenotify(struct wl_listener *listener, void *data)
  {
@@ -6723,7 +6873,7 @@ index a1e049d..787e6ba 100644
 -	if (n < 1 || n > 9)
 -		return s7_f(sc);
 -	arg.ui = 1 << (n - 1);
--	toggleview(&arg);
+-	toggletag(&arg);
 -	return s7_t(sc);
 +	/* This event is raised when a client would like to maximize itself,
 +	 * typically because the user clicked on the maximize button on
@@ -6740,20 +6890,12 @@ index a1e049d..787e6ba 100644
 +		wlr_xdg_surface_schedule_configure(c->surface.xdg);
  }
  
--/* Scheme function: (toggle-window-tag n) - toggle tag on focused window */
--static s7_pointer scm_toggle_window_tag(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (toggle-repl) - toggle REPL input mode */
+-static s7_pointer scm_toggle_repl(s7_scheme *sc, s7_pointer args)
 +void
 +monocle(Monitor *m)
  {
--	Arg arg;
--	int n;
--	if (!s7_is_integer(s7_car(args)))
--		return s7_f(sc);
--	n = s7_integer(s7_car(args));
--	if (n < 1 || n > 9)
--		return s7_f(sc);
--	arg.ui = 1 << (n - 1);
--	toggletag(&arg);
+-	togglerepl(NULL);
 -	return s7_t(sc);
 +	Client *c;
 +	int n = 0;
@@ -6770,12 +6912,21 @@ index a1e049d..787e6ba 100644
 +		safe_raise_node(&c->scene->node, "dwindle/new_parent raise");
  }
  
--/* Scheme function: (toggle-repl) - toggle REPL input mode */
--static s7_pointer scm_toggle_repl(s7_scheme *sc, s7_pointer args)
+-/* Scheme: (move-window) - start moving focused window with mouse */
+-static s7_pointer scm_move_window(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg = {.ui = CurMove};
+-	moveresize(&arg);
+-	return s7_t(sc);
+-}
+-
+-/* Scheme: (resize-window) - start resizing focused window with mouse */
+-static s7_pointer scm_resize_window(s7_scheme *sc, s7_pointer args)
 +void
 +motionabsolute(struct wl_listener *listener, void *data)
  {
--	togglerepl(NULL);
+-	Arg arg = {.ui = CurResize};
+-	moveresize(&arg);
 -	return s7_t(sc);
 -}
 +	/* This event is forwarded by the cursor when a pointer emits an _absolute_
@@ -6786,42 +6937,14 @@ index a1e049d..787e6ba 100644
 +	struct wlr_pointer_motion_absolute_event *event = data;
 +	double lx, ly, dx, dy;
  
--/* Scheme: (move-window) - start moving focused window with mouse */
--static s7_pointer scm_move_window(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (zoom) - swap focused window with master */
+-static s7_pointer scm_zoom(s7_scheme *sc, s7_pointer args)
 -{
--	Arg arg = {.ui = CurMove};
--	moveresize(&arg);
+-	zoom(NULL);
 -	return s7_t(sc);
 -}
 +	if (!event->time_msec) /* this is 0 with virtual pointers */
 +		wlr_cursor_warp_absolute(cursor, &event->pointer->base, event->x, event->y);
- 
--/* Scheme: (resize-window) - start resizing focused window with mouse */
--static s7_pointer scm_resize_window(s7_scheme *sc, s7_pointer args)
--{
--	Arg arg = {.ui = CurResize};
--	moveresize(&arg);
--	return s7_t(sc);
-+	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
-+	dx = lx - cursor->x;
-+	dy = ly - cursor->y;
-+	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
- }
- 
--/* Scheme function: (zoom) - swap focused window with master */
--static s7_pointer scm_zoom(s7_scheme *sc, s7_pointer args)
-+void
-+motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
-+		double dx_unaccel, double dy_unaccel)
- {
--	zoom(NULL);
--	return s7_t(sc);
--}
-+	double sx = 0, sy = 0, sx_confined, sy_confined;
-+	Client *c = NULL, *w = NULL;
-+	LayerSurface *l = NULL;
-+	struct wlr_surface *surface = NULL;
-+	struct wlr_pointer_constraint_v1 *constraint;
  
 -/* Scheme function: (focus-stack delta) - focus next/prev in stack */
 -static s7_pointer scm_focus_stack(s7_scheme *sc, s7_pointer args)
@@ -6832,17 +6955,46 @@ index a1e049d..787e6ba 100644
 -	arg.i = s7_integer(s7_car(args));
 -	focusstack(&arg);
 -	return s7_t(sc);
--}
-+	/* Find the client under the pointer and send the event along. */
-+	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
++	wlr_cursor_absolute_to_layout_coords(cursor, &event->pointer->base, event->x, event->y, &lx, &ly);
++	dx = lx - cursor->x;
++	dy = ly - cursor->y;
++	motionnotify(event->time_msec, &event->pointer->base, dx, dy, dx, dy);
+ }
  
 -/* Scheme function: (view-all) - view all tags */
 -static s7_pointer scm_view_all(s7_scheme *sc, s7_pointer args)
--{
++void
++motionnotify(uint32_t time, struct wlr_input_device *device, double dx, double dy,
++		double dx_unaccel, double dy_unaccel)
+ {
 -	Arg arg;
 -	arg.ui = ~0;
 -	view(&arg);
 -	return s7_t(sc);
+-}
++	double sx = 0, sy = 0, sx_confined, sy_confined;
++	Client *c = NULL, *w = NULL;
++	LayerSurface *l = NULL;
++	struct wlr_surface *surface = NULL;
++	struct wlr_pointer_constraint_v1 *constraint;
+ 
+-/* Scheme function: (tag-all) - set window to all tags */
+-static s7_pointer scm_tag_all(s7_scheme *sc, s7_pointer args)
+-{
+-	Arg arg;
+-	arg.ui = ~0;
+-	tag(&arg);
+-	return s7_t(sc);
+-}
++	/* Find the client under the pointer and send the event along. */
++	xytonode(cursor->x, cursor->y, &surface, &c, NULL, &sx, &sy);
+ 
+-/* Scheme function: (eval-string str) - evaluate Scheme code string */
+-static s7_pointer scm_eval_string(s7_scheme *sc, s7_pointer args)
+-{
+-	if (!s7_is_string(s7_car(args)))
+-		return s7_f(sc);
+-	return s7_eval_c_string(sc, s7_string(s7_car(args)));
 -}
 +	if (cursor_mode == CurPressed && !seat->drag
 +			&& surface != seat->pointer_state.focused_surface
@@ -6853,12 +7005,10 @@ index a1e049d..787e6ba 100644
 +		sy = cursor->y - (l ? l->scene->node.y : w->geom.y);
 +	}
  
--/* Scheme function: (tag-all) - set window to all tags */
--static s7_pointer scm_tag_all(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (reload-config) - reload config file */
+-static s7_pointer scm_reload_config(s7_scheme *sc, s7_pointer args)
 -{
--	Arg arg;
--	arg.ui = ~0;
--	tag(&arg);
+-	load_config();
 -	return s7_t(sc);
 -}
 +	/* time is 0 in internal calls meant to restore pointer focus. */
@@ -6866,33 +7016,6 @@ index a1e049d..787e6ba 100644
 +		wlr_relative_pointer_manager_v1_send_relative_motion(
 +				relative_pointer_mgr, seat, (uint64_t)time * 1000,
 +				dx, dy, dx_unaccel, dy_unaccel);
- 
--/* Scheme function: (eval-string str) - evaluate Scheme code string */
--static s7_pointer scm_eval_string(s7_scheme *sc, s7_pointer args)
--{
--	if (!s7_is_string(s7_car(args)))
--		return s7_f(sc);
--	return s7_eval_c_string(sc, s7_string(s7_car(args)));
--}
-+		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
-+			cursorconstrain(constraint);
- 
--/* Scheme function: (reload-config) - reload config file */
--static s7_pointer scm_reload_config(s7_scheme *sc, s7_pointer args)
--{
--	load_config();
--	return s7_t(sc);
--}
-+		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
-+			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
-+			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
-+				sx = cursor->x - c->geom.x - c->bw;
-+				sy = cursor->y - c->geom.y - c->bw;
-+				if (wlr_region_confine(&active_constraint->region, sx, sy,
-+						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
-+					dx = sx_confined - sx;
-+					dy = sy_confined - sy;
-+				}
  
 -/* Scheme function: (focused-app-id) - get app_id of focused window */
 -static s7_pointer scm_focused_app_id(s7_scheme *sc, s7_pointer args)
@@ -6905,10 +7028,8 @@ index a1e049d..787e6ba 100644
 -		return s7_f(sc);
 -	return s7_make_string(sc, client_get_appid(c));
 -}
-+				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
-+					return;
-+			}
-+		}
++		wl_list_for_each(constraint, &pointer_constraints->constraints, link)
++			cursorconstrain(constraint);
  
 -/* Scheme function: (focused-title) - get title of focused window */
 -static s7_pointer scm_focused_title(s7_scheme *sc, s7_pointer args)
@@ -6921,8 +7042,16 @@ index a1e049d..787e6ba 100644
 -		return s7_f(sc);
 -	return s7_make_string(sc, client_get_title(c));
 -}
-+		wlr_cursor_move(cursor, device, dx, dy);
-+		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
++		if (active_constraint && cursor_mode != CurResize && cursor_mode != CurMove) {
++			toplevel_from_wlr_surface(active_constraint->surface, &c, NULL);
++			if (c && active_constraint->surface == seat->pointer_state.focused_surface) {
++				sx = cursor->x - c->geom.x - c->bw;
++				sy = cursor->y - c->geom.y - c->bw;
++				if (wlr_region_confine(&active_constraint->region, sx, sy,
++						sx + dx, sy + dy, &sx_confined, &sy_confined)) {
++					dx = sx_confined - sx;
++					dy = sy_confined - sy;
++				}
  
 -/* Scheme function: (current-tag) - get current tag number */
 -static s7_pointer scm_current_tag(s7_scheme *sc, s7_pointer args)
@@ -6937,6 +7066,34 @@ index a1e049d..787e6ba 100644
 -			return s7_make_integer(sc, i + 1);
 -	}
 -	return s7_make_integer(sc, 1);
+-}
++				if (active_constraint->type == WLR_POINTER_CONSTRAINT_V1_LOCKED)
++					return;
++			}
++		}
+ 
+-/* Scheme function: (window-count) - get number of visible windows */
+-static s7_pointer scm_window_count(s7_scheme *sc, s7_pointer args)
+-{
+-	Client *c;
+-	int count = 0;
+-	if (!selmon)
+-		return s7_make_integer(sc, 0);
+-	wl_list_for_each(c, &clients, link) {
+-		if (VISIBLEON(c, selmon))
+-			count++;
+-	}
+-	return s7_make_integer(sc, count);
+-}
++		wlr_cursor_move(cursor, device, dx, dy);
++		wlr_idle_notifier_v1_notify_activity(idle_notifier, seat);
+ 
+-/* Scheme function: (log msg) - print message to stderr */
+-static s7_pointer scm_log(s7_scheme *sc, s7_pointer args)
+-{
+-	if (s7_is_string(s7_car(args)))
+-		tbwm_log(TBWM_LOG_WARN, "tbwm-scm: %s\n", s7_string(s7_car(args)));
+-	return s7_t(sc);
 -}
 +		/* If compositor entered screenshot-grab mode, forward motion only to the
 +		 * seat (so the screenshot client can receive it) and avoid compositor UI. */
@@ -6953,18 +7110,30 @@ index a1e049d..787e6ba 100644
 +			return;
 +		}
  
--/* Scheme function: (window-count) - get number of visible windows */
--static s7_pointer scm_window_count(s7_scheme *sc, s7_pointer args)
+-/* Scheme function: (help) - show available commands */
+-static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
 -{
--	Client *c;
--	int count = 0;
--	if (!selmon)
--		return s7_make_integer(sc, 0);
--	wl_list_for_each(c, &clients, link) {
--		if (VISIBLEON(c, selmon))
--			count++;
--	}
--	return s7_make_integer(sc, count);
+-	repl_add_line("=== TurboWM Commands ===");
+-	repl_add_line("(spawn \"name\")     - run a program");
+-	repl_add_line("(quit)             - exit TurboWM");
+-	repl_add_line("(kill-client)      - close focused window");
+-	repl_add_line("(toggle-floating)  - toggle floating mode");
+-	repl_add_line("(toggle-fullscreen)- toggle fullscreen");
+-	repl_add_line("(focus-dir DIR)    - focus window in direction");
+-	repl_add_line("(swap-dir DIR)     - swap window in direction");
+-	repl_add_line("(view-tag N)       - switch to tag N");
+-	repl_add_line("(tag-window N)     - move window to tag N");
+-	repl_add_line("(reload-config)    - reload config.scm");
+-	repl_add_line("(bind-key K F)     - bind key to function");
+-	repl_add_line("=== Appearance ===");
+-	repl_add_line("(set-background-color C) - highlight/bg color");
+-	repl_add_line("(set-border-line-color C)- box-drawing color");
+-	repl_add_line("(set-tag-count N)  - virtual desktops (1-9)");
+-	repl_add_line("(set-show-time B)  - show time in bar");
+-	repl_add_line("(set-show-date B)  - show date in bar");
+-	repl_add_line("(set-status-text S)- custom status text");
+-	repl_add_line("DIR: DIR-LEFT/RIGHT/UP/DOWN");
+-	return s7_t(sc);
 -}
 +		/* Update selmon (even while dragging a window) */
 +		if (sloppyfocus)
@@ -6993,52 +7162,6 @@ index a1e049d..787e6ba 100644
 +			}
 +		}
  
--/* Scheme function: (log msg) - print message to stderr */
--static s7_pointer scm_log(s7_scheme *sc, s7_pointer args)
--{
--	if (s7_is_string(s7_car(args)))
--		tbwm_log(TBWM_LOG_WARN, "tbwm-scm: %s\n", s7_string(s7_car(args)));
--	return s7_t(sc);
--}
-+		/* Update net menu hover selection */
-+		if (netmenu_active && selmon && !net_password_mode) {
-+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
-+			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
-+			menu_y = selmon->m.y + cell_height;
-+			menu_w = 25 * cell_width;
-+			menu_h = netmenu_cells_h() * cell_height;
- 
--/* Scheme function: (help) - show available commands */
--static s7_pointer scm_help(s7_scheme *sc, s7_pointer args)
--{
--	repl_add_line("=== TurboWM Commands ===");
--	repl_add_line("(spawn \"name\")     - run a program");
--	repl_add_line("(quit)             - exit TurboWM");
--	repl_add_line("(kill-client)      - close focused window");
--	repl_add_line("(toggle-floating)  - toggle floating mode");
--	repl_add_line("(toggle-fullscreen)- toggle fullscreen");
--	repl_add_line("(focus-dir DIR)    - focus window in direction");
--	repl_add_line("(swap-dir DIR)     - swap window in direction");
--	repl_add_line("(view-tag N)       - switch to tag N");
--	repl_add_line("(tag-window N)     - move window to tag N");
--	repl_add_line("(reload-config)    - reload config.scm");
--	repl_add_line("(bind-key K F)     - bind key to function");
--	repl_add_line("=== Appearance ===");
--	repl_add_line("(set-background-color C) - highlight/bg color");
--	repl_add_line("(set-border-line-color C)- box-drawing color");
--	repl_add_line("(set-tag-count N)  - virtual desktops (1-9)");
--	repl_add_line("(set-show-time B)  - show time in bar");
--	repl_add_line("(set-show-date B)  - show date in bar");
--	repl_add_line("(set-status-text S)- custom status text");
--	repl_add_line("DIR: DIR-LEFT/RIGHT/UP/DOWN");
--	return s7_t(sc);
--}
-+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
-+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
-+				int rel_y = (int)(cursor->y - menu_y);
-+				int hovered_row = rel_y / cell_height;
- 
 -/* Scheme function: (chvt n) - switch to virtual terminal n */
 -static s7_pointer scm_chvt(s7_scheme *sc, s7_pointer args)
 -{
@@ -7051,16 +7174,14 @@ index a1e049d..787e6ba 100644
 -	chvt(&arg);
 -	return s7_t(sc);
 -}
-+				/* Row 0 is title bar, rows 1+ are content */
-+				if (hovered_row >= 1 && hovered_row <= netmenu_cells_h() - 2) {
-+					int new_selected = hovered_row - 1; /* 0-indexed content row */
-+					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
-+						net_selected_row = new_selected;
-+						updatenetmenu();
-+					}
-+				}
-+			}
-+		}
++		/* Update net menu hover selection */
++		if (netmenu_active && selmon && !net_password_mode) {
++			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
++			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
++			menu_x = centered_menu_x(selmon, net_center, 25 * cell_width);
++			menu_y = selmon->m.y + cell_height;
++			menu_w = 25 * cell_width;
++			menu_h = netmenu_cells_h() * cell_height;
  
 -/* Scheme function: (set-repl-log-level n) - set REPL log threshold (0=DEBUG,1=INFO,2=WARN,3=ERROR) */
 -static s7_pointer scm_set_repl_log_level(s7_scheme *sc, s7_pointer args)
@@ -7071,14 +7192,10 @@ index a1e049d..787e6ba 100644
 -	tbwm_log(TBWM_LOG_INFO, "set-repl-log-level: set to %d\n", cfg_repl_log_level);
 -	return s7_t(sc);
 -}
-+		/* Update audio menu hover selection */
-+		if (audiomenu_active && selmon) {
-+			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-+			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
-+			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
-+			menu_y = selmon->m.y + cell_height;
-+			menu_w = 25 * cell_width;
-+			menu_h = audiomenu_cells_h() * cell_height;
++			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
++			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
++				int rel_y = (int)(cursor->y - menu_y);
++				int hovered_row = rel_y / cell_height;
  
 -/* Scheme function: (set-title-scroll-mode mode) - set scroll mode (0=truncate, 1=scroll) */
 -static s7_pointer scm_set_title_scroll_mode(s7_scheme *sc, s7_pointer args)
@@ -7088,11 +7205,7 @@ index a1e049d..787e6ba 100644
 -	title_scroll_mode = s7_integer(s7_car(args)) ? 1 : 0;
 -	return s7_t(sc);
 -}
-+			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
-+			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
-+				int rel_y = (int)(cursor->y - menu_y);
-+				int hovered_row = rel_y / cell_height;
- 
+-
 -/* Scheme function: (set-title-scroll-speed speed) - set scroll speed (pixels per tick) */
 -static s7_pointer scm_set_title_scroll_speed(s7_scheme *sc, s7_pointer args)
 -{
@@ -7103,11 +7216,11 @@ index a1e049d..787e6ba 100644
 -	return s7_t(sc);
 -}
 +				/* Row 0 is title bar, rows 1+ are content */
-+				if (hovered_row >= 1 && hovered_row <= audiomenu_cells_h() - 2) {
++				if (hovered_row >= 1 && hovered_row <= netmenu_cells_h() - 2) {
 +					int new_selected = hovered_row - 1; /* 0-indexed content row */
-+					if (new_selected != audio_selected_row && new_selected < audiomenu_item_count()) {
-+						audio_selected_row = new_selected;
-+						updatemenuaudio();
++					if (new_selected != net_selected_row && new_selected < netmenu_item_count()) {
++						net_selected_row = new_selected;
++						updatenetmenu();
 +					}
 +				}
 +			}
@@ -7123,15 +7236,14 @@ index a1e049d..787e6ba 100644
 -static SchemeBinding *scheme_bindings = NULL;
 -static int scheme_binding_count = 0;
 -static int scheme_binding_capacity = 0;
-+		/* Update tray menu hover selection */
-+		if (traymenu_active && selmon) {
++		/* Update audio menu hover selection */
++		if (audiomenu_active && selmon) {
 +			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
-+			int items = (tray_level == 0) ? tray_items_count : tray_visible_count();
 +			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
-+			menu_x = centered_menu_x(selmon, settings_center, 25 * cell_width);
++			menu_x = centered_menu_x(selmon, audio_center, 25 * cell_width);
 +			menu_y = selmon->m.y + cell_height;
 +			menu_w = 25 * cell_width;
-+			menu_h = traymenu_cells_h() * cell_height;
++			menu_h = audiomenu_cells_h() * cell_height;
  
 -static void
 -ensure_scheme_bindings_capacity(int extra)
@@ -7157,7 +7269,7 @@ index a1e049d..787e6ba 100644
 +			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
 +			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
 +				int rel_y = (int)(cursor->y - menu_y);
-+				int hovered_row = rel_y / cell_height - 1; /* 0 = title bar */
++				int hovered_row = rel_y / cell_height;
  
 -/* Parse modifier string like "M-S-" to modifier mask */
 -static uint32_t parse_modifiers(const char *str, const char **rest)
@@ -7170,16 +7282,17 @@ index a1e049d..787e6ba 100644
 -		case 'C': mods |= WLR_MODIFIER_CTRL; break;   /* Control */
 -		case 'A': mods |= WLR_MODIFIER_ALT; break;    /* Alt */
 +				/* Row 0 is title bar, rows 1+ are content */
-+				if (hovered_row >= 0 && hovered_row < items) {
-+					if (hovered_row != tray_row) {
-+						tray_row = hovered_row;
-+						updatetraymenu();
++				if (hovered_row >= 1 && hovered_row <= audiomenu_cells_h() - 2) {
++					int new_selected = hovered_row - 1; /* 0-indexed content row */
++					if (new_selected != audio_selected_row && new_selected < audiomenu_item_count()) {
++						audio_selected_row = new_selected;
++						updatemenuaudio();
 +					}
 +				}
 +			}
  		}
 -		str += 2;
- 	}
+-	}
 -	*rest = str;
 -	return mods;
 -}
@@ -7191,23 +7304,43 @@ index a1e049d..787e6ba 100644
 -	s7_pointer callback;
 -	uint32_t mods;
 -	xkb_keysym_t sym;
--
+ 
 -	if (!s7_is_string(s7_car(args)))
 -		return s7_f(sc);
 -	keystr = s7_string(s7_car(args));
 -	callback = s7_cadr(args);
--
++		/* Update tray menu hover selection */
++		if (traymenu_active && selmon) {
++			int settings_center, audio_center, net_center, menu_x, menu_y, menu_w, menu_h;
++			int items = (tray_level == 0) ? tray_items_count : tray_visible_count();
++			bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
++			menu_x = centered_menu_x(selmon, settings_center, 25 * cell_width);
++			menu_y = selmon->m.y + cell_height;
++			menu_w = 25 * cell_width;
++			menu_h = traymenu_cells_h() * cell_height;
+ 
 -	if (!s7_is_procedure(callback))
 -		return s7_f(sc);
++			if (cursor->x >= menu_x && cursor->x < menu_x + menu_w &&
++			    cursor->y >= menu_y && cursor->y < menu_y + menu_h) {
++				int rel_y = (int)(cursor->y - menu_y);
++				int hovered_row = rel_y / cell_height - 1; /* 0 = title bar */
  
 -	mods = parse_modifiers(keystr, &keyname);
 -	sym = xkb_keysym_from_name(keyname, XKB_KEYSYM_CASE_INSENSITIVE);
 -	if (sym == XKB_KEY_NoSymbol) {
 -		tbwm_log(TBWM_LOG_ERROR, "tbwm-scm: unknown key: %s", keyname);
 -		return s7_f(sc);
--	}
-+	/* Update drag icon's position */
-+	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
++				/* Row 0 is title bar, rows 1+ are content */
++				if (hovered_row >= 0 && hovered_row < items) {
++					if (hovered_row != tray_row) {
++						tray_row = hovered_row;
++						updatetraymenu();
++					}
++				}
++			}
++		}
+ 	}
  
 -	/* If an identical binding exists, replace it (and unprotect the old one). */
 -	for (int i = 0; i < scheme_binding_count; i++) {
@@ -7220,6 +7353,9 @@ index a1e049d..787e6ba 100644
 -			scheme_bindings[i].gc_loc = gc_loc;
 -			file_debug_log("tbwm-scm: replaced binding %s (idx=%d)\n", keystr, i);
 -			return s7_t(sc);
++	/* Update drag icon's position */
++	wlr_scene_node_set_position(&drag_icon->node, (int)round(cursor->x), (int)round(cursor->y));
++
 +	/* If we are currently grabbing the mouse, handle and return */
 +	if (cursor_mode == CurMove) {
 +		/* Move the grabbed client to the new position, snapped to grid */
@@ -7374,7 +7510,9 @@ index a1e049d..787e6ba 100644
  
 -/* Check and execute Scheme keybindings - returns 1 if handled */
 -int check_scheme_bindings(uint32_t mods, xkb_keysym_t sym)
--{
++void
++outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
+ {
 -	int i;
 -	xkb_keysym_t sym_lower = xkb_keysym_to_lower(sym);
 -	char symname[64] = {0};
@@ -7405,9 +7543,6 @@ index a1e049d..787e6ba 100644
 -	}
 -	return 0;
 -}
-+void
-+outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test)
-+{
 +	/*
 +	 * Called when a client such as wlr-randr requests a change in output
 +	 * configuration. This is only one way that the layout can be changed,
@@ -7664,16 +7799,9 @@ index a1e049d..787e6ba 100644
 -	cfg_show_date = s7_boolean(sc, s7_car(args)) ? 1 : 0;
 -	updatebars();
 -	return s7_t(sc);
+-}
 +	if (!m)
 +		return;
-+
-+	m->gamma_lut_changed = 1; /* Reapply gamma LUT when re-enabling the ouput */
-+	wlr_output_state_set_enabled(&state, event->mode);
-+	wlr_output_commit_state(m->wlr_output, &state);
-+
-+	m->asleep = !event->mode;
-+	updatemons(NULL, NULL);
- }
  
 -/* Scheme: (set-status-text "text") - custom status text (replaces date/time if non-empty) */
 -static s7_pointer scm_set_status_text(s7_scheme *sc, s7_pointer args) {
@@ -7682,22 +7810,19 @@ index a1e049d..787e6ba 100644
 -	cfg_status_text[sizeof(cfg_status_text) - 1] = '\0';
 -	updatebars();
 -	return s7_t(sc);
-+void
-+quit(const Arg *arg)
-+{
-+	wl_display_terminate(dpy);
- }
+-}
++	m->gamma_lut_changed = 1; /* Reapply gamma LUT when re-enabling the ouput */
++	wlr_output_state_set_enabled(&state, event->mode);
++	wlr_output_commit_state(m->wlr_output, &state);
  
 -/* Scheme: (set-bar-autohide b) - enable/disable hiding bar when a client is fullscreen */
 -static s7_pointer scm_set_bar_autohide(s7_scheme *sc, s7_pointer args) {
 -	cfg_bar_autohide = s7_boolean(sc, s7_car(args)) ? 1 : 0;
 -	updatebars();
 -	return s7_t(sc);
--}
-+void
-+refresh(const Arg *arg)
-+{
-+	Monitor *m;
++	m->asleep = !event->mode;
++	updatemons(NULL, NULL);
+ }
  
 -/* Scheme: (on-startup cmd1 cmd2 ...) - register commands to run on startup */
 -static s7_pointer scm_on_startup(s7_scheme *sc, s7_pointer args) {
@@ -7714,17 +7839,14 @@ index a1e049d..787e6ba 100644
 -		if (s7_is_string(s7_car(arg))) {
 -			cfg_startup_cmds[cfg_startup_cmd_count] = strdup(s7_string(s7_car(arg)));
 -			cfg_startup_cmd_count++;
-+	/* Force re-arrangement of all monitors */
-+	wl_list_for_each(m, &mons, link) {
-+		if (m->wlr_output->enabled) {
-+			arrangelayers(m);
-+			m->w = m->m;
-+			updatebar(m);
-+			arrange(m);
- 		}
- 	}
+-		}
+-	}
 -	tbwm_log(TBWM_LOG_INFO, "tbwm: on-startup: registered %d commands\n", cfg_startup_cmd_count);
 -	return s7_t(sc);
++void
++quit(const Arg *arg)
++{
++	wl_display_terminate(dpy);
  }
  
 -/* Run startup commands (called once after compositor is ready) */
@@ -7739,9 +7861,23 @@ index a1e049d..787e6ba 100644
 -			tbwm_log(TBWM_LOG_INFO, "tbwm: on-startup: spawning %s\n", cfg_startup_cmds[i]);
 -			Arg a = { .v = (const char*[]){ "/bin/sh", "-c", cfg_startup_cmds[i], NULL } };
 -			spawn(&a);
--		}
--	}
--}
++void
++refresh(const Arg *arg)
++{
++	Monitor *m;
++
++	/* Force re-arrangement of all monitors */
++	wl_list_for_each(m, &mons, link) {
++		if (m->wlr_output->enabled) {
++			arrangelayers(m);
++			m->w = m->m;
++			updatebar(m);
++			arrange(m);
+ 		}
+ 	}
+ }
+ 
+-/* ========== END NEW CONFIG API ========== */
 +void
 +rendermon(struct wl_listener *listener, void *data)
 +{
@@ -7752,9 +7888,6 @@ index a1e049d..787e6ba 100644
 +	struct wlr_output_state pending = {0};
 +	struct timespec now;
 +	bool needs_commit = false;
- 
--/* ========== END NEW CONFIG API ========== */
-+	clock_gettime(CLOCK_MONOTONIC, &now);
  
 -/* Scheme: (set-font path size) */
 -static s7_pointer scm_set_font(s7_scheme *sc, s7_pointer args) {
@@ -7780,6 +7913,8 @@ index a1e049d..787e6ba 100644
 -		tbwm_log(TBWM_LOG_INFO, "tbwm: font changed to %s %d (%dx%d cells)\n", cfg_font_path, cfg_font_size, cell_width, cell_height);
 -		updateframes();
 -		updatebars();
++	clock_gettime(CLOCK_MONOTONIC, &now);
++
 +	/* Check if scene needs a commit (has pending damage) */
 +	needs_commit = wlr_scene_output_needs_frame(m->scene_output);
 +	if (!needs_commit) {
@@ -7904,13 +8039,19 @@ index a1e049d..787e6ba 100644
 -	cfg_rule_count++;
 -	
 -	return s7_t(sc);
--}
--
++		wlr_data_source_destroy(event->drag->source);
+ }
+ 
 -/* Scheme: (clear-rules) */
 -static s7_pointer scm_clear_rules(s7_scheme *sc, s7_pointer args) {
 -	cfg_rule_count = 0;
 -	return s7_t(sc);
-+		wlr_data_source_destroy(event->drag->source);
++void
++requestmonstate(struct wl_listener *listener, void *data)
++{
++	struct wlr_output_event_request_state *event = data;
++	wlr_output_commit_state(event->output, event->state);
++	updatemons(NULL, NULL);
  }
  
 -/* Scheme: (bind-mouse "M-button1" callback) */
@@ -7949,7 +8090,13 @@ index a1e049d..787e6ba 100644
 -			return s7_t(sc);
 -		}
 -	}
--
++void
++resize(Client *c, struct wlr_box geo, int interact)
++{
++	struct wlr_box *bbox;
++	struct wlr_box clip;
++	int frame_inset;
+ 
 -	/* Ensure capacity and append new mouse binding */
 -	ensure_mouse_bindings_capacity(1);
 -	s7_int gc_loc = s7_gc_protect(sc, callback);
@@ -7960,33 +8107,20 @@ index a1e049d..787e6ba 100644
 -	cfg_mouse_binding_count++;
 -	file_debug_log("tbwm-scm: bound mouse %s (mod=0x%x, btn=%u)\n", spec, mods, button);
 -	return s7_t(sc);
-+void
-+requestmonstate(struct wl_listener *listener, void *data)
-+{
-+	struct wlr_output_event_request_state *event = data;
-+	wlr_output_commit_state(event->output, event->state);
-+	updatemons(NULL, NULL);
- }
+-}
++	if (!c->mon || !client_surface(c)->mapped)
++		return;
  
 -/* Internal: unprotect and clear mouse bindings */
 -static void
 -clear_mouse_bindings_internal(void)
-+void
-+resize(Client *c, struct wlr_box geo, int interact)
- {
+-{
 -	int i;
 -	for (i = 0; i < cfg_mouse_binding_count; i++) {
 -		if (cfg_mouse_bindings[i].gc_loc >= 0)
 -			s7_gc_unprotect_at(sc, cfg_mouse_bindings[i].gc_loc);
 -		cfg_mouse_bindings[i].callback = s7_nil(sc);
 -		cfg_mouse_bindings[i].gc_loc = -1;
-+	struct wlr_box *bbox;
-+	struct wlr_box clip;
-+	int frame_inset;
-+
-+	if (!c->mon || !client_surface(c)->mapped)
-+		return;
-+
 +	bbox = interact ? &sgeom : (c->isfullscreen ? &c->mon->m : &c->mon->w);
 +
 +	/* Snap to grid if not fullscreen */
@@ -8222,37 +8356,10 @@ index a1e049d..787e6ba 100644
 -	/* Define constants for monitor directions */
 -	s7_define_variable(sc, "MON-LEFT", s7_make_integer(sc, WLR_DIRECTION_LEFT));
 -	s7_define_variable(sc, "MON-RIGHT", s7_make_integer(sc, WLR_DIRECTION_RIGHT));
--}
 +	/* At this point the outputs are initialized, choose initial selmon based on
 +	 * cursor position, and set default cursor image */
 +	selmon = xytomon(cursor->x, cursor->y);
- 
--static const char *default_config_parts[] = {
--";;; TurboWM config.scm - Scheme configuration\n"
--";;; All settings can be changed at runtime with (reload-config)\n"
--"\n"
--";;;; ==================== APPEARANCE ====================\n"
--"\n"
--";; Colors - Format: #RRGGBB\n"
--";; Background/REPL color (black)\n"
--"(set-bg-color \"#000000\")\n"
--"\n"
--";; Background/REPL text color (grey)\n"
--"(set-bg-text-color \"#aaaaaa\")\n"
--"\n"
--";; Status bar background (the blue)\n"
--"(set-bar-color \"#0000aa\")\n"
--"\n"
--";; Status bar text color (grey)\n"
--"(set-bar-text-color \"#aaaaaa\")\n"
--"\n"
--";; Window highlight/border background (the blue)\n"
--"(set-border-color \"#0000aa\")\n"
--"\n"
--";; Box-drawing border lines (the grey)\n"
--"(set-border-line-color \"#aaaaaa\")\n"
--"\n"
--";; Number of virtual desktops/tags (1-9)\n"
++
 +	/* TODO hack to get cursor to display in its initial location (100, 100)
 +	 * instead of (0, 0) and then jumping. Still may not be fully
 +	 * initialized, as the image/coordinates are not transformed for the
@@ -8268,9 +8375,11 @@ index a1e049d..787e6ba 100644
 +	scroll_timer = wl_event_loop_add_timer(event_loop, scrolltimer, NULL);
 +	wl_event_source_timer_update(scroll_timer, 33);
 +
-+	/* Start timing report timer (every 500ms) */
++	/* Start timing report timer (every 500ms) - only in profile builds */
++#ifdef TBWM_PROFILE
 +	timing_timer = wl_event_loop_add_timer(event_loop, timingtimer, NULL);
 +	wl_event_source_timer_update(timing_timer, 500);
++#endif
 +
 +	/* Timer for netmenu auto-rescan (only armed while on a search sub-topic) */
 +	net_scan_timer = wl_event_loop_add_timer(event_loop, netmenu_scan_keepalive, NULL);
@@ -8283,7 +8392,7 @@ index a1e049d..787e6ba 100644
 +	 * pairing state changes. */
 +	bluetooth_init(dpy, netmenu_scan_is_active, updatenetmenu);
 +
-+	/* Dump a backtrace to TBWM_CRASH_LOG if we abort/segfault, then
++	/* Dump a backtrace to $HOME/tbwm-crash.log if we abort/segfault, then
 +	 * re-raise so the behaviour matches a plain crash. */
 +	install_crash_handlers();
 +
@@ -10043,38 +10152,10 @@ index a1e049d..787e6ba 100644
 +	/* Define constants for monitor directions */
 +	s7_define_variable(sc, "MON-LEFT", s7_make_integer(sc, WLR_DIRECTION_LEFT));
 +	s7_define_variable(sc, "MON-RIGHT", s7_make_integer(sc, WLR_DIRECTION_RIGHT));
-+}
-+
-+static const char *default_config_parts[] = {
-+";;; TurboWM config.scm - Scheme configuration\n"
-+";;; All settings can be changed at runtime with (reload-config)\n"
-+"\n"
-+";;;; ==================== APPEARANCE ====================\n"
-+"\n"
-+";; Colors - Format: #RRGGBB\n"
-+";; Background/REPL color (black)\n"
-+"(set-bg-color \"#000000\")\n"
-+"\n"
-+";; Background/REPL text color (grey)\n"
-+"(set-bg-text-color \"#aaaaaa\")\n"
-+"\n"
-+";; Status bar background (the blue)\n"
-+"(set-bar-color \"#0000aa\")\n"
-+"\n"
-+";; Status bar text color (grey)\n"
-+"(set-bar-text-color \"#aaaaaa\")\n"
-+"\n"
-+";; Window highlight/border background (the blue)\n"
-+"(set-border-color \"#0000aa\")\n"
-+"\n"
-+";; Box-drawing border lines (the grey)\n"
-+"(set-border-line-color \"#aaaaaa\")\n"
-+"\n"
-+";; Number of virtual desktops/tags (1-9)\n"
- "(set-tag-count 9)\n"
- "\n"
- ";;;; ==================== STARTUP COMMANDS ====================\n"
-@@ -6278,6 +9449,10 @@ static const char *default_config_parts[] = {
+ }
+ 
+ static const char *default_config_parts[] = {
+@@ -6278,6 +9495,10 @@ static const char *default_config_parts[] = {
  ";; Uncomment and customize as needed:\n"
  ";; (on-startup \"waybar\" \"mako\" \"foot --server\")\n"
  "\n"
@@ -10085,7 +10166,7 @@ index a1e049d..787e6ba 100644
  ";;;; ==================== STATUS BAR ====================\n"
  "\n"
  ";; Show date and time in status bar\n"
-@@ -6328,6 +9503,9 @@ static const char *default_config_parts[] = {
+@@ -6328,991 +9549,3804 @@ static const char *default_config_parts[] = {
  ";; App menu\n"
  "(bind-key \"M-x\" (lambda () (toggle-appmenu)))\n"
  "\n"
@@ -10095,15 +10176,20 @@ index a1e049d..787e6ba 100644
  ";; Close window\n"
  "(bind-key \"M-q\" (lambda () (kill-client)))\n"
  "\n"
-@@ -6340,979 +9518,3778 @@ static const char *default_config_parts[] = {
- "(bind-key \"M-k\" (lambda () (focus-dir DIR-UP)))\n"
- "(bind-key \"M-l\" (lambda () (focus-dir DIR-RIGHT)))\n"
+ ";; Quit TurboWM\n"
+ "(bind-key \"M-S-e\" (lambda () (quit)))\n"
  "\n"
--";; Focus direction (arrow keys)\n"
--"(bind-key \"M-Left\" (lambda () (focus-dir DIR-LEFT)))\n"
--"(bind-key \"M-Down\" (lambda () (focus-dir DIR-DOWN)))\n"
--"(bind-key \"M-Up\" (lambda () (focus-dir DIR-UP)))\n"
--"(bind-key \"M-Right\" (lambda () (focus-dir DIR-RIGHT)))\n"
+-";; Focus direction (vim keys)\n"
+-"(bind-key \"M-h\" (lambda () (focus-dir DIR-LEFT)))\n"
+-"(bind-key \"M-j\" (lambda () (focus-dir DIR-DOWN)))\n"
+-"(bind-key \"M-k\" (lambda () (focus-dir DIR-UP)))\n"
+-"(bind-key \"M-l\" (lambda () (focus-dir DIR-RIGHT)))\n"
++";; Focus direction (vim keys)\n"
++"(bind-key \"M-h\" (lambda () (focus-dir DIR-LEFT)))\n"
++"(bind-key \"M-j\" (lambda () (focus-dir DIR-DOWN)))\n"
++"(bind-key \"M-k\" (lambda () (focus-dir DIR-UP)))\n"
++"(bind-key \"M-l\" (lambda () (focus-dir DIR-RIGHT)))\n"
++"\n"
 +";; Focus direction (arrow keys)\n"
 +"(bind-key \"M-Left\" (lambda () (focus-dir DIR-LEFT)))\n"
 +"(bind-key \"M-Down\" (lambda () (focus-dir DIR-DOWN)))\n"
@@ -10319,7 +10405,12 @@ index a1e049d..787e6ba 100644
 +"regular5=aa00aa  # magenta\n"
 +"regular6=00aaaa  # cyan\n"
 +"regular7=aaaaaa  # white\n"
-+"\n"
+ "\n"
+-";; Focus direction (arrow keys)\n"
+-"(bind-key \"M-Left\" (lambda () (focus-dir DIR-LEFT)))\n"
+-"(bind-key \"M-Down\" (lambda () (focus-dir DIR-DOWN)))\n"
+-"(bind-key \"M-Up\" (lambda () (focus-dir DIR-UP)))\n"
+-"(bind-key \"M-Right\" (lambda () (focus-dir DIR-RIGHT)))\n"
 +"## Bright colors (8-15)\n"
 +"bright0=555555  # bright black\n"
 +"bright1=ff5555  # bright red\n"
@@ -10356,10 +10447,18 @@ index a1e049d..787e6ba 100644
 +	if (!home)
 +		return;
 +
-+	/* Install font if needed */
++	/* Install font if needed. Prefer the system-installed copy (install.sh
++	 * drops it in /usr/share/fonts/tbwm/), then fall back to a copy in the
++	 * user's home. */
 +	snprintf(fontdir, sizeof(fontdir), "%s/.local/share/fonts", home);
 +	snprintf(fontsrc, sizeof(fontsrc), "%s/PxPlus_IBM_VGA_8x16.ttf", home);
 +	snprintf(fontdst, sizeof(fontdst), "%s/PxPlus_IBM_VGA_8x16.ttf", fontdir);
++
++	if (stat(fontdst, &st) != 0) {
++		char sysfont[] = "/usr/share/fonts/tbwm/PxPlus_IBM_VGA_8x16.ttf";
++		if (stat(sysfont, &st) == 0)
++			snprintf(fontsrc, sizeof(fontsrc), "%s", sysfont);
++	}
 +
 +	if (stat(fontdst, &st) != 0 && stat(fontsrc, &st) == 0) {
 +		/* Create font directory */
@@ -10566,16 +10665,18 @@ index a1e049d..787e6ba 100644
 +	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
 +}
 +
++#ifdef TBWM_PROFILE
 +int
 +timingtimer(void *data)
 +{
-+	/* Report CPU timing statistics every 500ms */
++	/* Report CPU timing statistics every 500ms (profile builds only) */
 +	fprintf(stderr, "[TIMING TICK]\n");
 +	fflush(stderr);
 +	timing_report();
 +	wl_event_source_timer_update(timing_timer, 500);
 +	return 0;
 +}
++#endif
 +
 +int
 +bartimer(void *data)
@@ -11218,32 +11319,7 @@ index a1e049d..787e6ba 100644
 +		wl_event_source_timer_update(scroll_timer, 33);
 +	/* Don't drop - we're caching the buffer for reuse */
 +}
- 
--";; Fullscreen and floating\n"
--"(bind-key \"M-f\" (lambda () (toggle-fullscreen)))\n"
--"(bind-key \"M-S-space\" (lambda () (toggle-floating)))\n"
--"\n"
--";; Tags 1-9\n"
--"(bind-key \"M-1\" (lambda () (view-tag 1)))\n"
--"(bind-key \"M-2\" (lambda () (view-tag 2)))\n"
--"(bind-key \"M-3\" (lambda () (view-tag 3)))\n"
--"(bind-key \"M-4\" (lambda () (view-tag 4)))\n"
--"(bind-key \"M-5\" (lambda () (view-tag 5)))\n"
--"(bind-key \"M-6\" (lambda () (view-tag 6)))\n"
--"(bind-key \"M-7\" (lambda () (view-tag 7)))\n"
--"(bind-key \"M-8\" (lambda () (view-tag 8)))\n"
--"(bind-key \"M-9\" (lambda () (view-tag 9)))\n"
--"\n"
--";; Move window to tag (Shift+number gives symbols on US keyboard)\n"
--"(bind-key \"M-S-exclam\" (lambda () (tag-window 1)))\n"
--"(bind-key \"M-S-at\" (lambda () (tag-window 2)))\n"
--"(bind-key \"M-S-numbersign\" (lambda () (tag-window 3)))\n"
--"(bind-key \"M-S-dollar\" (lambda () (tag-window 4)))\n"
--"(bind-key \"M-S-percent\" (lambda () (tag-window 5)))\n"
--"(bind-key \"M-S-asciicircum\" (lambda () (tag-window 6)))\n"
--"(bind-key \"M-S-ampersand\" (lambda () (tag-window 7)))\n"
--"(bind-key \"M-S-asterisk\" (lambda () (tag-window 8)))\n"
--"(bind-key \"M-S-parenleft\" (lambda () (tag-window 9)))\n",
++
 +/* Network menu (WiFi / Bluetooth): a flat text list fed by netmenu_cmd */
 +static void
 +updatenetmenu(void)
@@ -11677,6 +11753,71 @@ index a1e049d..787e6ba 100644
 +								}
 +							}
 +						}
++
++						render_row_text(pixels, menu_width, menu_height, text_y,
++							nm, row_fg, mtext, is_selected,
++							netmenu_marquee_px, &netmenu_marquee_needed);
++						displayed++;
++				}
++			}
++		}
++	}
++	} /* else: password view */
++
++	/* Create or update the netmenu buffer */
++	if (!netmenu_buffer)
++		netmenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
++	wlr_scene_node_set_enabled(&netmenu_buffer->node, 1);
++	/* Position centered on the [N] bar button, below the bar */
++	if (selmon) {
++		int settings_center, audio_center, net_center;
++		bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
++		wlr_scene_node_set_position(&netmenu_buffer->node,
++			centered_menu_x(selmon, net_center, menu_width), selmon->m.y + cell_height);
++	} else {
++		wlr_scene_node_set_position(&netmenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
++	}
++	wlr_scene_buffer_set_buffer(netmenu_buffer, &tb->base);
++	/* Wake the scroll timer immediately so the marquee reacts without the
++	 * normal idle delay once a long row becomes selected. */
++	if (netmenu_marquee_needed)
++		wl_event_source_timer_update(scroll_timer, 33);
++	/* Don't drop - we're caching the buffer for reuse */
++}
+ 
+-";; Fullscreen and floating\n"
+-"(bind-key \"M-f\" (lambda () (toggle-fullscreen)))\n"
+-"(bind-key \"M-S-space\" (lambda () (toggle-floating)))\n"
+-"\n"
+-";; Tags 1-9\n"
+-"(bind-key \"M-1\" (lambda () (view-tag 1)))\n"
+-"(bind-key \"M-2\" (lambda () (view-tag 2)))\n"
+-"(bind-key \"M-3\" (lambda () (view-tag 3)))\n"
+-"(bind-key \"M-4\" (lambda () (view-tag 4)))\n"
+-"(bind-key \"M-5\" (lambda () (view-tag 5)))\n"
+-"(bind-key \"M-6\" (lambda () (view-tag 6)))\n"
+-"(bind-key \"M-7\" (lambda () (view-tag 7)))\n"
+-"(bind-key \"M-8\" (lambda () (view-tag 8)))\n"
+-"(bind-key \"M-9\" (lambda () (view-tag 9)))\n"
+-"\n"
+-";; Move window to tag (Shift+number gives symbols on US keyboard)\n"
+-"(bind-key \"M-S-exclam\" (lambda () (tag-window 1)))\n"
+-"(bind-key \"M-S-at\" (lambda () (tag-window 2)))\n"
+-"(bind-key \"M-S-numbersign\" (lambda () (tag-window 3)))\n"
+-"(bind-key \"M-S-dollar\" (lambda () (tag-window 4)))\n"
+-"(bind-key \"M-S-percent\" (lambda () (tag-window 5)))\n"
+-"(bind-key \"M-S-asciicircum\" (lambda () (tag-window 6)))\n"
+-"(bind-key \"M-S-ampersand\" (lambda () (tag-window 7)))\n"
+-"(bind-key \"M-S-asterisk\" (lambda () (tag-window 8)))\n"
+-"(bind-key \"M-S-parenleft\" (lambda () (tag-window 9)))\n",
++/* ==================== THEME MENU ====================
++ * A native, centered color picker. Level 1 picks which color to edit; level 2
++ * picks from a basic palette or types a custom #RRGGBB via the on-screen hex
++ * input. Changes apply immediately through the cfg_* variables, exactly like
++ * the Scheme setters (set-border-color, set-bar-color, ...). */
++enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT, TT_MENU, TT_MENU_TEXT };
++#define THEME_TARGET_COUNT 8
++#define THEME_PALETTE_COUNT 12
  
 -";; Refresh layout\n"
 -"(bind-key \"M-S-r\" (lambda () (refresh)))\n"
@@ -11792,46 +11933,6 @@ index a1e049d..787e6ba 100644
 -"\n"
 -"(log \"TurboWM config loaded!\")\n",
 -NULL
-+						render_row_text(pixels, menu_width, menu_height, text_y,
-+							nm, row_fg, mtext, is_selected,
-+							netmenu_marquee_px, &netmenu_marquee_needed);
-+						displayed++;
-+				}
-+			}
-+		}
-+	}
-+	} /* else: password view */
-+
-+	/* Create or update the netmenu buffer */
-+	if (!netmenu_buffer)
-+		netmenu_buffer = wlr_scene_buffer_create(layers[LyrTop], NULL);
-+	wlr_scene_node_set_enabled(&netmenu_buffer->node, 1);
-+	/* Position centered on the [N] bar button, below the bar */
-+	if (selmon) {
-+		int settings_center, audio_center, net_center;
-+		bar_button_centers(selmon, &settings_center, &audio_center, &net_center);
-+		wlr_scene_node_set_position(&netmenu_buffer->node,
-+			centered_menu_x(selmon, net_center, menu_width), selmon->m.y + cell_height);
-+	} else {
-+		wlr_scene_node_set_position(&netmenu_buffer->node, sgeom.x + sgeom.width - menu_width, sgeom.y + cell_height);
-+	}
-+	wlr_scene_buffer_set_buffer(netmenu_buffer, &tb->base);
-+	/* Wake the scroll timer immediately so the marquee reacts without the
-+	 * normal idle delay once a long row becomes selected. */
-+	if (netmenu_marquee_needed)
-+		wl_event_source_timer_update(scroll_timer, 33);
-+	/* Don't drop - we're caching the buffer for reuse */
-+}
-+
-+/* ==================== THEME MENU ====================
-+ * A native, centered color picker. Level 1 picks which color to edit; level 2
-+ * picks from a basic palette or types a custom #RRGGBB via the on-screen hex
-+ * input. Changes apply immediately through the cfg_* variables, exactly like
-+ * the Scheme setters (set-border-color, set-bar-color, ...). */
-+enum { TT_BORDER, TT_BORDER_LINE, TT_BAR, TT_BAR_TEXT, TT_BG, TT_BG_TEXT, TT_MENU, TT_MENU_TEXT };
-+#define THEME_TARGET_COUNT 8
-+#define THEME_PALETTE_COUNT 12
-+
 +static const char *const themetarget_names[THEME_TARGET_COUNT] = {
 +	"Marco", "Lineas", "Barra",
 +	"BarraTxt", "Fondo", "Texto",
@@ -11910,16 +12011,55 @@ index a1e049d..787e6ba 100644
  	FILE *f;
  
 -	if (!home || !sc)
--		return;
 +	if (!home)
-+		return;
-+
-+	snprintf(dir, sizeof(dir), "%s/.config/tbwm", home);
+ 		return;
+ 
+ 	snprintf(dir, sizeof(dir), "%s/.config/tbwm", home);
+-	snprintf(path, sizeof(path), "%s/config.scm", dir);
+-	
+-	f = fopen(path, "r");
 +	snprintf(path, sizeof(path), "%s/theme.scm", dir);
 +	mkdir(dir, 0755);
 +
 +f = fopen(path, "w");
-+	if (!f) {
+ 	if (!f) {
+-		/* Create default config */
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: creating default config at %s\n", path);
+-		
+-		/* Create directory */
+-		mkdir(dir, 0755);
+-		
+-		f = fopen(path, "w");
+-		if (f) {
+-			/* Write default config as multiple parts to avoid very-large single string literals */
+-			for (int i = 0; default_config_parts[i]; ++i)
+-				fputs(default_config_parts[i], f);
+-			fclose(f);
+-		} else {
+-			tbwm_log(TBWM_LOG_WARN, "tbwm: warning: could not create config file\n");
+-			/* Evaluate default config parts directly */
+-			for (int i = 0; default_config_parts[i]; ++i)
+-				s7_eval_c_string(sc, default_config_parts[i]);
+-			return;
+-		}
+-		f = fopen(path, "r");
+-	} 
+-	
+-	if (f) {
+-		fclose(f);
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: loading config from %s\n", path);
+-		/* Clear existing Scheme and mouse bindings first to avoid duplicates on reload */
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: clearing %d scheme bindings and %d mouse bindings before loading config\n", scheme_binding_count, cfg_mouse_binding_count);
+-		unbind_all_scheme_bindings();
+-		clear_mouse_bindings_internal();
+-		s7_load(sc, path);
+-		/* Ensure arrow swap bindings exist (guard against config truncation/parsing issues) */
+-		file_debug_log("tbwm-scm: ensuring M-S-Left/Right/Up/Down are bound\n");
+-		s7_eval_c_string(sc, "(bind-key \"M-S-Left\" (lambda () (swap-dir DIR-LEFT)))");
+-		s7_eval_c_string(sc, "(bind-key \"M-S-Right\" (lambda () (swap-dir DIR-RIGHT)))");
+-		s7_eval_c_string(sc, "(bind-key \"M-S-Up\" (lambda () (swap-dir DIR-UP)))");
+-		s7_eval_c_string(sc, "(bind-key \"M-S-Down\" (lambda () (swap-dir DIR-DOWN)))");
+-	} 
 +		tbwm_log(TBWM_LOG_WARN, "tbwm-theme: could not write %s\n", path);
 +		return;
 +	}
@@ -11945,8 +12085,9 @@ index a1e049d..787e6ba 100644
 +#undef THEME_PERSIST_COLOR
 +	fclose(f);
 +	tbwm_log(TBWM_LOG_INFO, "tbwm-theme: persisted theme to %s\n", path);
-+}
-+
+ }
+ 
+-/* ==================== END SCHEME BINDINGS ==================== */
 +/* Draw one content row. `row` is 0-based content line under the title bar.
 + * If swatch stays non-NULL, paint a swatch on the right edge. */
 +static void
@@ -11997,7 +12138,40 @@ index a1e049d..787e6ba 100644
 +	char title[40];
 +	int content_rows = menu_cells_h - 2;
 +	Monitor *m;
-+
+ 
+-static const char *foot_config =
+-"# tbwm foot configuration\n"
+-"\n"
+-"[main]\n"
+-"font=PxPlus IBM VGA 8x16:size=12\n"
+-"\n"
+-"[colors]\n"
+-"# Classic DOS/VGA color scheme\n"
+-"background=000000\n"
+-"foreground=aaaaaa\n"
+-"\n"
+-"## Normal/regular colors (0-7)\n"
+-"regular0=000000  # black\n"
+-"regular1=aa0000  # red\n"
+-"regular2=00aa00  # green\n"
+-"regular3=aa5500  # yellow/brown\n"
+-"regular4=0000aa  # blue\n"
+-"regular5=aa00aa  # magenta\n"
+-"regular6=00aaaa  # cyan\n"
+-"regular7=aaaaaa  # white\n"
+-"\n"
+-"## Bright colors (8-15)\n"
+-"bright0=555555  # bright black\n"
+-"bright1=ff5555  # bright red\n"
+-"bright2=55ff55  # bright green\n"
+-"bright3=ffff55  # bright yellow\n"
+-"bright4=5555ff  # bright blue\n"
+-"bright5=ff55ff  # bright magenta\n"
+-"bright6=55ffff  # bright cyan\n"
+-"bright7=ffffff  # bright white\n"
+-"\n"
+-"[tweak]\n"
+-"font-monospace-warn=no\n";
 +	if (!thememenu_active) {
 +		if (thememenu_buffer)
 +			wlr_scene_node_set_enabled(&thememenu_buffer->node, 0);
@@ -12171,10 +12345,18 @@ index a1e049d..787e6ba 100644
 +	wlr_scene_buffer_set_buffer(thememenu_buffer, &tb->base);
 +	/* buffer is cached for reuse; do not drop */
 +}
-+
-+static void
+ 
+ static void
+-setup_foot_config(void)
 +thememenu_reset_nav(void)
-+{
+ {
+-	char path[1024], dir[512], backup[1024];
+-	char fontdir[512], fontsrc[512], fontdst[1024];
+-	const char *home = getenv("HOME");
+-	FILE *f, *src, *dst;
+-	struct stat st;
+-	char buf[4096];
+-	size_t n;
 +	thememenu_scroll_offset = 0;
 +	thememenu_selected_row = 0;
 +	thememenu_hex_len = 0;
@@ -12184,7 +12366,9 @@ index a1e049d..787e6ba 100644
 +	thememenu_alpha_len = 0;
 +	thememenu_alpha_buf[0] = '\0';
 +}
-+
+ 
+-	if (!home)
+-		return;
 +static void
 +thememenu_open_palette(int target)
 +{
@@ -12194,7 +12378,11 @@ index a1e049d..787e6ba 100644
 +	thememenu_reset_nav();
 +	updatethememenu();
 +}
-+
+ 
+-	/* Install font if needed */
+-	snprintf(fontdir, sizeof(fontdir), "%s/.local/share/fonts", home);
+-	snprintf(fontsrc, sizeof(fontsrc), "%s/PxPlus_IBM_VGA_8x16.ttf", home);
+-	snprintf(fontdst, sizeof(fontdst), "%s/PxPlus_IBM_VGA_8x16.ttf", fontdir);
 +static void
 +thememenu_open_targets(void)
 +{
@@ -12203,7 +12391,14 @@ index a1e049d..787e6ba 100644
 +	thememenu_reset_nav();
 +	updatethememenu();
 +}
-+
+ 
+-	if (stat(fontdst, &st) != 0 && stat(fontsrc, &st) == 0) {
+-		/* Create font directory */
+-		snprintf(path, sizeof(path), "%s/.local", home);
+-		mkdir(path, 0755);
+-		snprintf(path, sizeof(path), "%s/.local/share", home);
+-		mkdir(path, 0755);
+-		mkdir(fontdir, 0755);
 +static void
 +thememenu_close(void)
 +{
@@ -12214,7 +12409,16 @@ index a1e049d..787e6ba 100644
 +	updatethememenu();
 +	updatebars();
 +}
-+
+ 
+-		/* Copy font file */
+-		src = fopen(fontsrc, "rb");
+-		if (src) {
+-			dst = fopen(fontdst, "wb");
+-			if (dst) {
+-				while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
+-					fwrite(buf, 1, n, dst);
+-				fclose(dst);
+-				tbwm_log(TBWM_LOG_INFO, "tbwm: installed font to %s\n", fontdst);
 +static void
 +togglethememenu(const Arg *arg)
 +{
@@ -12229,7 +12433,12 @@ index a1e049d..787e6ba 100644
 +	updatethememenu();
 +	updatebars();
 +}
-+
+ 
+-				/* Update font cache */
+-				if (fork() == 0) {
+-					execlp("fc-cache", "fc-cache", "-f", fontdir, NULL);
+-					_exit(1);
+-				}
 +static int
 +thememenu_key(xkb_keysym_t sym)
 +{
@@ -12261,10 +12470,11 @@ index a1e049d..787e6ba 100644
 +				thememenu_hex_active = 0;
 +				thememenu_hex_len = 0;
 +				thememenu_hex[0] = '\0';
-+			}
+ 			}
+-			fclose(src);
 +			updatethememenu();
 +			return 1;
-+		}
+ 		}
 +		if ((sym >= XKB_KEY_a && sym <= XKB_KEY_f) ||
 +		    (sym >= XKB_KEY_A && sym <= XKB_KEY_F) ||
 +		    (sym >= XKB_KEY_0 && sym <= XKB_KEY_9) ||
@@ -12285,8 +12495,16 @@ index a1e049d..787e6ba 100644
 +			return 1;
 +		}
 +		return 1; /* consume everything while typing */
-+	}
-+
+ 	}
+ 
+-	/* Setup foot config */
+-	snprintf(dir, sizeof(dir), "%s/.config/foot", home);
+-	snprintf(path, sizeof(path), "%s/foot.ini", dir);
+-	snprintf(backup, sizeof(backup), "%s/foot.ini.tbwm-backup", dir);
+-
+-	/* Create directory if needed */
+-	if (stat(dir, &st) != 0)
+-		mkdir(dir, 0755);
 +	/* Custom alpha input mode: consume digits (0-100) */
 +	if (thememenu_alpha_active) {
 +		if (sym == XKB_KEY_Escape) {
@@ -12327,7 +12545,11 @@ index a1e049d..787e6ba 100644
 +		}
 +		return 1; /* consume everything while typing */
 +	}
-+
+ 
+-	/* Back up existing config if it exists and no backup exists yet */
+-	if (stat(path, &st) == 0 && stat(backup, &st) != 0) {
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: backing up existing foot.ini to %s\n", backup);
+-		rename(path, backup);
 +	if (sym == XKB_KEY_Escape) {
 +		if (thememenu_alpha_mode || thememenu_palette_mode)
 +			thememenu_open_targets();
@@ -12410,63 +12632,40 @@ index a1e049d..787e6ba 100644
 +			updatethememenu();
 +		}
 +		return 1;
-+	}
-+
-+	return 0; /* let the toggle binding still work for Escape-like keys */
-+}
+ 	}
  
--	snprintf(dir, sizeof(dir), "%s/.config/tbwm", home);
--	snprintf(path, sizeof(path), "%s/config.scm", dir);
--	
--	f = fopen(path, "r");
--	if (!f) {
--		/* Create default config */
--		tbwm_log(TBWM_LOG_INFO, "tbwm: creating default config at %s\n", path);
--		
--		/* Create directory */
--		mkdir(dir, 0755);
--		
--		f = fopen(path, "w");
--		if (f) {
--			/* Write default config as multiple parts to avoid very-large single string literals */
--			for (int i = 0; default_config_parts[i]; ++i)
--				fputs(default_config_parts[i], f);
--			fclose(f);
--		} else {
--			tbwm_log(TBWM_LOG_WARN, "tbwm: warning: could not create config file\n");
--			/* Evaluate default config parts directly */
--			for (int i = 0; default_config_parts[i]; ++i)
--				s7_eval_c_string(sc, default_config_parts[i]);
--			return;
--		}
--		f = fopen(path, "r");
--	} 
--	
+-	/* Write our config */
+-	f = fopen(path, "w");
 -	if (f) {
+-		fputs(foot_config, f);
 -		fclose(f);
--		tbwm_log(TBWM_LOG_INFO, "tbwm: loading config from %s\n", path);
--		/* Clear existing Scheme and mouse bindings first to avoid duplicates on reload */
--		tbwm_log(TBWM_LOG_INFO, "tbwm: clearing %d scheme bindings and %d mouse bindings before loading config\n", scheme_binding_count, cfg_mouse_binding_count);
--		unbind_all_scheme_bindings();
--		clear_mouse_bindings_internal();
--		s7_load(sc, path);
--		/* Ensure arrow swap bindings exist (guard against config truncation/parsing issues) */
--		file_debug_log("tbwm-scm: ensuring M-S-Left/Right/Up/Down are bound\n");
--		s7_eval_c_string(sc, "(bind-key \"M-S-Left\" (lambda () (swap-dir DIR-LEFT)))");
--		s7_eval_c_string(sc, "(bind-key \"M-S-Right\" (lambda () (swap-dir DIR-RIGHT)))");
--		s7_eval_c_string(sc, "(bind-key \"M-S-Up\" (lambda () (swap-dir DIR-UP)))");
--		s7_eval_c_string(sc, "(bind-key \"M-S-Down\" (lambda () (swap-dir DIR-DOWN)))");
+-		tbwm_log(TBWM_LOG_INFO, "tbwm: installed foot config at %s\n", path);
+-	} else {
+-		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: could not write foot config\n");
 -	} 
++	return 0; /* let the toggle binding still work for Escape-like keys */
+ }
+ 
+-static int
+-app_compare(const void *a, const void *b)
 +/* Scheme function: (toggle-thememenu) */
 +static s7_pointer
 +scm_toggle_thememenu(s7_scheme *sc, s7_pointer args)
-+{
+ {
+-	return strcmp(*(const char **)a, *(const char **)b);
 +	(void)args;
 +	togglethememenu(NULL);
 +	return s7_t(sc);
  }
  
--/* ==================== END SCHEME BINDINGS ==================== */
+-void
+-buildappcache(void)
+-{
+-	char *path, *path_copy, *dir;
+-	DIR *d;
+-	struct dirent *ent;
+-	int capacity = 256;
+-	int i, j, dup;
 +/* ==================== TRAY MENU ====================
 + * A native system-tray menu (opened with [S] / M-S-s). Level 0 lists the
 + * minimized background apps (Discord, Spotify, Steam...) that expose a
@@ -12479,57 +12678,21 @@ index a1e049d..787e6ba 100644
 + * declared at the top of this file; the function bodies live here (after all
 + * dialogs), so only a few prototypes are needed above. */
  
--static const char *foot_config =
--"# tbwm foot configuration\n"
--"\n"
--"[main]\n"
--"font=PxPlus IBM VGA 8x16:size=12\n"
--"\n"
--"[colors]\n"
--"# Classic DOS/VGA color scheme\n"
--"background=000000\n"
--"foreground=aaaaaa\n"
--"\n"
--"## Normal/regular colors (0-7)\n"
--"regular0=000000  # black\n"
--"regular1=aa0000  # red\n"
--"regular2=00aa00  # green\n"
--"regular3=aa5500  # yellow/brown\n"
--"regular4=0000aa  # blue\n"
--"regular5=aa00aa  # magenta\n"
--"regular6=00aaaa  # cyan\n"
--"regular7=aaaaaa  # white\n"
--"\n"
--"## Bright colors (8-15)\n"
--"bright0=555555  # bright black\n"
--"bright1=ff5555  # bright red\n"
--"bright2=55ff55  # bright green\n"
--"bright3=ffff55  # bright yellow\n"
--"bright4=5555ff  # bright blue\n"
--"bright5=ff55ff  # bright magenta\n"
--"bright6=55ffff  # bright cyan\n"
--"bright7=ffffff  # bright white\n"
--"\n"
--"[tweak]\n"
--"font-monospace-warn=no\n";
+-	if (app_cache) {
+-		for (i = 0; i < app_cache_count; i++)
+-			free(app_cache[i]);
+-		free(app_cache);
+-	}
 +/* ---- tree helpers ---- */
  
- static void
--setup_foot_config(void)
+-	app_cache = ecalloc(capacity, sizeof(char *));
+-	app_cache_count = 0;
++static void
 +tray_node_free(TrayNode *n)
- {
--	char path[1024], dir[512], backup[1024];
--	char fontdir[512], fontsrc[512], fontdst[1024];
--	const char *home = getenv("HOME");
--	FILE *f, *src, *dst;
--	struct stat st;
--	char buf[4096];
--	size_t n;
--
--	if (!home)
++{
 +	TrayNode *c, *nc;
 +	if (!n)
- 		return;
++		return;
 +	free(n->label);
 +	for (c = n->children; c; c = nc) {
 +		nc = c->sibling;
@@ -12538,15 +12701,13 @@ index a1e049d..787e6ba 100644
 +	free(n);
 +}
  
--	/* Install font if needed */
--	snprintf(fontdir, sizeof(fontdir), "%s/.local/share/fonts", home);
--	snprintf(fontsrc, sizeof(fontsrc), "%s/PxPlus_IBM_VGA_8x16.ttf", home);
--	snprintf(fontdst, sizeof(fontdst), "%s/PxPlus_IBM_VGA_8x16.ttf", fontdir);
+-	path = getenv("PATH");
+-	if (!path)
 +static void
 +tray_item_free_helper(TrayItem *it)
 +{
 +	if (!it)
-+		return;
+ 		return;
 +	free(it->display);
 +	free(it->busname);
 +	free(it->itempath);
@@ -12555,13 +12716,31 @@ index a1e049d..787e6ba 100644
 +	free(it);
 +}
  
--	if (stat(fontdst, &st) != 0 && stat(fontsrc, &st) == 0) {
--		/* Create font directory */
--		snprintf(path, sizeof(path), "%s/.local", home);
--		mkdir(path, 0755);
--		snprintf(path, sizeof(path), "%s/.local/share", home);
--		mkdir(path, 0755);
--		mkdir(fontdir, 0755);
+-	path_copy = strdup(path);
+-	dir = strtok(path_copy, ":");
+-	while (dir) {
+-		d = opendir(dir);
+-		if (d) {
+-			while ((ent = readdir(d))) {
+-				if (ent->d_name[0] == '.')
+-					continue;
+-				/* Check for duplicates */
+-				dup = 0;
+-				for (j = 0; j < app_cache_count; j++) {
+-					if (strcmp(app_cache[j], ent->d_name) == 0) {
+-						dup = 1;
+-						break;
+-					}
+-				}
+-				if (dup)
+-					continue;
+-				if (app_cache_count >= capacity) {
+-					size_t new_capacity = capacity * 2;
+-					char **tmp = realloc(app_cache, new_capacity * sizeof(char *));
+-					if (!tmp) {
+-						 tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
+-						/* stop adding further entries to avoid inconsistent state */
+-						break;
 +/* Recursively parse a dbusmenu GetLayout item array into sibling nodes.
 + * `arr` must be an iterator over child structs (id, props dict, child array).
 + * depth guards against a hostile/buggy service nesting menus forever and
@@ -12570,16 +12749,7 @@ index a1e049d..787e6ba 100644
 +tray_parse_items(DBusMessageIter *arr, TrayNode *parent, int depth, int *budget)
 +{
 +	TrayNode *head = NULL, *last = NULL;
- 
--		/* Copy font file */
--		src = fopen(fontsrc, "rb");
--		if (src) {
--			dst = fopen(fontdst, "wb");
--			if (dst) {
--				while ((n = fread(buf, 1, sizeof(buf), src)) > 0)
--					fwrite(buf, 1, n, dst);
--				fclose(dst);
--				tbwm_log(TBWM_LOG_INFO, "tbwm: installed font to %s\n", fontdst);
++
 +	if (depth > 8 || (budget && *budget <= 0))
 +		return NULL;
 +	while (dbus_message_iter_get_arg_type(arr) == DBUS_TYPE_VARIANT ||
@@ -12594,11 +12764,7 @@ index a1e049d..787e6ba 100644
 +			free(n);
 +			break;
 +		}
- 
--				/* Update font cache */
--				if (fork() == 0) {
--					execlp("fc-cache", "fc-cache", "-f", fontdir, NULL);
--					_exit(1);
++
 +		n->parent = parent;
 +		n->enabled = 1;
 +		n->checked = -1;
@@ -12659,34 +12825,34 @@ index a1e049d..787e6ba 100644
 +					} else if (key && strcmp(key, "visible") == 0 &&
 +					    dbus_message_iter_get_arg_type(&val) == DBUS_TYPE_BOOLEAN) {
 +						dbus_message_iter_get_basic(&val, &n->is_visible);
-+					}
+ 					}
+-					app_cache = tmp;
+-					capacity = new_capacity;
  				}
+-				app_cache[app_cache_count++] = strdup(ent->d_name);
 +				if (!dbus_message_iter_next(&prop))
 +					break;
  			}
--			fclose(src);
+-			closedir(d);
 +			/* toggle-type may come before or after toggle-state in the
 +			 * dict (bus order is arbitrary); resolve only once both are
 +			 * seen. */
 +			if (has_toggle)
 +				n->checked = toggle_state;
  		}
+-		dir = strtok(NULL, ":");
 -	}
+-	free(path_copy);
  
--	/* Setup foot config */
--	snprintf(dir, sizeof(dir), "%s/.config/foot", home);
--	snprintf(path, sizeof(path), "%s/foot.ini", dir);
--	snprintf(backup, sizeof(backup), "%s/foot.ini.tbwm-backup", dir);
+-	qsort(app_cache, app_cache_count, sizeof(char *), app_compare);
+-	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
 +		/* children array */
 +		if (dbus_message_iter_next(&st) &&
 +		    dbus_message_iter_get_arg_type(&st) == DBUS_TYPE_ARRAY) {
 +			dbus_message_iter_recurse(&st, &kids);
 +			n->children = tray_parse_items(&kids, n, depth + 1, budget);
 +		}
- 
--	/* Create directory if needed */
--	if (stat(dir, &st) != 0)
--		mkdir(dir, 0755);
++
 +		if (!n->label) {
 +			char idbuf[16];
 +			snprintf(idbuf, sizeof(idbuf), "(item %d)", n->id);
@@ -12697,62 +12863,41 @@ index a1e049d..787e6ba 100644
 +			for (n->child_count = 0, c = n->children; c; c = c->sibling)
 +				n->child_count++;
 +		}
- 
--	/* Back up existing config if it exists and no backup exists yet */
--	if (stat(path, &st) == 0 && stat(backup, &st) != 0) {
--		tbwm_log(TBWM_LOG_INFO, "tbwm: backing up existing foot.ini to %s\n", backup);
--		rename(path, backup);
--	}
++
 +		if (last)
 +			last->sibling = n;
 +		else
 +			head = n;
 +		last = n;
- 
--	/* Write our config */
--	f = fopen(path, "w");
--	if (f) {
--		fputs(foot_config, f);
--		fclose(f);
--		tbwm_log(TBWM_LOG_INFO, "tbwm: installed foot config at %s\n", path);
--	} else {
--		tbwm_log(TBWM_LOG_WARN, "tbwm: warning: could not write foot config\n");
--	} 
++
 +		if (!dbus_message_iter_next(arr))
 +			break;
 +	}
 +	return head;
  }
  
+-int
+-timingtimer(void *data)
 +/* Fetch and parse an app's full dbusmenu tree. Returns 1 on success. */
- static int
--app_compare(const void *a, const void *b)
++static int
 +tray_fetch_menu(TrayItem *it)
  {
--	return strcmp(*(const char **)a, *(const char **)b);
--}
+-	/* Report CPU timing statistics every 500ms */
+-	fprintf(stderr, "[TIMING TICK]\n");
+-	fflush(stderr);
+-	timing_report();
+-	wl_event_source_timer_update(timing_timer, 500);
+-	return 0;
 +	DBusMessage *msg, *reply;
 +	DBusMessageIter body, layout, arr;
 +	char *srv = it->busname;
 +	TrayNode *c;
- 
--void
--buildappcache(void)
--{
--	char *path, *path_copy, *dir;
--	DIR *d;
--	struct dirent *ent;
--	int capacity = 256;
--	int i, j, dup;
++
 +	if (it->no_menu || it->dead)
 +		return 0;
 +	if (!srv || !it->menupath || it->menupath[0] != '/')
 +		return 0;
- 
--	if (app_cache) {
--		for (i = 0; i < app_cache_count; i++)
--			free(app_cache[i]);
--		free(app_cache);
++
 +	msg = dbus_message_new_method_call(srv, it->menupath,
 +		"com.canonical.dbusmenu", "GetLayout");
 +	if (!msg)
@@ -12772,43 +12917,8 @@ index a1e049d..787e6ba 100644
 +	if (!reply) {
 +		tbwm_log(TBWM_LOG_DEBUG, "tray: %s: GetLayout failed\n", it->display);
 +		return 0;
- 	}
- 
--	app_cache = ecalloc(capacity, sizeof(char *));
--	app_cache_count = 0;
--
--	path = getenv("PATH");
--	if (!path)
--		return;
--
--	path_copy = strdup(path);
--	dir = strtok(path_copy, ":");
--	while (dir) {
--		d = opendir(dir);
--		if (d) {
--			while ((ent = readdir(d))) {
--				if (ent->d_name[0] == '.')
--					continue;
--				/* Check for duplicates */
--				dup = 0;
--				for (j = 0; j < app_cache_count; j++) {
--					if (strcmp(app_cache[j], ent->d_name) == 0) {
--						dup = 1;
--						break;
--					}
--				}
--				if (dup)
--					continue;
--				if (app_cache_count >= capacity) {
--					size_t new_capacity = capacity * 2;
--					char **tmp = realloc(app_cache, new_capacity * sizeof(char *));
--					if (!tmp) {
--						 tbwm_log(TBWM_LOG_WARN, "tbwm: warning: cannot grow app cache to %zu entries: %s\n", new_capacity, strerror(errno));
--						/* stop adding further entries to avoid inconsistent state */
--						break;
--					}
--					app_cache = tmp;
--					capacity = new_capacity;
++	}
++
 +	/* body: (uint32 revision, struct{ int32 id, a{sv} props, av children }) */
 +	tray_node_free(it->menuroot);
 +	it->menuroot = NULL;
@@ -12831,35 +12941,26 @@ index a1e049d..787e6ba 100644
 +					it->menuroot->children = tray_parse_items(&arr, it->menuroot, 0, &budget);
 +					for (c = it->menuroot->children; c; c = c->sibling)
 +						it->menuroot->child_count++;
- 				}
--				app_cache[app_cache_count++] = strdup(ent->d_name);
- 			}
--			closedir(d);
- 		}
--		dir = strtok(NULL, ":");
- 	}
--	free(path_copy);
--
--	qsort(app_cache, app_cache_count, sizeof(char *), app_compare);
--	tbwm_log(TBWM_LOG_INFO, "Built app cache: %d entries", app_cache_count);
++				}
++			}
++		}
++	}
 +	dbus_message_unref(reply);
 +	tbwm_log(TBWM_LOG_INFO, "tray: %s menu fetched\n", it->display);
 +	return it->menuroot != NULL;
  }
  
 -int
--timingtimer(void *data)
+-bartimer(void *data)
 +/* ---- DBus helpers ---- */
 +
 +/* read a single org.freedesktop.DBus.Properties.Get reply (one string) */
 +static char *
 +tray_prop_get_string(DBusMessage *reply)
  {
--	/* Report CPU timing statistics every 500ms */
--	fprintf(stderr, "[TIMING TICK]\n");
--	fflush(stderr);
--	timing_report();
--	wl_event_source_timer_update(timing_timer, 500);
+-	/* Used for clock updates */
+-	updatebars();
+-	wl_event_source_timer_update(bar_timer, 1000);
 -	return 0;
 +	DBusMessageIter args, variant;
 +	char *out = NULL;
@@ -12877,7 +12978,7 @@ index a1e049d..787e6ba 100644
  }
  
 -int
--bartimer(void *data)
+-scrolltimer(void *data)
 +/* Extract the title field from a ToolTip property reply. The ToolTip is a
 + * (sa(iiay)ss) struct: icon name (s), pixmap array (a(iiay)), title (s),
 + * subtitle (s). Electron/Chromium leaves Title empty and puts the app name
@@ -12885,13 +12986,23 @@ index a1e049d..787e6ba 100644
 +static char *
 +tray_prop_get_tooltip_title(DBusMessage *reply)
  {
--	/* Used for clock updates */
--	updatebars();
--	wl_event_source_timer_update(bar_timer, 1000);
--	return 0;
+-	Client *c;
+-	int scroll_count = 0;
+-    
+-	/* Handle smooth scrolling for window titlebars and top-bar tabs.
+-	 * Dynamically detect whether anything needs scrolling so we always
+-	 * run the fast tick while any title/tab is scrolling. */
+-	if (!title_scroll_mode) {
+-		wl_event_source_timer_update(scroll_timer, 100);
+-		return 0;
+-	}
 +	DBusMessageIter args, variant, st;
 +	int i;
-+
+ 
+-	/* Detect whether any client or top-bar tab needs scrolling now. */
+-	int needs_scroll = 0;
+-	wl_list_for_each(c, &clients, link) {
+-		if (c->needs_title_scroll) { needs_scroll = 1; break; }
 +	if (!reply)
 +		return NULL;
 +	if (!(dbus_message_iter_init(reply, &args) &&
@@ -12923,17 +13034,25 @@ index a1e049d..787e6ba 100644
 +					out[i] = ' ';
 +			return out;
 +		}
-+	}
+ 	}
+-	if (!needs_scroll) {
+-		/* Check top-bar tabs per monitor */
+-		Monitor *m;
+-		wl_list_for_each(m, &mons, link) {
+-			int visible_count = 0;
+-			Client *cc;
+-			wl_list_for_each(cc, &clients, link) {
+-				if (VISIBLEON(cc, m)) visible_count++;
+-			}
+-			if (visible_count <= 0) continue;
 +	return NULL;
- }
++}
 +static DBusMessage *
 +tray_prop_get(TrayItem *it, const char *prop)
 +{
 +	DBusMessage *msg, *reply;
 +	const char *iface = "org.kde.StatusNotifierItem";
- 
--int
--scrolltimer(void *data)
++
 +	if (!tray_dbus || !it || it->dead || !it->busname || !it->busname[0] ||
 +	    !it->itempath || it->itempath[0] != '/')
 +		return NULL;
@@ -12949,77 +13068,24 @@ index a1e049d..787e6ba 100644
 +	dbus_message_unref(msg);
 +	return reply;
 +}
-+
+ 
+-			int width = m->m.width;
+-			int n = 30 * cell_width; /* reserved for date/time */
+-			int tab_area_width = width - /* x start unknown here; approximate */ (n + cell_width*10);
+-			if (tab_area_width <= 0) continue;
 +/* ---- item lifecycle ---- */
-+
+ 
+-			int max_tab_chars = 20;
+-			int tab_width_cells = max_tab_chars + 2;
 +static int
 +tray_dedupe_name(const char *name)
- {
--	Client *c;
--	int scroll_count = 0;
--    
--	/* Handle smooth scrolling for window titlebars and top-bar tabs.
--	 * Dynamically detect whether anything needs scrolling so we always
--	 * run the fast tick while any title/tab is scrolling. */
--	if (!title_scroll_mode) {
--		wl_event_source_timer_update(scroll_timer, 100);
--		return 0;
--	}
++{
 +	int count = 1;
 +	TrayItem *p;
 +	for (p = tray_items; p; p = p->next)
 +		if (p->display && strcmp(p->display, name) == 0)
 +			count++;
 +	return count;
-+}
-+
-+static void
-+tray_add_item(const char *service, const char *path)
-+{
-+	TrayItem *it, *p;
- 
--	/* Detect whether any client or top-bar tab needs scrolling now. */
--	int needs_scroll = 0;
--	wl_list_for_each(c, &clients, link) {
--		if (c->needs_title_scroll) { needs_scroll = 1; break; }
--	}
--	if (!needs_scroll) {
--		/* Check top-bar tabs per monitor */
--		Monitor *m;
--		wl_list_for_each(m, &mons, link) {
--			int visible_count = 0;
--			Client *cc;
--			wl_list_for_each(cc, &clients, link) {
--				if (VISIBLEON(cc, m)) visible_count++;
--			}
--			if (visible_count <= 0) continue;
-+	if (!tray_dbus || !service || !path || !service[0] || !path[0])
-+		return;
-+	for (p = tray_items; p; p = p->next)
-+		if (strcmp(p->busname, service) == 0 && strcmp(p->itempath, path) == 0)
-+			return;
- 
--			int width = m->m.width;
--			int n = 30 * cell_width; /* reserved for date/time */
--			int tab_area_width = width - /* x start unknown here; approximate */ (n + cell_width*10);
--			if (tab_area_width <= 0) continue;
-+	it = calloc(1, sizeof(*it));
-+	it->busname = strdup(service);
-+	it->itempath = strdup(path);
-+	/* register immediately with the well-known name as a stand-in; the real
-+	 * Title/Id/Menu properties are fetched offline, from tray_resolve_items(),
-+	 * because we may be inside a D-Bus dispatch callback here and a blocking
-+	 * property call there would re-enter libdbus (assert/crash). */
-+	it->display = strdup(service);
-+	it->resolved = 0;
- 
--			int max_tab_chars = 20;
--			int tab_width_cells = max_tab_chars + 2;
-+	it->next = tray_items;
-+	tray_items = it;
-+	tray_items_count++;
-+	tray_needs_redraw = 1;
-+	tbwm_log(TBWM_LOG_INFO, "tray: + %s (%s) [pending]\n", it->display, it->busname);
 +}
  
 -			wl_list_for_each(cc, &clients, link) {
@@ -13031,6 +13097,34 @@ index a1e049d..787e6ba 100644
 -				if (title_len > title_max - 1) { needs_scroll = 1; break; }
 -			}
 -			if (needs_scroll) break;
++static void
++tray_add_item(const char *service, const char *path)
++{
++	TrayItem *it, *p;
++
++	if (!tray_dbus || !service || !path || !service[0] || !path[0])
++		return;
++	for (p = tray_items; p; p = p->next)
++		if (strcmp(p->busname, service) == 0 && strcmp(p->itempath, path) == 0)
++			return;
++
++	it = calloc(1, sizeof(*it));
++	it->busname = strdup(service);
++	it->itempath = strdup(path);
++	/* register immediately with the well-known name as a stand-in; the real
++	 * Title/Id/Menu properties are fetched offline, from tray_resolve_items(),
++	 * because we may be inside a D-Bus dispatch callback here and a blocking
++	 * property call there would re-enter libdbus (assert/crash). */
++	it->display = strdup(service);
++	it->resolved = 0;
++
++	it->next = tray_items;
++	tray_items = it;
++	tray_items_count++;
++	tray_needs_redraw = 1;
++	tbwm_log(TBWM_LOG_INFO, "tray: + %s (%s) [pending]\n", it->display, it->busname);
++}
++
 +static void
 +tray_remove_item_service(const char *service)
 +{
@@ -13111,7 +13205,7 @@ index a1e049d..787e6ba 100644
 +	msg = dbus_message_new_method_call(service, path,
 +		"org.freedesktop.DBus.Introspectable", "Introspect");
 +	if (!msg)
- 		return 0;
++		return 0;
 +	reply = dbus_connection_send_with_reply_and_block(tray_dbus, msg, 1000, NULL);
 +	dbus_message_unref(msg);
 +	if (reply) {
@@ -13126,7 +13220,7 @@ index a1e049d..787e6ba 100644
 +		dbus_message_unref(reply);
 +	}
 +	if (!xml)
-+		return 0;
+ 		return 0;
 +	if (strstr(xml, needle)) {
 +		*out = strdup(path);
 +		free(xml);
@@ -13251,7 +13345,6 @@ index a1e049d..787e6ba 100644
 -	launcher_input[0] = '\0';
 -	launcher_input_len = 0;
 -	updatebars();
--}
 +retry:
 +	r = tray_prop_get(it, "Title");
 +	title = tray_prop_get_string(r);
@@ -13307,28 +13400,50 @@ index a1e049d..787e6ba 100644
 +		it->no_menu = 1;
 +	if (menu)
 +		free(menu);
- 
--void
--togglerepl(const Arg *arg)
--{
--	repl_input_active = !repl_input_active;
--	repl_input[0] = '\0';
--	repl_input_len = 0;
--	updatebars();
--	updaterepl();
++
 +	it->resolved = 1;
 +	tray_needs_redraw = 1;
 +	tbwm_log(TBWM_LOG_INFO, "tray: resolved %s (%s)%s\n", it->display, it->busname,
 +		it->no_menu ? " [no menu]" : "");
  }
  
--/* Map freedesktop category to simplified category */
--static const char *
--map_category(const char *cats)
+-void
+-togglerepl(const Arg *arg)
 +/* Fetch Title/Id/Menu for items whose props are still unknown. Runs from the
 + * main loop timer, never from a D-Bus dispatch callback. */
 +static void
 +tray_resolve_items(void)
+ {
+-	repl_input_active = !repl_input_active;
+-	repl_input[0] = '\0';
+-	repl_input_len = 0;
+-	updatebars();
+-	updaterepl();
++	static TrayItem *next = NULL;
++	TrayItem *it;
++
++	if (!next || next->dead) {
++		next = tray_items;
++		if (!next)
++			return;
++	}
++	for (it = next; it; it = it->next) {
++		next = it;
++		if (it->resolved || it->dead)
++			continue;
++		tray_resolve_one(it);
++		next = it->next ? it->next : tray_items;
++		break;
++	}
++	if (!it)
++		next = tray_items;
+ }
+ 
+-/* Map freedesktop category to simplified category */
+-static const char *
+-map_category(const char *cats)
++static void
++tray_cleanup(void)
  {
 -	if (!cats) return "Other";
 -	if (strstr(cats, "AudioVideo") || strstr(cats, "Audio") || strstr(cats, "Video"))
@@ -13350,31 +13465,27 @@ index a1e049d..787e6ba 100644
 -	if (strstr(cats, "Education") || strstr(cats, "Science"))
 -		return "Education";
 -	return "Other";
-+	static TrayItem *next = NULL;
-+	TrayItem *it;
-+
-+	if (!next || next->dead) {
-+		next = tray_items;
-+		if (!next)
-+			return;
++	TrayItem *it, *nit;
++	for (it = tray_items; it; it = nit) {
++		nit = it->next;
++		tray_item_free_helper(it);
 +	}
-+	for (it = next; it; it = it->next) {
-+		next = it;
-+		if (it->resolved || it->dead)
-+			continue;
-+		tray_resolve_one(it);
-+		next = it->next ? it->next : tray_items;
-+		break;
-+	}
-+	if (!it)
-+		next = tray_items;
++	tray_items = NULL;
++	tray_items_count = 0;
++	traymenu_active = 0;
++	tray_cur_item = NULL;
++	tray_cur_node = NULL;
++	tray_level = 0;
  }
  
 -/* Find or create category, returns index */
 -static int
 -find_or_create_category(const char *name)
++/* ---- watcher object (org.kde.StatusNotifierWatcher) ---- */
++
 +static void
-+tray_cleanup(void)
++tray_send_error(DBusConnection *conn, DBusMessage *msg, const char *name,
++                const char *text)
  {
 -	int i;
 -	for (i = 0; i < category_count; i++) {
@@ -13386,105 +13497,17 @@ index a1e049d..787e6ba 100644
 -		categories[category_count].name[CAT_NAME_LEN - 1] = '\0';
 -		categories[category_count].app_count = 0;
 -		return category_count++;
-+	TrayItem *it, *nit;
-+	for (it = tray_items; it; it = nit) {
-+		nit = it->next;
-+		tray_item_free_helper(it);
- 	}
--	return -1;
-+	tray_items = NULL;
-+	tray_items_count = 0;
-+	traymenu_active = 0;
-+	tray_cur_item = NULL;
-+	tray_cur_node = NULL;
-+	tray_level = 0;
- }
- 
--/* Parse a single .desktop file */
-+/* ---- watcher object (org.kde.StatusNotifierWatcher) ---- */
-+
- static void
--parse_desktop_file(const char *path)
-+tray_send_error(DBusConnection *conn, DBusMessage *msg, const char *name,
-+                const char *text)
- {
--	FILE *f;
--	char line[512];
--	char name[APP_NAME_LEN] = "";
--	char exec[APP_EXEC_LEN] = "";
--	char cats[256] = "";
--	int nodisplay = 0;
--	int in_desktop_entry = 0;
--	
--	f = fopen(path, "r");
--	if (!f) return;
--	
--	while (fgets(line, sizeof(line), f)) {
--		/* Remove newline */
--		line[strcspn(line, "\n")] = 0;
--		
--		if (strcmp(line, "[Desktop Entry]") == 0) {
--			in_desktop_entry = 1;
--			continue;
--		}
--		if (line[0] == '[') {
--			in_desktop_entry = 0;
--			continue;
--		}
--		if (!in_desktop_entry) continue;
--		
--		if (strncmp(line, "Name=", 5) == 0 && name[0] == '\0') {
--			strncpy(name, line + 5, APP_NAME_LEN - 1);
--			name[APP_NAME_LEN - 1] = '\0';
--		} else if (strncmp(line, "Exec=", 5) == 0) {
--			/* Copy exec, removing %f %F %u %U etc */
--			char *src = line + 5;
--			char *dst = exec;
--			char *end = exec + APP_EXEC_LEN - 1;
--			while (*src && dst < end) {
--				if (*src == '%' && src[1]) {
--					src += 2; /* skip %X */
--				} else {
--					*dst++ = *src++;
--				}
--			}
--			*dst = '\0';
--			/* Trim trailing spaces */
--			while (dst > exec && dst[-1] == ' ') *--dst = '\0';
--		} else if (strncmp(line, "Categories=", 11) == 0) {
--			strncpy(cats, line + 11, sizeof(cats) - 1);
--			cats[sizeof(cats) - 1] = '\0';
--		} else if (strncmp(line, "NoDisplay=true", 14) == 0) {
--			nodisplay = 1;
--		} else if (strncmp(line, "Hidden=true", 11) == 0) {
--			nodisplay = 1;
--		}
 +	DBusMessage *reply = dbus_message_new_error(msg, name, text);
 +	if (reply) {
 +		dbus_connection_send(conn, reply, NULL);
 +		dbus_message_unref(reply);
  	}
--	fclose(f);
--	
--	/* Add to list if valid */
--	if (name[0] && exec[0] && !nodisplay && app_entry_count < MAX_APPS) {
--		const char *cat = map_category(cats);
--		int cat_idx = find_or_create_category(cat);
--		
--		strncpy(app_entries[app_entry_count].name, name, APP_NAME_LEN - 1);
--		app_entries[app_entry_count].name[APP_NAME_LEN - 1] = '\0';
--		strncpy(app_entries[app_entry_count].exec, exec, APP_EXEC_LEN - 1);
--		app_entries[app_entry_count].exec[APP_EXEC_LEN - 1] = '\0';
--		strncpy(app_entries[app_entry_count].category, cat, CAT_NAME_LEN - 1);
--		app_entries[app_entry_count].category[CAT_NAME_LEN - 1] = '\0';
--		
--		if (cat_idx >= 0)
--			categories[cat_idx].app_count++;
--		
--		app_entry_count++;
-+}
-+
-+static void
+-	return -1;
+ }
+ 
+-/* Parse a single .desktop file */
+ static void
+-parse_desktop_file(const char *path)
 +tray_send_empty_reply(DBusConnection *conn, DBusMessage *msg)
 +{
 +	DBusMessage *reply = dbus_message_new_method_return(msg);
@@ -13538,7 +13561,28 @@ index a1e049d..787e6ba 100644
 +/* Append the registered services as an "as" array to the iterator. */
 +static void
 +tray_watcher_append_items(DBusMessageIter *it)
-+{
+ {
+-	FILE *f;
+-	char line[512];
+-	char name[APP_NAME_LEN] = "";
+-	char exec[APP_EXEC_LEN] = "";
+-	char cats[256] = "";
+-	int nodisplay = 0;
+-	int in_desktop_entry = 0;
+-	
+-	f = fopen(path, "r");
+-	if (!f) return;
+-	
+-	while (fgets(line, sizeof(line), f)) {
+-		/* Remove newline */
+-		line[strcspn(line, "\n")] = 0;
+-		
+-		if (strcmp(line, "[Desktop Entry]") == 0) {
+-			in_desktop_entry = 1;
+-			continue;
+-		}
+-		if (line[0] == '[') {
+-			in_desktop_entry = 0;
 +	TrayItem *p;
 +	DBusMessageIter array;
 +
@@ -13546,30 +13590,62 @@ index a1e049d..787e6ba 100644
 +		DBUS_TYPE_STRING_AS_STRING, &array);
 +	for (p = tray_items; p; p = p->next) {
 +		if (p->dead || !p->busname || !p->busname[0])
-+			continue;
+ 			continue;
+-		}
+-		if (!in_desktop_entry) continue;
+-		
+-		if (strncmp(line, "Name=", 5) == 0 && name[0] == '\0') {
+-			strncpy(name, line + 5, APP_NAME_LEN - 1);
+-			name[APP_NAME_LEN - 1] = '\0';
+-		} else if (strncmp(line, "Exec=", 5) == 0) {
+-			/* Copy exec, removing %f %F %u %U etc */
+-			char *src = line + 5;
+-			char *dst = exec;
+-			char *end = exec + APP_EXEC_LEN - 1;
+-			while (*src && dst < end) {
+-				if (*src == '%' && src[1]) {
+-					src += 2; /* skip %X */
+-				} else {
+-					*dst++ = *src++;
+-				}
+-			}
+-			*dst = '\0';
+-			/* Trim trailing spaces */
+-			while (dst > exec && dst[-1] == ' ') *--dst = '\0';
+-		} else if (strncmp(line, "Categories=", 11) == 0) {
+-			strncpy(cats, line + 11, sizeof(cats) - 1);
+-			cats[sizeof(cats) - 1] = '\0';
+-		} else if (strncmp(line, "NoDisplay=true", 14) == 0) {
+-			nodisplay = 1;
+-		} else if (strncmp(line, "Hidden=true", 11) == 0) {
+-			nodisplay = 1;
+-		}
 +		dbus_message_iter_append_basic(&array, DBUS_TYPE_STRING, &p->busname);
  	}
+-	fclose(f);
+-	
+-	/* Add to list if valid */
+-	if (name[0] && exec[0] && !nodisplay && app_entry_count < MAX_APPS) {
+-		const char *cat = map_category(cats);
+-		int cat_idx = find_or_create_category(cat);
+-		
+-		strncpy(app_entries[app_entry_count].name, name, APP_NAME_LEN - 1);
+-		app_entries[app_entry_count].name[APP_NAME_LEN - 1] = '\0';
+-		strncpy(app_entries[app_entry_count].exec, exec, APP_EXEC_LEN - 1);
+-		app_entries[app_entry_count].exec[APP_EXEC_LEN - 1] = '\0';
+-		strncpy(app_entries[app_entry_count].category, cat, CAT_NAME_LEN - 1);
+-		app_entries[app_entry_count].category[CAT_NAME_LEN - 1] = '\0';
+-		
+-		if (cat_idx >= 0)
+-			categories[cat_idx].app_count++;
+-		
+-		app_entry_count++;
 +	dbus_message_iter_close_container(it, &array);
- }
- 
--/* Scan directory for .desktop files */
++}
++
 +/* Send an org.freedesktop.DBus.Properties reply with one property in a
 + * variant. Returns 1 on success (reply sent or unhandled prop reported). */
- static void
--scan_desktop_dir(const char *dir)
--{
--	DIR *d;
--	struct dirent *entry;
--	char path[512];
--	
--	d = opendir(dir);
--	if (!d) return;
--	
--	while ((entry = readdir(d)) != NULL) {
--		int len = strlen(entry->d_name);
--		if (len > 8 && strcmp(entry->d_name + len - 8, ".desktop") == 0) {
--			snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
--			parse_desktop_file(path);
++static void
 +tray_watcher_prop_get(DBusConnection *conn, DBusMessage *msg,
 +                      const char *interface, const char *property)
 +{
@@ -13604,12 +13680,27 @@ index a1e049d..787e6ba 100644
 +		tray_send_error(conn, msg, "org.freedesktop.DBus.Error.UnknownProperty",
 +			"unknown property");
 +		return;
-+	}
+ 	}
 +	dbus_connection_send(conn, reply, NULL);
 +	dbus_message_unref(reply);
-+}
-+
-+static void
+ }
+ 
+-/* Scan directory for .desktop files */
+ static void
+-scan_desktop_dir(const char *dir)
+-{
+-	DIR *d;
+-	struct dirent *entry;
+-	char path[512];
+-	
+-	d = opendir(dir);
+-	if (!d) return;
+-	
+-	while ((entry = readdir(d)) != NULL) {
+-		int len = strlen(entry->d_name);
+-		if (len > 8 && strcmp(entry->d_name + len - 8, ".desktop") == 0) {
+-			snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
+-			parse_desktop_file(path);
 +tray_watcher_prop_get_all(DBusConnection *conn, DBusMessage *msg, const char *interface)
 +{
 +	DBusMessage *reply;
@@ -14390,10 +14481,7 @@ index a1e049d..787e6ba 100644
 +		updatetraymenu();
 +		updatebars();
 +		return 1;
- 	}
--	/* Bottom edge ═ */
--	for (col = 1; col < menu_cells_w - 1; col++) {
--		render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, (menu_cells_h - 1) * cell_height, 0x2550, line_color);
++	}
 +	if (sym == XKB_KEY_Left || sym == XKB_KEY_h || sym == XKB_KEY_BackSpace) {
 +		if (tray_level > 0) {
 +			tray_level--;
@@ -14401,24 +14489,52 @@ index a1e049d..787e6ba 100644
 +			updatetraymenu();
 +		}
 +		return 1;
- 	}
--	/* Left edge ║ */
--	for (row = 1; row < menu_cells_h - 1; row++) {
--		render_char_to_buffer(pixels, menu_width, menu_height, 0, row * cell_height, 0x2551, line_color);
++	}
 +	if (sym == XKB_KEY_Up || sym == XKB_KEY_k) {
 +		if (tray_row > 0)
 +			tray_row--;
 +		updatetraymenu();
 +		return 1;
  	}
--	/* Right edge ║ */
--	for (row = 1; row < menu_cells_h - 1; row++) {
--		render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
+-	/* Bottom edge ═ */
+-	for (col = 1; col < menu_cells_w - 1; col++) {
+-		render_char_to_buffer(pixels, menu_width, menu_height, col * cell_width, (menu_cells_h - 1) * cell_height, 0x2550, line_color);
 +	if (sym == XKB_KEY_Down || sym == XKB_KEY_j) {
 +		if (tray_row < items - 1)
 +			tray_row++;
 +		updatetraymenu();
 +		return 1;
+ 	}
+-	/* Left edge ║ */
+-	for (row = 1; row < menu_cells_h - 1; row++) {
+-		render_char_to_buffer(pixels, menu_width, menu_height, 0, row * cell_height, 0x2551, line_color);
++	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
++	    sym == XKB_KEY_Right || sym == XKB_KEY_l) {
++		tray_enter_row(tray_row);
++		return 1;
+ 	}
+-	/* Right edge ║ */
+-	for (row = 1; row < menu_cells_h - 1; row++) {
+-		render_char_to_buffer(pixels, menu_width, menu_height, (menu_cells_w - 1) * cell_width, row * cell_height, 0x2551, line_color);
++	return 0;
++}
++
++/* ---- setup / dbus pump ---- */
++
++static int
++tray_timer_cb(void *data)
++{
++	(void)data;
++	if (tray_dbus)
++		dbus_connection_read_write_dispatch(tray_dbus, 0);
++	/* Property lookups and item freeing are only safe here, after dispatch
++	 * has fully unwound (never inside a message handler). */
++	tray_resolve_items();
++	tray_prune_dead();
++	if (tray_needs_redraw) {
++		tray_needs_redraw = 0;
++		updatetraymenu();
++		updatebars();
  	}
 -	
 -	/* Draw content: categories or apps */
@@ -14519,31 +14635,6 @@ index a1e049d..787e6ba 100644
 -					}
 -					app_idx++;
 -				}
-+	if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter ||
-+	    sym == XKB_KEY_Right || sym == XKB_KEY_l) {
-+		tray_enter_row(tray_row);
-+		return 1;
-+	}
-+	return 0;
-+}
-+
-+/* ---- setup / dbus pump ---- */
-+
-+static int
-+tray_timer_cb(void *data)
-+{
-+	(void)data;
-+	if (tray_dbus)
-+		dbus_connection_read_write_dispatch(tray_dbus, 0);
-+	/* Property lookups and item freeing are only safe here, after dispatch
-+	 * has fully unwound (never inside a message handler). */
-+	tray_resolve_items();
-+	tray_prune_dead();
-+	if (tray_needs_redraw) {
-+		tray_needs_redraw = 0;
-+		updatetraymenu();
-+		updatebars();
-+	}
 +	if (tray_timer)
 +		wl_event_source_timer_update(tray_timer, 100);
 +	return 1;
@@ -14670,7 +14761,8 @@ index a1e049d..787e6ba 100644
 +	const char *msg = "\n=== tbwm crash (signal ";
 +
 +	dprintf(2, "%s%d%s", msg, sig, ") ===\n");
-+	fd = open(TBWM_CRASH_LOG, O_WRONLY | O_CREAT | O_APPEND, 0644);
++	const char *crash_log = crash_log_path();
++	fd = (crash_log) ? open(crash_log, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
 +	if (fd < 0)
 +		goto out;
 +	w += dprintf(fd, "\n=== tbwm crash (signal %d) at %ld ===\n", sig,
@@ -14707,7 +14799,7 @@ index a1e049d..787e6ba 100644
  }
  
  /* Key helper: reload configuration (wrapper so we can bind it in C defaults) */
-@@ -7412,9 +13389,11 @@ replkey(xkb_keysym_t sym)
+@@ -7412,9 +13446,11 @@ replkey(xkb_keysym_t sym)
  {
  	if (sym == XKB_KEY_Escape) {
  		repl_input_active = 0;
@@ -14719,7 +14811,7 @@ index a1e049d..787e6ba 100644
  		return 1;
  	}
  
-@@ -7497,7 +13476,7 @@ updaterepl(void)
+@@ -7497,7 +13533,7 @@ updaterepl(void)
  
  		/* Fill with background color */
  		for (i = 0; i < width * height; i++)
@@ -14728,7 +14820,7 @@ index a1e049d..787e6ba 100644
  
  		/* Calculate visible lines (leave space for bar at top) */
  		visible_lines = (height - cell_height) / cell_height;
-@@ -7596,7 +13575,7 @@ updatebar(Monitor *m)
+@@ -7596,7 +13632,7 @@ updatebar(Monitor *m)
  	/* Fill background - skip if scroll-only update */
  	if (!scroll_only_bar_update) {
  		for (i = 0; i < width * cell_height; i++)
@@ -14737,7 +14829,7 @@ index a1e049d..787e6ba 100644
  	}
  
  	x = 0;
-@@ -7643,37 +13622,37 @@ updatebar(Monitor *m)
+@@ -7643,37 +13679,37 @@ updatebar(Monitor *m)
  		if (launcher_input_len > 0) {
  			shown = 0;
  			for (i = 0; i < app_cache_count && x < width - cell_width; i++) {
@@ -14800,7 +14892,7 @@ index a1e049d..787e6ba 100644
  			}
  		}
  	} else {
-@@ -7687,7 +13666,7 @@ updatebar(Monitor *m)
+@@ -7687,7 +13723,7 @@ updatebar(Monitor *m)
  				fg = RGB_TO_ARGB(cfg_bar_color);
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + btn_cells * cell_width && px < width; px++) {
@@ -14809,7 +14901,7 @@ index a1e049d..787e6ba 100644
  					}
  				}
  			} else {
-@@ -7726,7 +13705,7 @@ updatebar(Monitor *m)
+@@ -7726,7 +13762,7 @@ updatebar(Monitor *m)
  			if (bg != RGB_TO_ARGB(cfg_bar_color)) {
  				for (py = 0; py < cell_height; py++) {
  					for (px = x; px < x + 3 * cell_width && px < width; px++) {
@@ -14818,7 +14910,7 @@ index a1e049d..787e6ba 100644
  					}
  				}
  			}
-@@ -7809,7 +13788,7 @@ render_tabs:
+@@ -7809,7 +13845,7 @@ render_tabs:
  				if (is_focused || (scroll_only_bar_update && needs_scroll)) {
  					for (py = 0; py < cell_height; py++) {
  						for (px = x; px < x + actual_tab_width && px < width; px++) {
@@ -14827,7 +14919,7 @@ index a1e049d..787e6ba 100644
  						}
  					}
  				}
-@@ -7884,66 +13863,207 @@ render_tabs:
+@@ -7884,66 +13920,207 @@ render_tabs:
  		if (scroll_only_bar_update)
  			goto bar_done;
  
@@ -15076,7 +15168,7 @@ index a1e049d..787e6ba 100644
  				}
  			}
  		}
-@@ -8204,12 +14324,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8204,12 +14381,13 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -15091,7 +15183,7 @@ index a1e049d..787e6ba 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8222,11 +14343,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8222,11 +14400,18 @@ render_char_to_buffer(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			px = x + cg->bitmap_left + gx;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -15115,7 +15207,7 @@ index a1e049d..787e6ba 100644
  		}
  	}
  }
-@@ -8238,12 +14366,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8238,12 +14423,13 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  {
  	CachedGlyph *cg;
  	int gx, gy, px, py;
@@ -15130,7 +15222,7 @@ index a1e049d..787e6ba 100644
  	r = (color >> 16) & 0xFF;
  	g = (color >> 8) & 0xFF;
  	b = color & 0xFF;
-@@ -8256,11 +14385,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
+@@ -8256,11 +14442,18 @@ render_char_clipped(uint32_t *pixels, int buf_w, int buf_h, int x, int y,
  			if (px < clip_left || px >= clip_right) continue;
  			if (px < 0 || px >= buf_w) continue;
  			v = cg->bitmap[gy * cg->pitch + gx];
@@ -15154,7 +15246,7 @@ index a1e049d..787e6ba 100644
  		}
  	}
  }
-@@ -8305,7 +14441,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
+@@ -8305,7 +14498,7 @@ ensure_scroll_title_buffer(Client *c, const char *title, uint32_t fg_color, uint
  	
  	pixels = c->scroll_title_pixels;
  	for (i = 0; i < total_width * cell_height; i++)
@@ -15163,7 +15255,7 @@ index a1e049d..787e6ba 100644
  	
  	/* Render title characters TWICE (uses glyph cache - fast) */
  	pos = 0;
-@@ -8572,7 +14708,7 @@ updateframe(Client *c)
+@@ -8572,7 +14765,7 @@ updateframe(Client *c)
  	
  	/* Clear buffer */
  	for (i = 0; i < width * cell_height; i++)
@@ -15172,7 +15264,7 @@ index a1e049d..787e6ba 100644
  
  	/* Format: ╔═ title ═╗ with horizontal lines filling the rest */
  	render_char_to_buffer(pixels, width, cell_height, 0, 0, tl_char, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8774,7 +14910,7 @@ updateframe(Client *c)
+@@ -8774,7 +14967,7 @@ updateframe(Client *c)
  		
  		/* Clear buffer */
  		for (i = 0; i < width * cell_height; i++)
@@ -15181,7 +15273,7 @@ index a1e049d..787e6ba 100644
  
  		render_char_to_buffer(pixels, width, cell_height, 0, 0, bl_char, RGB_TO_ARGB(cfg_border_line_color));
  		
-@@ -8812,7 +14948,7 @@ updateframe(Client *c)
+@@ -8812,7 +15005,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -15190,7 +15282,7 @@ index a1e049d..787e6ba 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -8847,7 +14983,7 @@ updateframe(Client *c)
+@@ -8847,7 +15040,7 @@ updateframe(Client *c)
  			
  			/* Clear buffer */
  			for (i = 0; i < cell_width * side_height; i++)
@@ -15199,7 +15291,26 @@ index a1e049d..787e6ba 100644
  
  			for (i = 0; i < rows; i++)
  				render_char_to_buffer(pixels, cell_width, side_height, 0, i * cell_height, v_line, RGB_TO_ARGB(cfg_border_line_color));
-@@ -9377,8 +15513,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9142,6 +15335,18 @@ unmapnotify(struct wl_listener *listener, void *data)
+ 		c->frame_right_buf = NULL;
+ 	}
+ 
++	/* Detach scroll buffers before destroying the scene node - scroll_scene_buf
++	 * is a child of c->scene, so touching it after the destroy would be a
++	 * use-after-free. Mirrors the frame_* pattern above. */
++	if (c->scroll_scene_buf) {
++		wlr_scene_buffer_set_buffer(c->scroll_scene_buf, NULL);
++		c->scroll_scene_buf = NULL;
++	}
++	if (c->scroll_buf) {
++		wlr_buffer_drop(&c->scroll_buf->base);
++		c->scroll_buf = NULL;
++	}
++
+ 	wlr_scene_node_destroy(&c->scene->node);
+ 
+ 	/* Recompute layers/usable-area after client removal so layer ordering
+@@ -9377,8 +15582,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		if (!(node = wlr_scene_node_at(&layers[layer]->node, x, y, nx, ny)))
  			continue;
  
@@ -15208,7 +15319,7 @@ index a1e049d..787e6ba 100644
  		if (node->type == WLR_SCENE_NODE_BUFFER) {
  			struct wlr_scene_surface *scene_surface = wlr_scene_surface_try_from_buffer(
  					wlr_scene_buffer_from_node(node));
-@@ -9394,8 +15528,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
+@@ -9394,8 +15597,6 @@ xytonode(double x, double y, struct wlr_surface **psurface,
  		}
  	}
  
@@ -15217,7 +15328,7 @@ index a1e049d..787e6ba 100644
  	if (psurface) *psurface = surface;
  	if (pc) *pc = c;
  	if (pl) *pl = l;
-@@ -9561,6 +15693,15 @@ main(int argc, char *argv[])
+@@ -9561,6 +15762,15 @@ main(int argc, char *argv[])
  	if (optind < argc)
  		goto usage;
  
