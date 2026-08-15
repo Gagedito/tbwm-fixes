@@ -52,7 +52,6 @@
 
 ;; Title bar scrolling for long titles
 (set-title-scroll-mode 1)   ; 1 = scroll, 0 = truncate with ...
-(set-title-scroll-speed 30) ; accepted but NOT applied - scroll is fixed (~30 px/s)
 
 ;;;; ==================== BEHAVIOR ====================
 
